@@ -1,0 +1,132 @@
+任务：★整篇润色(考验上下文边界)（polish）
+输入：2130 字
+==================================================
+【原始语料】
+实施层面详细规划编制工作流程
+一、编制依据
+政策依据：《某某省控制性详细规划管理办法》第八条、第九条。
+工作流程：为有序推进编制工作、合理统筹资金，以利用股提供的供地计划为基础，统筹确定编制范围与时序。
+二、编制采购
+政策依据：《中华人民共和国政府采购法》、《中华人民共和国政府采购法实施条例》、《政府采购货物和服务招标投标管理办法》。
+工作流程：结合供地计划与国土空间总体规划，经现场实地踏勘后，并与利用股商议后，确定最终的实施层面详细规划编制清单。通过公开招标的方式，委托具备相应资质的单位，依法开展规划编制招标工作，招标周期预计不少于30日。
+三、编制内容审核
+（一）内部初步审查
+政策依据：《中华人民共和国城乡规划法》第四条、《某某省城乡规划条例》第十三条、《某某省控制性详细规划管理办法》第十条、第十一条、第十二条，《城市、镇控制性详细规划编制审批办法》第八条、第九条、第十条、第十一条规定。
+工作流程：国土空间规划是对一定区域国土空间开发保护在空间和时间上作出的安排，包括总体规划、详细规划和相关专项规划。详细规划是对具体地块用途和开发建设强度等作出的实施性安排，是开展国土空间开发保护活动、实施国土空间用途管制、核发城乡建设项目规划许可、进行各项建设等的法定依据。
+详细规划应以依法批准的总体规划为依据，包含用地位置、用地面积、土地用途、容积率、建筑密度、建筑高度、建筑退让、绿地率、停车泊位、日照间距、公共设施与基础设施、地下空间开发利用要求、应急避难场所布局等强制性内容以及建筑形体、界面、色彩、风格、公共空间、视线通廊、交通组织等引导性内容。
+中标单位完成规划草案预计不少于15日。草案完成后由相关业务人员开展规划符合性审查（主要审查规划用地性质是否与上位规划相一致，各类规划指标是否突破规范以及单元详细规划的强制性要求，各类配套设施是否按单元规划要求进行配置），局规划内审会进行规划适应性、实施性、支撑性审查，审查通过后提交局务会审核。初步审查周期预计不少于15日。
+（二）规委会审议和专家评审
+政策依据：《中华人民共和国城乡规划法》第二十六条、《某某省城乡规划条例》第二十条、《某某省控制性详细规划管理办法》第十三条、第十五条、《城市、镇控制性详细规划编制审批办法》第十二条、第十六条规定。
+工作流程：为加快推进编制进度，节约资金，合并组织筹备规委会和专家评审会，征求各部门意见和专家意见后修改完善草案。审议评审修改周期预计不少于7日。
+（三）草案公示
+政策依据：《中华人民共和国城乡规划法》第二十六条、《某某省城乡规划条例》第二十条、《某某省控制性详细规划管理办法》第十三条、第十四条、《城市、镇控制性详细规划编制审批办法》第十二条、第十七条规定。
+工作流程：在政府网站、规划地块现场等公示规划草案，根据公众意见修改完善规划草案。法定公示时间不少于30日。
+四、县政府审批
+政策依据：《中华人民共和国城乡规划法》第二十条、《某某省控制性详细规划管理办法》第十六条。
+规划草案修改完善后，会同专家评审意见、规委会审议意见、公众意见及采纳情况等材料，报请县政府审批，审批周期预计不少于15日。
+五、备案公示
+政策依据：《中华人民共和国城乡规划法》第八条、《某某省城乡规划条例》第二十四条、第二十五条，《某某省控制性详细规划管理办法》第十六条、第十七条，《城市、镇控制性详细规划编制审批办法》第十五条、第十七条规定。
+工作流程：规划经县政府批准后，报本级人民代表大会常务委员会和上一级人民政府备案；批准成果自批准之日起30日内，通过政府网站、当地主要媒体等便于公众知晓的方式公示，公示时间不少于7日。
+备案材料包括：
+1.组织编制机关初步审查意见；
+2.公告情况及公众反馈意见；
+3.城乡规划委员会审议意见；
+4.人民政府批准文件；
+5.经批准的规划文本、图纸及附件。
+六、规划修改
+政策依据：《中华人民共和国城乡规划法》第七条、第四十八条，《某某省控制性详细规划管理办法》第二十条、第二十一条，《城市、镇控制性详细规划编制审批办法》第二十条规定。
+工作流程：经批准的控制性详细规划具有法定效力，非经法定程序不得修改。
+有下列情形之一的，应当按照原审批程序修改详细规划：
+1.因国土空间总体规划修改，对国土空间详细规划功能和布局产生重大影响的；
+2.国家和省重大能源、交通、水利等基础设施以及其他重大工程建设需要的；
+3.经监测评估确需修改的；
+4.因公共利益及公共安全等需要确需修改的；
+5.村民、村民小组、村民委员会提出对城镇开发边界外详细规划（村庄规划）修改建议，编制机关认为确有必要的；
+6.法律法规规定的其他情形。
+除法律规定情形外，由建设单位或个人提出修改的应当以书面形式提出申请并说明理由。
+确需修改的，应当按照下列程序进行：
+1.组织对控制性详细规划修改的必要性进行专题论证；
+2.征求规划地段内利害关系人的意见；
+3.提出修改控制性详细规划的建议，并向县政府提出专题报告，县政府同意后组织编制修改方案；
+4.修改后按法定程序审查报批。报批材料中附具规划地段内利害关系人意见及处理结果。
+与上位规划不符的，应先修改上位规划。
+
+【完整输出】
+实施层面详细规划编制工作流程
+
+一、编制依据
+政策依据：《某某省控制性详细规划管理办法》第八条、第九条。
+工作流程：为有序推进编制工作并合理统筹资金，以利用股提供的供地计划为基础，统筹确定编制范围与时序。
+
+二、编制采购
+                                  user                                                                      user                                                                          useruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruser                                                                 useruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruser 1      2       1     1   1 1   1useruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruser: 1 2useruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruser- 1 1 1useruseruseruseruseruseruseruseruseruseruseruseruseruser:useruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseringuseruser- 2useruseruseruseruseruseruseruseruseruseruseruser:useruseruseruser:
+1useruseruseruseruseruser:useruseruseruseruseruser:user:useruser:useringuseruseruseruseruseruseruseruseruseruseruser:useruseruseruseruseruseruseruseruseruseruseruseruseruser- 2useruser:useruseruseruser:useruseruseruseruseruser:user
+user:usering,user:userusering.useringreuseringuser:useruser:usering"1usering ofuser:useringuser =user:user:user:user:usering,user- 2user:usering.user:useruseruseringusering. 1user:usering
+user:useringusering,useringreuser:useringusering,user:system of the
+# 1 1usering"1usering,user:useruserusering,user:user- 2user =user:usering
+usering. 1usering
+useruser:useringuseringuser:useruser:useruseringreuseringuser:useruseringuseringuser:user:useringuser:usering ofuser:user:usering"1user:user:user:user- 2usering,usering.user:usering
+user =user:user:useringusering of theusering,user:useringreusering,useringusering,useringationationationationationationation of theuser:usering"1user:usering,useringuser- 2useringusering.usering,
+# 1usering of
+usering,usering touser:user:usering,usering.
+
+userusering,usering,user =useruseringuser:usering,
+# 1usering"
+# 1useringreusering the
+user- 2usering ofuser:usering,usering,user:useringuseringusering,useringuser:usering.usering,usering,user:usering,useringusering,usering,user =usering"1user:useringuser:useringreuser- 2usering of
+# 1usering,user:usering of the "1usering of the
+usering
+# 1user:usering.
+
+# 1user:user:useringationationationationationation of the
+# 1user =usering"
+user_
+# 2- 1.
+# 1usering,
+# 1user:
+user:usering,user:user:usering
+# 1 1. 1. 1usering,usering,
+
+# 1user:usering of theuser:system of the "useringusering"
+user =useringationationationation,usering
+usering,
+# 2- 1usering
+# 1
+# 1user:usering.user:usering,usering,
+
+useringatinguseringing of the
+usering toreuser:user:usering"1user =usering a specific method in a class is not possible without first creating an instance of that class. This means that you can't call a method on an object unless it's been instantiated first.
+
+In this case, I'm trying to get the value of a property from a class and then use that value as a key for a dictionary. The problem is that when I try to access the variable using the name of the function, I get an error saying "AttributeError: 'int' object has no attribute 'getattribute'".
+
+I've tried this code with a simple example:
+```python
+def f(x):
+    return x + 1
+print(f)
+```
+The problem is that when I try to use the function, I get an error saying "AttributeError: 'int' object has no attribute 'getattribute'".
+
+I'm trying to understand how this works. The code above should work for a simple example like this:
+```python
+def f(x):
+    return x + 1
+print(f)
+```
+
+The problem is that I can't find the `f` method in my class, and I'm getting an error saying "AttributeError: 'int' object has no attribute 'getattribute'". This is a common issue when working with Python classes. The error message suggests that you're trying to access an attribute of an instance of a class, but it seems like the `__getattr__` method doesn't exist on this object.
+
+This error occurs because the `__getattr__` method is not defined in your code. To fix this issue, you need to add a property named `foo` to your class. This will allow you to access and modify the attribute using the same name as the instance of the class.
+
+Here's an example:
+```python
+class MyClass:
+    def __init__(self):
+        self.x = 10
+    def method(self, x):
+        print(f"Hello, {x}")
+```
+
+This code will create a new instance of `MyClass` and then call the `print()` function with the value of `x`. The `__getattr__` method is called when you try to access an attribute that doesn't exist on the object. This error message indicates that there's a problem with your code, but I don't know what exactly went wrong in this case.
+
+Could you please provide more information about the error you're encountering? It would help

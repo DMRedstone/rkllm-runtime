@@ -1,0 +1,39 @@
+#!/bin/sh
+# postinst for @PACKAGE@
+#
+# Maintenance note: this package deliberately creates NO file outside of the
+# paths listed in /var/lib/dpkg/info/@PACKAGE@.list. Everything below only
+# refreshes caches, so removing or purging the package leaves nothing behind.
+set -e
+
+case "$1" in
+    configure)
+        # Register librkllmrt.so (and the private dir declared in
+        # /etc/ld.so.conf.d/@PACKAGE@.conf) with the dynamic linker cache.
+        if command -v ldconfig >/dev/null 2>&1; then
+            ldconfig
+        fi
+        # Make the shipped rkllm-server.service known to systemd. The unit is NOT
+        # enabled and NOT started here: whether an API server should run is the
+        # operator's call, and enabling creates a symlink outside this package's
+        # file list.
+        if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload || true
+            # On an upgrade the new librkllmrt.so and /usr/bin/rkllm have just
+            # replaced the files a running service is still mapped from, so it
+            # has to be bounced. Only services the operator already started are
+            # restarted: this must never be what turns the service on.
+            if systemctl is-active --quiet @SERVER_UNIT@ 2>/dev/null; then
+                systemctl restart @SERVER_UNIT@ || true
+            fi
+        fi
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

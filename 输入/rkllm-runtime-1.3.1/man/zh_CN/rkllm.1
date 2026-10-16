@@ -1,0 +1,366 @@
+.\" rkllm - RKLLM 运行时命令行前端（简体中文手册页）
+.\" 安装为 /usr/share/man/zh_CN/man1/rkllm.1.gz
+.TH RKLLM 1 "@DATE_ISO@" "rkllm-runtime @VERSION@" "用户命令"
+.SH 名称
+rkllm \- 在瑞芯微 NPU 上运行 .rkllm 模型：本地对话、单次推理，以及兼容 OpenAI 的 HTTP 接口
+.SH 用法概要
+.B rkllm
+.I 子命令
+.RI [ 选项 ]
+.br
+.B rkllm chat
+.I 模型
+.RI [ 选项 ]
+.br
+.B rkllm run
+.I 模型
+.I 提示词
+.RI [ 选项 ]
+.br
+.B rkllm serve
+.I 模型
+.RI [ 选项 ]
+.br
+.B rkllm list
+.RI [ 选项 ]
+.br
+.B rkllm info
+.RI [ 选项 ]
+.br
+.B rkllm selftest
+.RI [ 选项 ]
+.SH 描述
+.B rkllm
+是本包（
+.BR rkllm\-runtime ）
+所附 RKLLM 运行时的命令行前端。它通过 ctypes 直接调用
+.IR librkllmrt.so ，
+板上无需任何编译器，也无需从 PyPI 安装任何 Python 包——整个脚本只使用 Python 标准库。
+.PP
+运行时只能执行
+.I .rkllm
+文件，这类文件必须在 x86_64 主机上用 RKLLM 工具链转换得到。
+.I .rkllm
+与视觉模型格式
+.I .rknn
+完全不同，两者不可混用。
+.PP
+NPU 通过内核驱动
+.I rknpu
+访问；本包既不提供也不编译该驱动。可用
+.B rkllm info
+确认驱动是否可用。
+请注意：**0.9.x 及更新版本的驱动不会创建**
+.I /dev/rknpu
+——NPU 以 DRM render node 的形式注册
+.RI （ /dev/dri/renderD* ），
+因此应当查看
+.I /sys/kernel/debug/rknpu/version
+或某个 render node 的 driver 链接是否指向 rknpu，而不是去找设备节点。
+.SH 子命令
+.TP
+.B chat
+.I 模型
+交互式本地对话。从标准输入读取，生成过程中逐字输出答案。运行时内部保留对话上下文，
+因此每一行输入都是一次新对话轮次。
+.TP
+.B run
+.I 模型 文本 ...
+单次推理：把给定文本送进模型并把答案打印到标准输出，适合脚本调用。不保留上下文。
+.TP
+.B serve
+.I 模型
+在**前台**运行兼容 OpenAI 的 HTTP 接口。它不读取标准输入，也不提供交互提示符；
+启动横幅打印完毕之后终端保持安静属于正常现象。详见下方
+.B HTTP 接口
+一节。
+.TP
+.B list
+列出在模型搜索路径中找到的
+.I .rkllm
+文件；若一个都没找到，则打印搜索路径本身。
+.TP
+.B info
+报告识别到的 SoC、锁频辅助脚本、RKNPU 驱动状态、已加载的运行时库、
+模型搜索路径以及找到的模型。加
+.B \-\-json
+可得到机器可读输出。
+.TP
+.B selftest
+无需模型、无需 NPU 的端到端自检：用内置的替身引擎跑通参数处理、模型解析、HTTP 层、
+流式输出、鉴权与排队行为。需要真实库和 NPU 的检查项在缺硬件时显示为 SKIP 而不是 FAIL。
+.SH 选项
+选项写在子命令之后，顺序任意。
+.SS chat、run、serve 共有选项
+.TP
+.BI \-\-context " n"
+最大上下文长度（token 数）。默认 4096。**不要超过模型自身转换时支持的长度**——
+启动日志会以
+.I max_context_limit
+的形式打印该值。
+.TP
+.BI \-\-max\-new\-tokens " n"
+单次回答最多生成的 token 数。默认 2048。
+.TP
+.BI \-\-threads " n"
+用于推理的 CPU 核心数。默认 4。在 RK3588 与 RK3576 上使用四个大核（4\-7），
+其他 SoC 使用 0\-3。
+.TP
+.BI \-\-platform " soc"
+强制指定 SoC，可选
+.IR rk3588 、 rk3576 、 rk3562 、 rv1126b 。
+默认从
+.IR /proc/device\-tree/compatible
+自动识别。
+.TP
+.BI \-\-model\-dir " 目录"
+追加一个模型搜索目录，可重复指定。
+.TP
+.BI \-\-lib " 路径"
+指定
+.I librkllmrt.so
+的路径，便于用另一份构建做对照测试。
+.TP
+.B \-\-no\-freq\-lock
+运行前不提升 CPU/NPU/DDR 频率。锁频脚本仅在以 root 运行时才会被调用。
+.TP
+.BR \-\-quiet ", " \-q
+关闭启动横幅与逐请求日志。
+.SS 采样参数（chat、run、serve）
+.TP
+.BI \-\-top\-k " n"
+默认 1。
+.TP
+.BI \-\-top\-p " p"
+默认 0.9。
+.TP
+.BI \-\-temperature " t"
+默认 0.8。
+.TP
+.BI \-\-repeat\-penalty " r"
+默认 1.1。
+.SS chat 与 run 额外选项
+.TP
+.BI \-\-system " 提示词"
+交给模型自带对话模板的系统提示词。
+.TP
+.B \-\-no\-history
+不保留轮次之间的上下文。
+.SS serve 额外选项
+.TP
+.BI \-\-host " 地址"
+监听地址。默认 0.0.0.0（所有网卡）。只想本机访问可用 127.0.0.1。
+.TP
+.BI \-\-port " 端口"
+TCP 端口。默认 8080。
+.TP
+.BI \-\-api\-key " 密钥"
+要求所有端点携带
+.B Authorization: Bearer
+.I 密钥 ，
+否则返回 401。未给出该选项时回退到环境变量
+.BR RKLLM_API_KEY 。
+**建议使用环境变量**：写在命令行上的密钥会出现在
+.B ps
+和
+.BR "systemctl status" 的输出里。
+.TP
+.BI \-\-max\-queue " n"
+允许排队等待 NPU 的请求数，默认 32。正在推理的那个请求不占用这个额度。
+超出的请求直接返回 HTTP 503，并带
+.B Retry\-After
+头。
+.TP
+.BI \-\-queue\-timeout " 秒"
+请求等待 NPU 的最长时间，超时同样返回 503。默认 600 秒。
+.SS list 与 info 的选项
+.TP
+.B \-\-json
+以 JSON 而非文本输出报告。
+.SH 模型查找规则
+模型参数既可以是
+.I .rkllm
+文件的绝对或相对路径，也可以是裸名称。裸名称会按下面的顺序查找
+（同时尝试带与不带
+.I .rkllm
+后缀）：
+.PP
+.RS 4
+.B $RKLLM_MODEL_DIR
+（冒号分隔）、
+.IR /usr/share/rkllm\-runtime/models 、
+.IR /var/lib/rkllm/models 、
+.IR ~/.local/share/rkllm/models ，
+以及当前目录。
+.RE
+.PP
+这些目录**不由本包创建**，以保证卸载时不留痕迹；需要时请自行
+.BR mkdir \-p 。
+.SH HTTP 接口
+.TP
+.B GET /health
+服务状态：模型名、是否正在推理、等待中的请求数、运行时长与计数器。不触碰 NPU。
+.TP
+.B GET /v1/models
+OpenAI 格式的模型列表。
+.TP
+.B POST /v1/chat/completions
+兼容 OpenAI 的对话补全接口。接受
+.IR messages 、 model 、 stream 、 max_tokens 、 temperature 、
+.IR top_p 、 top_k 、 repeat_penalty 、 frequency_penalty 、
+.IR presence_penalty 、 enable_thinking 与 tools 。
+流式响应采用 Server\-Sent Events，以
+.I data: [DONE]
+结束。
+.TP
+.B POST /v1/reset
+清空对话上下文。
+.PP
+上述端点**同时接受不带
+.I /v1
+前缀的写法**，因为各家客户端对「base URL 里要不要带 /v1」并无共识。
+客户端的 base URL 建议填
+.IR http://主机:端口/v1 。
+.SH 鉴权
+未配置密钥时接口完全开放；一旦配置，所有端点都要求
+.B Authorization: Bearer
+.I 密钥 ，
+否则返回 401。密钥比较使用常量时间实现。
+.PP
+接口是明文 HTTP。密钥只能挡住误用与端口扫描，挡不住同网段抓包；
+板子若暴露在不可信网络，请在前面部署 TLS 反向代理。
+.SH 并发
+NPU 一次只服务一个请求。NPU 忙碌期间到达的请求会在长度不超过
+.B \-\-max\-queue
+的队列中等待，超出的请求返回 HTTP 503。
+.SH 环境变量
+.TP
+.B RKLLM_API_KEY
+供
+.B serve
+使用的 API 密钥。
+.TP
+.B RKLLM_MODEL_DIR
+额外的模型搜索目录，冒号分隔。
+.TP
+.B RKLLM_LIB
+.IR librkllmrt.so
+的路径。
+.TP
+.B RKLLM_<选项名>
+.B serve
+的每个选项都可以用环境变量预设：把选项名转成大写、连字符换成下划线、前面加
+.BR RKLLM_ ，
+例如
+.B RKLLM_TEMPERATURE
+对应
+.BR \-\-temperature 。
+命令行上显式给出的参数永远优先。值若解析失败，会在标准错误上报原因并改用内置默认值，
+因此配置文件里的一个手误不会让服务起不来。服务单元的配置文件正是靠这个机制生效。
+.TP
+.B SOURCE_DATE_EPOCH
+.B rkllm
+本身不使用，只影响 Debian 包的构建。
+.SH 相关文件
+.TP
+.I /usr/lib/<三元组>/librkllmrt.so
+运行时库。
+.TP
+.I /usr/include/rkllm/rkllm.h
+C 语言 API 头文件。
+.TP
+.I @SERVER_DEFAULTS@
+systemd 单元的配置，同时是本包的
+.B conffile
+（dpkg 配置文件）：本地修改在升级后保留，卸载时随包删除。里面为
+.B serve
+的每个参数都写了专用配置项，并附中英文说明。它由 systemd 解析而非 shell，
+因此不支持变量展开。改完执行
+.BR "systemctl restart @SERVER_UNIT@" 。
+.TP
+.I /usr/lib/systemd/system/@SERVER_UNIT@
+.B rkllm serve
+的服务单元。包会安装它，但**不会自动 enable 或 start**。
+.TP
+.I /usr/bin/rkllm\-fix\-freq\-<soc>
+以 root 身份调用的锁频辅助脚本。
+.SH 示例
+交互式对话：
+.PP
+.nf
+.RS 4
+rkllm chat qwen2.5\-1.5b
+rkllm chat /data/models/qwen2.5\-1.5b.rkllm
+.RE
+.fi
+.PP
+单次推理，适合写进脚本：
+.PP
+.nf
+.RS 4
+rkllm run qwen2.5\-1.5b "用一句话概括这段文字。"
+.RE
+.fi
+.PP
+带密钥启动 API 服务，然后在另一个终端请求：
+.PP
+.nf
+.RS 4
+rkllm serve /data/models/qwen2.5\-1.5b.rkllm \-\-host 0.0.0.0 \-\-port 8080 \-\-api\-key 我的密钥
+curl http://127.0.0.1:8080/v1/chat/completions \\
+  \-H 'Content\-Type: application/json' \\
+  \-H 'Authorization: Bearer 我的密钥' \\
+  \-d '{"messages":[{"role":"user","content":"你好"}]}'
+.RE
+.fi
+.PP
+同样的密钥改用环境变量传入，可以避免出现在
+.BR ps 里：
+.PP
+.nf
+.RS 4
+RKLLM_API_KEY=我的密钥 rkllm serve /data/models/qwen2.5\-1.5b.rkllm
+.RE
+.fi
+.PP
+在没有模型的情况下验证安装：
+.PP
+.nf
+.RS 4
+rkllm selftest
+rkllm info
+.RE
+.fi
+.SH 退出状态
+.TP
+.B 0
+成功。
+.TP
+.B 1
+运行时错误：找不到模型、库无法加载、推理失败。
+.TP
+.B 2
+未给出子命令，已打印用法。
+.TP
+.B 130
+在完成前被 Ctrl\-C 中断。
+.SH 注意事项
+prompt 若远超模型的上下文窗口，可能让运行时以 SIGSEGV 崩溃，并带走整个服务进程。
+因此超过「上下文长度 × 8 字节」的请求会在到达运行时之前就以 HTTP 400 拒绝。
+该检查是字节预算而非精确 token 计数，因为本脚本内没有分词器。
+.PP
+本脚本不对 prompt 分词，因此 API 响应中的
+.I usage
+统计是按空白切分估算的，**不要用于计费**。
+.SH 另请参阅
+.BR systemctl (1)、
+.BR curl (1)
+.PP
+SDK 自带文档安装在
+.IR /usr/share/doc/rkllm\-runtime/ ，
+上游示例源码在
+.IR /usr/share/rkllm\-runtime/examples/ 。
+.SH 作者
+本手册页随
+.B rkllm\-runtime
+Debian 包一同安装。

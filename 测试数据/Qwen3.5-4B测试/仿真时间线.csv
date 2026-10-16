@@ -1,0 +1,44 @@
+scenario,label,ok,elapsed_s,detail
+handshake,list_models,true,,['qwen3.5-4b_w8a8_rk3588']
+handshake,alive@handshake,true,,requests=0
+handshake,system_only_probe,true,,HTTP 200
+handshake,alive@connectivity probe,true,,requests=1
+handshake,empty_send,true,,HTTP 400 (rejected cleanly)
+handshake,alive@empty send,true,,requests=1
+conversation,turn 1,true,10.011,我是 Qwen3.5，阿里巴巴最新推出的通义千问大语言模型。我具备强大的逻辑推理、代码生成及多模态理解能力，能高效处理复
+conversation,alive@conversation turn 1,true,,requests=2
+conversation,turn 2,true,3.995,我是 Qwen3.5，阿里巴巴最新推出的通义千问大语言模型。
+conversation,alive@conversation turn 2,true,,requests=3
+conversation,turn 3,true,2.02,The weather is nice today.
+conversation,alive@conversation turn 3,true,,requests=4
+conversation,turn 4,true,1.815,今日は天気が良いです。
+conversation,alive@conversation turn 4,true,,requests=5
+paste,800 chars,true,15.462,该文档介绍了在 OrangePi 5 Plus（RK3588 芯片）上部署大语言模型时，需综合考虑内
+paste,alive@long paste 800 chars,true,,requests=6
+paste,3000 chars,true,37.371,该文档强调在 OrangePi 5 Plus（RK3588）上部署大模型需平衡内存、算力、量化精度及
+paste,alive@long paste 3000 chars,true,,requests=7
+paste,8000 chars,false,0.06,"HTTP 400 {""error"": {""message"": ""prompt too long: about 5959 tokens for a 4096-token context window"
+paste,alive@long paste 8000 chars,true,,requests=8
+paste,16000 chars,false,0.061,"HTTP 400 {""error"": {""message"": ""prompt too long: about 11862 tokens for a 4096-token context window"
+paste,alive@long paste 16000 chars,true,,requests=9
+interruption,abort_mid_stream,true,,5 chunks
+interruption,alive@after interruption,true,,requests=10
+session,reset,true,,HTTP 200
+session,fresh_chat,true,,"1. **北京香山**：深秋时节层林尽染，红枫与黄叶交相辉映，是观赏红叶的最佳胜地之一。  
+2. **云南元阳梯田**"
+session,alive@session switch,true,,requests=11
+background,chat_while_title,true,14.38,Python 中**列表（list）**是可变序列，可修改内容；**元组（tuple）**是不可变序列，创建后无法更改。
+background,title_request,true,,"{""isNewTopic"": true, ""title"": ""Python Quick Sort Implementation""}"
+background,alive@concurrent title generation,true,,requests=13
+mixed,vu=3,true,53.768,n=10 ok=10 wall=53.8s
+mixed,short_chat,true,4.709,杭州是一座以西湖美景、丝绸文化和南宋历史闻名的江南名城，兼具自然山水与人文底蕴。
+mixed,short_chat,true,8.638,杭州是浙江省省会，以西湖、丝绸和南宋文化著称的江南名城。
+mixed,short_chat,true,12.597,杭州是一座因西湖而闻名的历史文化名城，兼具自然美景与深厚人文底蕴。
+mixed,short_chat,true,11.016,杭州是浙江省省会，以西湖、丝绸和南宋文化著称的江南名城。
+mixed,short_chat,true,11.46,杭州是一座因西湖而闻名的历史文化名城，兼具自然美景与深厚人文底蕴。
+mixed,short_chat,true,10.603,杭州是浙江省省会，以西湖、丝绸和南宋文化著称的江南名城。
+mixed,summarise,true,21.946,在嵌入式设备上部署大模型面临严峻挑战：首先需**高带宽内存**（如 LPDDR5
+mixed,short_chat,true,21.134,杭州是浙江省省会，以西湖、丝绸和南宋文化著称的江南名城。
+mixed,title,true,22.932,"{""isNewTopic"": true, ""title"": ""杭州简介与 NPU"
+mixed,title,true,13.907,"{""isNewTopic"": true, ""title"": ""杭州简介与 NPU"
+mixed,alive@after mixed workload,true,,requests=23

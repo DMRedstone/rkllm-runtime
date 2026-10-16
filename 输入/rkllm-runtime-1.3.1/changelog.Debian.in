@@ -1,0 +1,200 @@
+rkllm-runtime (@VERSION@) unstable; urgency=medium
+
+  * Make the service configuration a dpkg conffile. /etc/default/rkllm-server
+    was a plain file, so installing a new version silently replaced it and the
+    operator's RKLLM_MODEL and RKLLM_API_KEY were gone - the one thing a
+    configuration file must never do. dpkg now keeps local edits on upgrade.
+  * The file is still deleted when the package is removed. dpkg keeps conffiles
+    on a plain `remove` and deletes them only on `purge`, so postrm unlinks it
+    itself, and the package's "removal leaves nothing behind" contract is
+    unchanged.
+  * Document every server parameter in that file, in English and in Chinese,
+    each with an optional example that is commented out. `rkllm serve` now also
+    takes every option from its own RKLLM_* environment variable, so a setting
+    no longer has to be spelled out as a raw argument. A value that does not
+    parse is reported and ignored instead of aborting the argument parser,
+    which used to show up in the journal as nothing but "status=2".
+  * The text of the file no longer depends on the package version, so an upgrade
+    cannot rewrite it and cannot reset a `chmod 600` applied because an API key
+    lives in it. A self test and a packaging check lock both properties down.
+
+ -- @MAINTAINER@  @DATE@
+
+rkllm-runtime (1.3.1-11) unstable; urgency=medium
+
+  * Report token usage with a language-independent estimate. The counts came
+    from len(text.split()), which finds no spaces in Chinese and therefore
+    reported a 15-token question as "1" - wrong by roughly an order of magnitude
+    for every Chinese request, in the field clients use to budget cost and
+    context. The new estimate is byte-based and identical to the one the
+    prompt-size guard already used.
+  * Add a self test for it. The previous usage check only verified the numbers
+    were non-zero and internally consistent, and wrong values satisfied that
+    too; the new one fails on any space-free input that is under-counted.
+  * Document the sampling options (--top-k, --top-p, --temperature,
+    --repeat-penalty) and --json in --help; they previously appeared as bare
+    flags with no explanation of what they do or which way to turn them. The
+    same for --model-dir and --lib under list/info/selftest, which define their
+    own copies of those options.
+  * Add docstrings to the public entry points (cmd_chat, cmd_run, cmd_serve,
+    cmd_list, cmd_info, build_parser, main), the three request paths
+    (_run_inference, do_POST, do_GET) and RealEngine.__init__, whose lifetime
+    rule (one handle owns the KV cache for the whole process) was only implied
+    by the surrounding code.
+  * No behaviour change beyond the token estimate.
+
+ -- @MAINTAINER@  @DATE@
+
+rkllm-runtime (1.3.1-10) unstable; urgency=medium
+
+  * Serve requests whose system prompt does not fit the context window, instead
+    of refusing them. An agent-style chat client sends tens of kilobytes of its
+    own preamble - one such client sent 57 KB alongside a two-character "hello",
+    which no 4096-token window can hold, so the user could not even say hello.
+    When the preamble is what overflows, it is now dropped and the request is
+    answered; the journal records its size. Requires the user's own text to fit.
+  * The inference log now separates system and user byte counts, so it is
+    immediately clear which part a request was made of. A bare "prompt 57283
+    bytes" did not say whether the user pasted a document or the client attached
+    an enormous preamble.
+
+ -- @MAINTAINER@  @DATE@
+
+rkllm-runtime (1.3.1-9) unstable; urgency=medium
+
+  * Fix the service being killed by a large prompt. The prompt guard allowed
+    eight bytes per token, so a 32 KB English prompt (roughly 8000 tokens)
+    passed a 4096-token window check and the runtime overran its KV cache and
+    died with SIGSEGV. The guard now assumes three bytes per token, the safe
+    side for both English (about 4) and Chinese (about 3). Found by stress
+    testing: a 32668-byte prompt took the whole service down.
+  * Prompt and generation now share the context window: a max_tokens that does
+    not fit alongside the prompt is trimmed to what remains, so a long prompt
+    gets a shorter answer instead of a crash.
+  * Raise the listening socket's accept queue from socketserver's default of 5
+    to 256. A burst of 60 concurrent requests produced 15 client-side connection
+    errors and almost no 503s, because the kernel dropped connections before
+    they reached the queue logic that is meant to shed load.
+
+ -- @MAINTAINER@  @DATE@
+
+rkllm-runtime (1.3.1-8) unstable; urgency=medium
+
+  * Record every rejected request in the journal with its reason, and make the
+    "no usable text" reply name what actually arrived (per-message role, content
+    type and length). A chat UI turns our 400 into "the model is unavailable",
+    so a client probing a model with an empty message - content: null, which
+    several UIs send from an empty input box - was indistinguishable from a
+    genuinely broken model. The journal line now says which it is.
+  * The rejection counter now covers all invalid requests, not only the empty
+    content case, so /health reports a truthful number.
+
+ -- @MAINTAINER@  @DATE@
+
+rkllm-runtime (1.3.1-7) unstable; urgency=medium
+
+  * Answer requests that carry no user turn instead of rejecting them. Clients
+    probe a newly configured model with a system-only (or assistant-only)
+    request, and the old "no user text found in 'messages'" reply made a
+    perfectly working model look broken in the client's UI (Dify and friends
+    surface the 400 as "the model is unavailable"). The last message carrying
+    any text is now used as the prompt.
+  * A system-only request is no longer prepended to itself, so the text reaches
+    the model exactly once.
+  * Fix an AttributeError (which surfaced as HTTP 500) when a client sent the
+    system prompt in the multimodal content shape - a list of parts - instead of
+    a plain string.
+  * Log the shapes of the messages whenever a request is rejected for lack of
+    usable text, so the journal alone shows what the client sent.
+
+ -- @MAINTAINER@  @DATE@
+
+rkllm-runtime (1.3.1-6) unstable; urgency=medium
+
+  * Fix the service failing with exit code 2 and nothing useful in the journal.
+    systemd expands an unset variable into an EMPTY ARGUMENT, so the bare
+    ${RKLLM_PLATFORM_ARG} / ${RKLLM_EXTRA_ARGS} in ExecStart passed two stray
+    empty arguments to rkllm, which argparse rejected as unrecognised
+    positionals. ExecStart is now wrapped in /bin/sh, where an unquoted empty
+    variable disappears instead of becoming an empty argument.
+  * rkllm itself now ignores empty arguments and writes the "no command given"
+    message to stderr, so the reason reaches the journal.
+  * The self test no longer aborts silently when a check triggers sys.exit();
+    it reports the abort and still prints the summary.
+
+ -- @MAINTAINER@  @DATE@
+
+rkllm-runtime (1.3.1-5) unstable; urgency=medium
+
+  * The systemd unit no longer guards on ConditionPathExists=/dev/rknpu. Drivers
+    from 0.9.x onwards register the NPU as a DRM render node and do NOT create
+    that path, so the guard silently skipped the unit on perfectly working
+    boards - "skipped, unmet condition check" - and the service never started.
+    Whether an NPU is usable is decided by the runtime at startup, and
+    StartLimitBurst keeps a board without one from restarting forever.
+  * `rkllm info` and `rkllm selftest` now look for the driver through several
+    signals instead of one path: /sys/kernel/debug/rknpu/version, a DRM render
+    node whose driver link points at rknpu, the loaded kernel module, and the
+    legacy /dev/rknpu device node.
+  * Documentation, README.Debian and both manual pages corrected: they no
+    longer claim the runtime needs /dev/rknpu.
+
+ -- @MAINTAINER@  @DATE@
+
+rkllm-runtime (1.3.1-4) unstable; urgency=medium
+
+  * Stop calling rkllm_set_chat_template to install a system prompt. That call
+    disables the model's built-in chat template parsing - the runtime warns
+    about this - after which the model receives bare text without any of its
+    special tokens: it rambles, answers as if continuing a document, and often
+    never emits EOS, which the user sees as a request that hangs. The setting
+    persists for the whole handle, so a single system message poisoned every
+    later request until the service was restarted.
+  * System text (both --system and a request-level system message) is now
+    prepended to the prompt, which leaves the built-in template intact.
+  * New self test check `system message reaches the model` locks this down.
+
+ -- @MAINTAINER@  @DATE@
+
+rkllm-runtime (1.3.1-3) unstable; urgency=medium
+
+  * Report prompt/completion token counts in the response usage block. They were
+    always zero, so chat clients displayed "0 tokens" for every answer.
+  * The counts remain whitespace estimates: no tokeniser is available in this
+    script, which the manual page and the README say explicitly.
+
+ -- @MAINTAINER@  @DATE@
+
+rkllm-runtime (1.3.1-2) unstable; urgency=medium
+
+  * Fix a segmentation fault that killed the API server: rkllm_set_chat_template
+    was called with NULL for the prompt prefix and postfix, which the runtime
+    dereferences unconditionally. Any client that sends a system message (which
+    is every chat UI) crashed the process.
+  * Refuse prompts far larger than the model's context window with HTTP 400
+    instead of letting the runtime run off the end of its KV cache.
+  * Log the request size before inference starts, so the last line before a
+    crash identifies the offending request.
+  * Accept the API paths with and without the /v1 prefix, and explain the
+    expected base URL in 404 responses and in `rkllm serve --help`.
+  * /health now reports the model name, queue length and uptime.
+  * Require the API key through $RKLLM_API_KEY or --api-key, compared in
+    constant time, and describe it in the manual page.
+  * Add English and simplified Chinese manual pages (/usr/share/man/man1 and
+    /usr/share/man/zh_CN/man1).
+  * Add rkllm-server.service and /etc/default/rkllm-server; installed but never
+    enabled or started automatically. postinst restarts a service that was
+    already running, prerm stops it, postrm drops any enable symlink.
+
+ -- @MAINTAINER@  @DATE@
+
+rkllm-runtime (1.3.1-1) unstable; urgency=medium
+
+  * Initial Debian packaging built from the upstream rknn-llm release tarball.
+  * Files relocated from the upstream SDK tree to FHS/multiarch paths.
+  * Example sources installed read-only; see /usr/share/doc/@PACKAGE@/README.Debian.
+  * New: /usr/bin/rkllm, a front end for local chat, one-shot inference and an
+    OpenAI-compatible API server. Standard library only: no compilation step on
+    the board and no pip packages.
+
+ -- @MAINTAINER@  @DATE@

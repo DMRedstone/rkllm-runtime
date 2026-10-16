@@ -1,0 +1,296 @@
+{
+  "target": "http://192.0.2.10:8080",
+  "repeat": 3,
+  "scenarios": [
+    {
+      "scenario": "S1 serial title request",
+      "repeat": 3,
+      "crashes": 0,
+      "runs": [
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 4.64,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        },
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 4.69,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        },
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 4.69,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        }
+      ]
+    },
+    {
+      "scenario": "S2 2x concurrent short",
+      "repeat": 3,
+      "crashes": 0,
+      "runs": [
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 1.0,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 1.97,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        },
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 1.0,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 1.97,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        },
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 1.01,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 1.97,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        }
+      ]
+    },
+    {
+      "scenario": "S3 concurrent title + chat(history)",
+      "repeat": 3,
+      "crashes": 0,
+      "runs": [
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 10.74,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 15.45,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        },
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 10.82,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 15.59,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        },
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 4.82,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 15.77,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        }
+      ]
+    },
+    {
+      "scenario": "S4 2x concurrent long prompt",
+      "repeat": 3,
+      "crashes": 0,
+      "runs": [
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 13.44,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 32.2,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        },
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 14.48,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 34.03,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        },
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 19.51,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 33.98,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        }
+      ]
+    },
+    {
+      "scenario": "S5 4x concurrent chat",
+      "repeat": 3,
+      "crashes": 0,
+      "runs": [
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 14.57,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 28.99,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 43.46,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 57.9,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        },
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 14.47,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 28.92,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 41.77,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 54.91,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        },
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 13.2,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 26.41,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 39.76,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 53.01,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        }
+      ]
+    }
+  ]
+}

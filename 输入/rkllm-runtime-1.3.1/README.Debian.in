@@ -1,0 +1,207 @@
+RKLLM runtime for Debian / Ubuntu on Rockchip boards
+===================================================
+
+What is installed
+-----------------
+  @LIBDIR_ABS@/librkllmrt.so      runtime shared library (SONAME: librkllmrt.so)
+  /usr/include/@PKGINCLUDE_SUBDIR@/rkllm.h    public C/C++ API header
+  /usr/include/rkllm.h            compatibility symlink to the header above
+  @LIBDIR_ABS@/pkgconfig/rkllm.pc pkg-config metadata
+  @LIBDIR_ABS@/cmake/rkllm/*.cmake CMake package configuration
+  /usr/bin/rkllm                  local chat, one-shot inference and HTTP API
+  /usr/lib/@PACKAGE@/librknnrt.so private copy of the RKNN runtime needed by the
+                                  multimodal example (kept out of the multiarch
+                                  path so it can never clash with a distro or
+                                  vendor rknn runtime package)
+  /usr/include/rknn/*.h           RKNN API headers used by that example
+  /etc/ld.so.conf.d/@PACKAGE@.conf declares /usr/lib/@PACKAGE@ to ldconfig
+  /usr/bin/rkllm-fix-freq-rk*     board tuning helpers (CPU/NPU/DDR frequency
+                                  lock and performance watch)
+  /usr/lib/systemd/system/@SERVER_UNIT@
+                                  optional API service unit (not enabled)
+  @SERVER_DEFAULTS@               configuration for that unit (a dpkg conffile)
+  /usr/share/@PACKAGE@/examples/  upstream example sources (read-only)
+  /usr/share/man/man1/rkllm.1.gz  manual page (English)
+  /usr/share/man/zh_CN/man1/rkllm.1.gz
+                                  manual page (simplified Chinese)
+  /usr/share/doc/@PACKAGE@/       SDK PDFs, upstream README/benchmark/changelog
+
+Manual pages
+------------
+  `man rkllm` picks the language from your locale. To force one:
+
+    man rkllm                 # English, or Chinese when LANG=zh_CN.UTF-8
+    man -L zh_CN rkllm        # simplified Chinese
+    man -L en rkllm           # English
+
+Quick start: run a model and talk to it
+---------------------------------------
+  The package does NOT contain a model - see "Getting a model" below. Once a
+  .rkllm file is on the board:
+
+    rkllm list                              # where does it look for models?
+    rkllm chat qwen2.5-1.5b                 # interactive chat (REPL)
+    rkllm chat /data/models/qwen2.5-1.5b.rkllm
+    rkllm run  qwen2.5-1.5b "hello"         # one-shot, script friendly
+    rkllm info                              # driver / library / model report
+    rkllm selftest                          # verify the installation
+
+  Inside the REPL: /help, /clear (drop the KV cache), /set temperature 0.7,
+  /exit. Ctrl-C interrupts generation.
+
+  rkllm is a plain Python 3 script; it talks to librkllmrt.so through ctypes.
+  There is nothing to compile on the board and nothing to install with pip.
+
+Serving an OpenAI-compatible API
+--------------------------------
+  Ad hoc, in the foreground:
+
+    rkllm serve qwen2.5-1.5b --host 0.0.0.0 --port 8080
+    curl http://localhost:8080/v1/chat/completions \
+      -H 'Content-Type: application/json' \
+      -d '{"messages":[{"role":"user","content":"hi"}],"stream":true}'
+
+  As a service (start it only after choosing a model):
+
+    sed -i 's/^RKLLM_MODEL=.*/RKLLM_MODEL=qwen2.5-1.5b/' @SERVER_DEFAULTS@
+    systemctl enable --now @SERVER_UNIT@
+
+  Endpoints: GET /health, GET /v1/models, POST /v1/chat/completions
+  (streaming SSE, sampling parameters, tool calling), POST /v1/reset.
+
+  The NPU can serve exactly one request at a time. Extra requests queue up to
+  --max-queue (default 32) and are refused with HTTP 503 beyond that, with a
+  Retry-After header. The unit deliberately carries no ConditionPathExists: no
+  single path reliably means "the NPU works" (see Runtime requirements below),
+  so whether the NPU is usable is decided by the runtime at startup, and
+  StartLimitBurst stops a board without an NPU from restarting forever.
+
+  Authentication: `rkllm serve --api-key <secret>` (or $RKLLM_API_KEY) makes every
+  endpoint require "Authorization: Bearer <secret>"; requests without it get
+  HTTP 401. Prefer the environment variable over the flag, because a value on
+  the command line is visible in `ps` and `systemctl status`. For the service,
+  put RKLLM_API_KEY in @SERVER_DEFAULTS@ and `chmod 600` that file. The API is
+  plain HTTP, so the key only keeps stray clients out - if the board is reachable
+  from an untrusted network, terminate TLS in front of it.
+
+  Clients configure the base URL as http://<host>:<port>/v1. Endpoints are also
+  accepted without the /v1 prefix. If this server has no key configured, the
+  client's key field is ignored - fill it with any non-empty placeholder rather
+  than leaving it blank, some clients refuse to send otherwise.
+
+Service configuration
+---------------------
+  @SERVER_DEFAULTS@ configures the service, and it is a dpkg *conffile*:
+
+    * Local edits survive an upgrade. The text of the file does not depend on
+      the package version, so a newer package does not rewrite it, and the file
+      mode is left alone too - a `chmod 600` applied because RKLLM_API_KEY lives
+      in it stays in force.
+    * It is deleted when the package is removed, a plain `apt remove` included,
+      because this package promises to leave nothing behind. Copy it aside
+      first if you want those settings back.
+    * If dpkg asks whether to install the maintainer's version of this file,
+      keep yours: the shipped one is the untouched template with RKLLM_MODEL
+      empty, so accepting it loses your model and, if set, your API key.
+
+  Every `rkllm serve` parameter has its own entry there, documented in English
+  and in Chinese, each with an optional example that is commented out - from
+  RKLLM_MODEL and RKLLM_HOST/RKLLM_PORT/RKLLM_API_KEY through the context
+  window, sampling parameters and queue limits, down to RKLLM_EXTRA_ARGS as the
+  escape hatch. `rkllm serve --help` lists the same options from the other side.
+
+  Apply a change with `systemctl restart @SERVER_UNIT@`. The file is read by
+  systemd (EnvironmentFile=), not by a shell: one KEY=value per line, `#` only
+  at the beginning of a line, quote values containing spaces, no $VAR expansion,
+  and an empty value means "use the built-in default".
+
+Getting a model
+---------------
+  The runtime executes .rkllm files only. They are produced on an x86_64 host,
+  not on the board:
+
+    1. On the x86 host, install the toolkit wheel matching your Python version
+       (from the rkllm-toolkit directory of the release archive, cp310/cp311/
+       cp312 are provided).
+    2. Convert the HuggingFace checkpoint with the upstream export script:
+         /usr/share/@PACKAGE@/examples/rkllm_api_demo/export/export_rkllm.py
+       (point your quantised/calibrated weights at it; see the upstream README
+       in the same directory for the arguments).
+    3. Copy the resulting .rkllm file to the board. `rkllm` resolves a bare
+       model name against: $RKLLM_MODEL_DIR, /usr/share/@PACKAGE@/models,
+       /var/lib/rkllm/models, ~/.local/share/rkllm/models and the current
+       directory - and it also accepts an absolute path. None of those
+       directories is created by this package (so that removal stays spotless),
+       make the one you prefer first, for example:
+
+         mkdir -p /var/lib/rkllm/models
+         cp qwen2.5-1.5b.rkllm /var/lib/rkllm/models/
+         rkllm chat qwen2.5-1.5b
+
+  Note that .rknn (vision) and .rkllm (language) are different formats; the
+  multimodal example is the only part of this package that consumes .rknn.
+
+Runtime requirements
+--------------------
+  * The rknpu kernel driver must already be present on the board (this package
+    does NOT ship or touch it, and does not build DKMS modules). Run
+    `rkllm info` to see whether it is reachable.
+
+    Important: drivers from 0.9.x onwards do NOT create /dev/rknpu. The NPU is
+    registered as a DRM render node, so check with
+
+      sudo cat /sys/kernel/debug/rknpu/version
+      ls -l /sys/class/drm/renderD*/device/driver     # should point at rknpu
+
+    instead of looking for a device node. `rkllm info` performs these checks for
+    you and also accepts the legacy /dev/rknpu node if an older driver provides it.
+  * librkllmrt.so needs libgomp (OpenMP), libstdc++ and glibc >= 2.29, which are
+    pulled in as package dependencies.
+  * /usr/bin/rkllm needs python3, which is a declared dependency.
+  * Raising the clocks needs root; rkllm calls the rkllm-fix-freq-* helper when
+    it runs as root and skips it otherwise (use --no-freq-lock to opt out).
+
+Building a C/C++ program against the runtime
+--------------------------------------------
+  # plain compiler flags
+  gcc demo.c -o demo -I/usr/include/@PKGINCLUDE_SUBDIR@ -lrkllmrt
+
+  # pkg-config
+  gcc demo.c -o demo $(pkg-config --cflags --libs rkllm)
+
+  # CMake
+  find_package(rkllm REQUIRED)
+  target_link_libraries(demo PRIVATE rkllm::rkllmrt)
+
+Building the C++ examples
+-------------------------
+  The example sources live under a read-only system directory, so copy the tree
+  you want into a writable location first:
+
+    cp -r /usr/share/@PACKAGE@/examples/rkllm_api_demo ~/rkllm_api_demo
+    cd ~/rkllm_api_demo/deploy
+    ./build-linux.sh          # native gcc/g++ build, output in ./build/
+
+  The multimodal example needs OpenCV: it uses the system OpenCV when available,
+  otherwise falls back to the copy bundled under
+  /usr/share/@PACKAGE@/examples/multimodal_model_demo/deploy/3rdparty/opencv/.
+  Install it with `apt install libopencv-dev` if you prefer the system one.
+
+  The upstream Flask/Gradio server demos need python3-flask / gradio and are
+  unrelated to /usr/bin/rkllm; see their own README in the examples directory.
+
+Removing the package
+--------------------
+  apt remove @PACKAGE@   -- or --   dpkg -r @PACKAGE@
+
+  Every installed path is listed in /var/lib/dpkg/info/@PACKAGE@.list. Nothing is
+  written to /usr/local, no models are copied anywhere, no users are created and
+  no DKMS modules are built. postinst/postrm only refresh the ld.so cache and
+  tell systemd to re-read unit files; prerm stops the unit and postrm drops any
+  enable symlink an operator created, so no dangling links survive.
+  The service configuration @SERVER_DEFAULTS@ is deleted as well - not just by
+  `apt purge` but by a plain `apt remove`, which dpkg would otherwise not do for
+  a conffile. Back it up before removing the package if you want to keep the
+  settings.
+  The ld.so cache is refreshed on removal as well, so `ldconfig -p | grep rkllm`
+  reports nothing afterwards.

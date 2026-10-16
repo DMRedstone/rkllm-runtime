@@ -1,0 +1,47 @@
+#!/bin/sh
+# postrm for @PACKAGE@
+#
+# dpkg has already removed every file that belongs to this package when this
+# script runs, with one exception: conffiles. /etc/default/rkllm-server is a
+# conffile so that local edits survive an upgrade, and dpkg keeps conffiles
+# when a package is merely removed - it only deletes them on purge. This
+# package promises that removing it leaves nothing behind, so the file is
+# unlinked here for `remove` as well; `rm -f` on that single known path is a
+# no-op when dpkg has already taken it (purge) or when the operator deleted it.
+#
+# Consequence worth knowing before you remove the package: local settings are
+# NOT kept across a remove/install cycle. Copy the file aside first if you want
+# them back.
+#
+# Nothing else is ever written outside the package file list. There is no
+# `rm -rf` here on purpose: directories under /usr and the ld.so.conf.d snippet
+# are owned by dpkg and go away with the package.
+set -e
+
+case "$1" in
+    remove|purge)
+        rm -f @SERVER_DEFAULTS@
+        if command -v ldconfig >/dev/null 2>&1; then
+            ldconfig
+        fi
+        # Drop the unit from systemd's view. dpkg has already deleted
+        # /usr/lib/systemd/system/@SERVER_UNIT@; daemon-reload only clears the
+        # in-memory copy. deb-systemd-helper additionally removes an enable
+        # symlink that an operator created, which dpkg cannot know about -
+        # without this the package would leave a dangling link behind.
+        if command -v deb-systemd-helper >/dev/null 2>&1; then
+            deb-systemd-helper purge @SERVER_UNIT@ >/dev/null || true
+        fi
+        if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload || true
+        fi
+        ;;
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

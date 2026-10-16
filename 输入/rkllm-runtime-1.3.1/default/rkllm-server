@@ -1,0 +1,237 @@
+# rkllm-server.service - configuration file / 服务配置文件
+# ===========================================================================
+# English
+#   Configures the optional OpenAI-compatible API service. This is a dpkg
+#   conffile: local edits survive package upgrades, and the file is deleted
+#   when the package is removed or purged. Its text does not depend on the
+#   package version, so an upgrade never rewrites it; if dpkg ever asks whether
+#   to install the maintainer's version of this file, keep yours.
+#
+# 中文
+#  本文件用于配置可选的 OpenAI 兼容 API 服务。它是 dpkg 的 conffile：
+#  本地修改在升级后保留；卸载（remove 或 purge）时随包删除。文件内容与包版本
+#  无关，因此升级永远不会改写它；若 dpkg 询问是否安装维护者版本，请选择保留。
+#
+# English
+#   Apply changes with `systemctl restart rkllm-server`. Parsing is done by
+#   systemd (EnvironmentFile=), NOT by a shell: there is no $() and no
+#   `export`. Write one KEY=value per line; a `#` only starts a comment at the
+#   beginning of a line, never in the middle. Quote a value that contains
+#   spaces. An empty value means "not configured" and the built-in default
+#   applies. Everything below is inherited by `rkllm serve`.
+#
+# 中文
+#  改完执行 `systemctl restart rkllm-server` 生效。本文件由 systemd
+#  （EnvironmentFile=）解析，**不是** shell：不支持 $()，不要写 export。
+#  每行一个 KEY=value；`#` 只在行首表示注释，行尾写注释会被当成值的一部分。
+#  含空格的值要加引号。值为空表示"未配置"，使用程序内置默认值。
+#  下列设置都会被 `rkllm serve` 继承。
+#
+# 安全 / SECURITY
+#   This file is world readable (0644). If you put an API key in it, run
+#   `chmod 600 @SERVER_DEFAULTS@`. dpkg leaves the mode of a conffile it does
+#   not rewrite, so your chmod survives upgrades.
+#   本文件默认全局可读。若在其中填入密钥，请执行
+#   `chmod 600 @SERVER_DEFAULTS@`；该权限在升级后保留。
+#
+# 每个参数都有一个专用配置项，可选值以注释形式给出（形如 `#RKLLM_XXX=...`）。
+# Every parameter has its own entry; optional values are shown commented out.
+
+
+# -- --model <name-or-path>                          REQUIRED / 必填
+# EN: The .rkllm model to serve. Either a bare name, resolved through the model
+#     search path (`rkllm list` prints it), or an absolute path to the file.
+#     The unit refuses to start while this is empty.
+# 中文: 要提供的 .rkllm 模型。可以是裸文件名（按模型搜索路径解析，用
+#     `rkllm list` 查看具体路径），也可以是绝对路径。留空则服务单元拒绝启动。
+# 可选写法 / optional form:
+#RKLLM_MODEL=/var/lib/rkllm/models/Qwen3-4B-RKLLM-v1-2-0.rkllm
+RKLLM_MODEL=
+
+
+# -- --host <address>                                default 0.0.0.0
+# EN: Address the API listens on. 127.0.0.1 keeps it reachable from this board
+#     only; 0.0.0.0 exposes it to the network, which is why a key is
+#     recommended in that case (see RKLLM_API_KEY below).
+# 中文: API 监听地址。127.0.0.1 只允许本机访问；0.0.0.0 会暴露到网络，因此这种
+#     情况下建议配置密钥（见下面的 RKLLM_API_KEY）。
+# 可选写法 / optional form:
+#RKLLM_HOST=0.0.0.0
+RKLLM_HOST=0.0.0.0
+
+
+# -- --port <number>                                 default 8080
+# EN: TCP port of the API. Clients use http://<host>:<port>/v1 as base URL.
+# 中文: API 的 TCP 端口。客户端以 http://<主机>:<端口>/v1 作为 Base URL。
+# 可选写法 / optional form:
+#RKLLM_PORT=8080
+RKLLM_PORT=8080
+
+
+# -- --api-key <secret>                              default empty (no auth)
+# EN: When set, every endpoint requires "Authorization: Bearer <secret>" and
+#     answers HTTP 401 otherwise. Set it here rather than in an argument list:
+#     a command line value is visible in `ps` and `systemctl status`. Compared
+#     in constant time. Keep the file at mode 0600 once a key is in it.
+# 中文: 设置后所有接口都要求 "Authorization: Bearer <密钥>"，否则返回 401。
+#     请写在这里而不是参数列表：命令行上的值会出现在 `ps` 与 `systemctl status`
+#     里。比较使用常量时间。填入密钥后请把本文件权限设为 0600。
+# 可选写法 / optional form:
+#RKLLM_API_KEY=change-me
+
+
+# -- --platform <soc>                                default auto-detect
+# EN: Skips SoC auto-detection (read from /proc/device-tree/compatible).
+#     Values: rk3588, rk3576, rk3562, rv1126b. It selects the CPU affinity mask
+#     and the frequency-lock helper, so only override it on unusual boards.
+# 中文: 跳过 SoC 自动探测（默认识别 /proc/device-tree/compatible）。取值：
+#     rk3588、rk3576、rk3562、rv1126b。它决定 CPU 亲和性掩码与锁频脚本，
+#     只有在非典型板子上才需要覆盖。
+# 可选写法 / optional form:
+#RKLLM_PLATFORM_ARG=--platform rk3588
+RKLLM_PLATFORM_ARG=
+
+
+# -- --model-dir <dir>                               default empty
+# EN: Extra directory to search for models, so a bare name resolves without an
+#     absolute path. Repeatable; separate several with ':'. No directory is
+#     created by this package, so make it yourself first.
+# 中文: 额外的模型搜索目录，便于用裸文件名而不必写绝对路径。可写多个，用
+#     ':' 分隔。本包不会创建这些目录，请先自行创建。
+# 可选写法 / optional form:
+#RKLLM_MODEL_DIR=/var/lib/rkllm/models:/data/models
+
+
+# -- --lib <path>                                    default auto
+# EN: Explicit path to librkllmrt.so. Only needed when several copies are
+#     installed and the wrong one is picked up.
+# 中文: 显式指定 librkllmrt.so。仅在装了多份、且加载到了错误的那份时才需要。
+# 可选写法 / optional form:
+#RKLLM_LIB=/usr/lib/aarch64-linux-gnu/librkllmrt.so
+
+
+# -- --context <tokens>                              default 4096
+# EN: Size of the context window, in tokens. It is shared by the prompt and the
+#     generated answer. 4096 tokens is roughly 3000-4000 Chinese characters or
+#     12000 bytes; a request that does not fit is refused with HTTP 400 rather
+#     than risking a crash. Raising it costs RAM and must not exceed what the
+#     model was converted with.
+# 中文: 上下文窗口大小（token 数），由提示词与生成的回答共用。4096 token 约等于
+#     3000~4000 汉字或 12288 字节；装不下的请求会返回 HTTP 400，而不是冒崩溃的
+#     风险继续跑。调大会占用更多内存，且不能超过模型转换时设定的上限。
+# 可选写法 / optional form:
+#RKLLM_CONTEXT=8192
+
+
+# -- --max-new-tokens <tokens>                       default 2048
+# EN: Upper bound on the tokens generated per answer. It shares the context
+#     window with the prompt, so a long prompt automatically gets a shorter
+#     budget instead of failing.
+# 中文: 单次回答生成的最大 token 数。它与提示词共用上下文窗口，因此长提示词会
+#     自动得到更小的生成预算，而不是直接失败。
+# 可选写法 / optional form:
+#RKLLM_MAX_NEW_TOKENS=1024
+
+
+# -- --threads <count>                               default 4 (big cores)
+# EN: CPU cores used for inference. The default follows the SoC (on RK3588 the
+#     four big cores 4-7). Raising it does not help once the NPU is the
+#     bottleneck, and it competes with everything else on the board.
+# 中文: 推理使用的 CPU 核数。默认按 SoC 决定（RK3588 用 4 个大核，即 4~7 号）。
+#     当瓶颈在 NPU 上时加大它没有收益，反而会与板上其他任务抢 CPU。
+# 可选写法 / optional form:
+#RKLLM_THREADS=4
+
+
+# -- --no-freq-lock                                  default off
+# EN: 1 = do not raise CPU/NPU/DDR clocks before running. The lock needs root
+#     and is what keeps latency stable; turn it off only if the board is
+#     thermally constrained or the helper is unavailable.
+# 中文: 1 = 运行前不拉高 CPU/NPU/DDR 频率。锁频需要 root，且是延迟稳定的关键；
+#     只在板子散热受限或锁频脚本不可用时才关闭。
+# 可选写法 / optional form:
+#RKLLM_NO_FREQ_LOCK=1
+
+
+# -- --system <text>                                 default empty
+# EN: System prompt prepended to every request. It shares the context window
+#     with the conversation, so keep it short. Do not use it to install a
+#     multi-kilobyte agent preamble - that will be trimmed away.
+# 中文: 前置到每个请求的系统提示词。它与对话共用上下文窗口，因此要短。不要用它
+#     装载几 KB 的智能体提示词——那部分会被裁掉。
+# 可选写法 / optional form:
+#RKLLM_SYSTEM="You are a terse assistant. Answer in Chinese."
+
+
+# -- --no-history                                    default off
+# EN: 1 = every request is answered independently, with no conversation
+#     context carried over. Useful for stateless batch use.
+# 中文: 1 = 每个请求独立作答，不保留对话上下文。适合无状态的批处理场景。
+# 可选写法 / optional form:
+#RKLLM_NO_HISTORY=1
+
+
+# -- --top-k <n>                                     default 1
+# EN: Sample from the n most likely tokens; 1 means greedy (deterministic).
+# 中文: 从概率最高的 n 个 token 中采样；1 表示贪心（结果确定）。
+# 可选写法 / optional form:
+#RKLLM_TOP_K=1
+
+
+# -- --top-p <0..1>                                  default 0.9
+# EN: Nucleus sampling: keep the shortest token list whose probabilities sum to
+#     this value. 1.0 disables the cut-off.
+# 中文: 核采样：保留累计概率达到该值的最短 token 列表。1.0 表示不截断。
+# 可选写法 / optional form:
+#RKLLM_TOP_P=0.9
+
+
+# -- --temperature <0..2>                            default 0.8
+# EN: Sampling temperature. Lower is more focused and repeatable, 0 is greedy.
+# 中文: 采样温度。越小越聚焦、越可复现；0 等同于贪心。
+# 可选写法 / optional form:
+#RKLLM_TEMPERATURE=0.7
+
+
+# -- --repeat-penalty <>=1.0>                        default 1.1
+# EN: Penalty applied to already emitted tokens; 1.0 disables it. Raise it a
+#     little if answers loop.
+# 中文: 对已出现 token 的惩罚系数；1.0 表示关闭。回答出现循环时略微调大。
+# 可选写法 / optional form:
+#RKLLM_REPEAT_PENALTY=1.1
+
+
+# -- --max-queue <n>                                 default 32
+# EN: How many requests may wait for the NPU. The NPU runs one request at a
+#     time; requests beyond this limit are refused with HTTP 503 plus a
+#     Retry-After header instead of piling up forever.
+# 中文: 允许排队等待 NPU 的请求数。NPU 一次只跑一个请求；超过该上限的请求会直接
+#     得到 HTTP 503 并带 Retry-After 响应头，而不是无限堆积。
+# 可选写法 / optional form:
+#RKLLM_MAX_QUEUE=32
+
+
+# -- --queue-timeout <seconds>                       default 600
+# EN: How long one request may wait in the queue before it is given up on.
+#     Keep it above the slowest answer you expect.
+# 中文: 单个请求在队列中允许等待的秒数，超时即放弃。应大于最慢回答的耗时。
+# 可选写法 / optional form:
+#RKLLM_QUEUE_TIMEOUT=600
+
+
+# -- --quiet                                         default off
+# EN: 1 = log less to stderr (the journal). Errors are still reported.
+# 中文: 1 = 减少 stderr（即 journal）输出。错误信息仍会输出。
+# 可选写法 / optional form:
+#RKLLM_QUIET=1
+
+
+# -- free-form extra arguments                       default empty
+# EN: Escape hatch appended to the `rkllm serve` command line, for options
+#     added by a future release. Everything above should be set with its own
+#     entry instead; `rkllm serve --help` lists the whole surface.
+# 中文: 追加到 `rkllm serve` 命令行末尾的应急参数，用于将来新增的选项。上面的
+#     参数应各自使用专用配置项；完整参数列表见 `rkllm serve --help`。
+# 可选写法 / optional form:
+#RKLLM_EXTRA_ARGS="--no-history --verbose"
+RKLLM_EXTRA_ARGS=

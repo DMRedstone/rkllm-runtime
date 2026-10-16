@@ -1,0 +1,10 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: rknn-llm
+Upstream-Contact: Rockchip Electronics Co., Ltd.
+Source: https://github.com/airockchip/rknn-llm
+
+Files: *
+Copyright: Copyright (c) Rockchip Electronics Co., Ltd.
+License: Rockchip
+ The full upstream license text is reproduced below.
+ .

@@ -1,0 +1,30 @@
+Package: @PACKAGE@
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: @MAINTAINER@
+Homepage: https://github.com/airockchip/rknn-llm
+Section: libs
+Priority: optional
+Depends: @DEPENDS@
+Suggests: cmake, g++, pkg-config, libopencv-dev, python3-flask
+Description: Rockchip RKLLM runtime for NPU platforms (RK3588/RK3576/RK3562/RV1126B)
+ This package ships the Rockchip RKLLM software stack for deploying large
+ language models on Rockchip NPU devices. It contains the shared runtime
+ library librkllmrt.so, the public C/C++ header, CMake and pkg-config
+ integration files, board tuning scripts and the upstream example sources.
+ .
+ It also installs /usr/bin/rkllm, a command line front end written against the
+ Python standard library only. It needs no compilation and no pip packages and
+ drives the runtime directly through ctypes:
+   rkllm chat <model>     interactive local chat
+   rkllm run  <model> ..  one-shot inference
+   rkllm serve <model>    OpenAI-compatible HTTP API (optionally via the
+                          shipped rkllm-server.service)
+   rkllm list / rkllm info / rkllm selftest
+ .
+ Models are not included: compile them from HuggingFace checkpoints with the
+ RKLLM toolkit on an x86 host first. The runtime needs the rknpu kernel driver
+ that your board image provides; this package never ships or builds it.
+ .
+ Documentation PDFs are installed under /usr/share/doc/@PACKAGE@/ and the
+ example sources under /usr/share/@PACKAGE@/examples/.

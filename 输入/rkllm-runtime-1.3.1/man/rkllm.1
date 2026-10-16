@@ -1,0 +1,396 @@
+.\" rkllm - front end for the RKLLM runtime shipped by the rkllm-runtime package.
+.\" Installed as /usr/share/man/man1/rkllm.1.gz
+.TH RKLLM 1 "@DATE_ISO@" "rkllm-runtime @VERSION@" "User Commands"
+.SH NAME
+rkllm \- run .rkllm models on Rockchip NPUs: local chat, one\-shot inference and an OpenAI\-compatible HTTP API
+.SH SYNOPSIS
+.B rkllm
+.I command
+.RI [ options ]
+.br
+.B rkllm
+.B chat
+.I model
+.RI [ options ]
+.br
+.B rkllm
+.B run
+.I model
+.I text
+.RI [ options ]
+.br
+.B rkllm
+.B serve
+.I model
+.RI [ options ]
+.br
+.B rkllm
+.B list
+.RI [ options ]
+.br
+.B rkllm
+.B info
+.RI [ options ]
+.br
+.B rkllm
+.B selftest
+.RI [ options ]
+.SH DESCRIPTION
+.B rkllm
+is the command line front end for the RKLLM runtime that ships in the
+.B rkllm\-runtime
+package. It drives
+.I librkllmrt.so
+directly through ctypes and needs no compiler on the board and no Python
+package from PyPI: it is written against the Python standard library only.
+.PP
+The runtime only executes
+.I .rkllm
+files, which must be produced on an x86_64 host with the RKLLM toolkit.
+A
+.I .rkllm
+model is unrelated to the
+.I .rknn
+(vision) format.
+.PP
+The NPU is accessed through the
+.I rknpu
+kernel driver; this package neither ships nor builds that driver.
+Use
+.B rkllm info
+to check that the driver is reachable.
+Note that drivers from 0.9.x onwards do
+.B not
+create
+.IR /dev/rknpu :
+the NPU is registered as a DRM render node
+.RI ( /dev/dri/renderD* ),
+so look for
+.I /sys/kernel/debug/rknpu/version
+or a render node whose driver link points at rknpu, rather than for a device
+node.
+.SH COMMANDS
+.TP
+.B chat
+.I model
+Interactive local chat. Reads prompts from standard input, prints the answer as
+it is generated. The runtime keeps the conversation history, so each line is a
+new turn.
+.TP
+.B run
+.I model text ...
+One\-shot inference: sends the given text and prints the answer to standard
+output. Intended for scripts. No history is kept.
+.TP
+.B serve
+.I model
+Runs an OpenAI\-compatible HTTP API in the foreground. Does not read standard
+input and does not offer an interactive prompt; a quiet terminal after the
+startup banner is expected. See
+.B HTTP API
+below.
+.TP
+.B list
+Lists the
+.I .rkllm
+files found in the model search path, and the search path itself when nothing
+was found.
+.TP
+.B info
+Reports the detected SoC, the frequency helper, the RKNPU driver status, the
+loaded runtime library, the model search path and the models
+found. Use
+.B \-\-json
+for machine\-readable output.
+.TP
+.B selftest
+End\-to\-end self test that needs no model and no NPU. It exercises argument
+handling, model resolution, the HTTP layer, streaming, authentication and queue
+behaviour against a built\-in stand\-in engine. Checks that require the real
+library and the NPU are reported as SKIP, not FAIL, when they are unavailable.
+.SH OPTIONS
+Options may be given after the command in any order.
+.SS Options common to chat, run and serve
+.TP
+.BI \-\-context " n"
+Maximum context length in tokens. Default 4096. Do not set this above the limit
+the model itself was converted with \- the startup log prints it as
+.I max_context_limit .
+.TP
+.BI \-\-max\-new\-tokens " n"
+Maximum number of tokens to generate per answer. Default 2048.
+.TP
+.BI \-\-threads " n"
+Number of CPU cores used for inference. Default 4. On RK3588 and RK3576 the
+four big cores (4\-7) are used; on other SoCs cores 0\-3.
+.TP
+.BI \-\-platform " soc"
+Override SoC detection. One of
+.IR rk3588 ", " rk3576 ", " rk3562 ", " rv1126b .
+By default the SoC is read from
+.IR /proc/device\-tree/compatible .
+.TP
+.BI \-\-model\-dir " dir"
+Additional directory to search for models. May be repeated.
+.TP
+.BI \-\-lib " path"
+Path to
+.IR librkllmrt.so ,
+for testing against a different build.
+.TP
+.B \-\-no\-freq\-lock
+Do not raise CPU/NPU/DDR clocks before running. The lock helper is called by
+absolute path as root and skipped otherwise.
+.TP
+.BR \-\-quiet ", " \-q
+Suppress the startup banner and per\-request logging.
+.SS Sampling options (chat, run and serve)
+.TP
+.BI \-\-top\-k " n"
+Default 1.
+.TP
+.BI \-\-top\-p " p"
+Default 0.9.
+.TP
+.BI \-\-temperature " t"
+Default 0.8.
+.TP
+.BI \-\-repeat\-penalty " r"
+Default 1.1.
+.SS Additional options for chat and run
+.TP
+.BI \-\-system " prompt"
+System prompt handed to the model's chat template.
+.TP
+.B \-\-no\-history
+Do not retain the conversation context between turns.
+.SS Additional options for serve
+.TP
+.BI \-\-host " address"
+Address to listen on. Default 0.0.0.0 (all interfaces). Use 127.0.0.1 to keep
+the API local.
+.TP
+.BI \-\-port " port"
+TCP port. Default 8080.
+.TP
+.BI \-\-api\-key " key"
+Require
+.B Authorization: Bearer
+.I key
+on every endpoint. Falls back to the environment variable
+.B RKLLM_API_KEY
+when the flag is absent. Prefer the environment variable: a value given on the
+command line is visible in
+.B ps
+and in
+.B systemctl status.
+.TP
+.BI \-\-max\-queue " n"
+Number of requests allowed to wait for the NPU. Default 32. The request that is
+currently running does not occupy one of these slots. Requests beyond the limit
+receive HTTP 503 with a
+.B Retry\-After
+header.
+.TP
+.BI \-\-queue\-timeout " seconds"
+How long a request may wait for the NPU before being refused. Default 600.
+.SS Options for list and info
+.TP
+.B \-\-json
+Print the report as JSON instead of text.
+.SH MODEL RESOLUTION
+A model argument is either an absolute or relative path to a
+.I .rkllm
+file, or a bare name. A bare name is looked up, with and without the
+.I .rkllm
+suffix, in the following directories in order:
+.PP
+.RS 4
+.B $RKLLM_MODEL_DIR
+(colon\-separated),
+.IR /usr/share/rkllm\-runtime/models ,
+.IR /var/lib/rkllm/models ,
+.IR ~/.local/share/rkllm/models ,
+and the current directory.
+.RE
+.PP
+These directories are not created by the package, so that removing it leaves
+nothing behind; create the one you prefer with
+.BR mkdir \-p .
+.SH HTTP API
+.TP
+.B GET /health
+Service state: model name, whether inference is running, number of waiting
+requests, uptime and counters. Does not touch the NPU.
+.TP
+.B GET /v1/models
+OpenAI\-style model list.
+.TP
+.B POST /v1/chat/completions
+OpenAI\-compatible completion endpoint. Accepts
+.IR messages ", " model ", " stream ", " max_tokens ", " temperature ", "
+.IR top_p ", " top_k ", " repeat_penalty ", " frequency_penalty ", "
+.IR presence_penalty ", " enable_thinking " and " tools .
+Streaming responses use server\-sent events and end with
+.IR "data: [DONE]" .
+.TP
+.B POST /v1/reset
+Forget the conversation context.
+.PP
+The same endpoints are also accepted without the
+.I /v1
+prefix, because clients disagree about whether it belongs in the base URL they
+are configured with. For clients that expect a base URL, use
+.IR http://host:port/v1 .
+.SH AUTHENTICATION
+If no key is configured the API is open. If a key is configured, every endpoint
+requires
+.B Authorization: Bearer
+.I key
+and answers 401 otherwise. The comparison is done in constant time.
+.PP
+The API speaks plain HTTP. A key keeps stray clients out but does not survive
+packet capture; put a TLS proxy in front of it if the board is reachable from an
+untrusted network.
+.SH CONCURRENCY
+The NPU serves one request at a time. Requests that arrive while the NPU is busy
+wait in a queue of up to
+.B \-\-max\-queue
+entries and are refused with HTTP 503 beyond that.
+.SH ENVIRONMENT
+.TP
+.B RKLLM_API_KEY
+API key for
+.BR serve .
+.TP
+.B RKLLM_MODEL_DIR
+Colon\-separated list of extra directories searched for models.
+.TP
+.B RKLLM_LIB
+Path to
+.IR librkllmrt.so .
+.TP
+.B RKLLM_<OPTION>
+Every
+.B serve
+option can also be preset through the environment: the option name in upper case,
+dashes turned into underscores, prefixed with
+.BR RKLLM_ ,
+so
+.B RKLLM_TEMPERATURE
+stands for
+.BR \-\-temperature .
+A flag given on the command line always wins. A value that does not parse is
+reported on stderr and the built\-in default is used instead, so a typo in a
+configuration file cannot stop the service from starting. This is the mechanism
+the service unit's configuration file uses.
+.TP
+.B SOURCE_DATE_EPOCH
+Not used by
+.BR rkllm ;
+it only affects how the Debian package is built.
+.SH FILES
+.TP
+.I /usr/lib/<triplet>/librkllmrt.so
+The runtime library.
+.TP
+.I /usr/include/rkllm/rkllm.h
+The C API header.
+.TP
+.I @SERVER_DEFAULTS@
+Configuration for the systemd unit, and a
+.I conffile
+of this package: local edits survive an upgrade, and the file is deleted when
+the package is removed. Every
+.B serve
+parameter has its own entry there, documented in English and in Chinese. It is
+read by systemd, not by a shell, so there is no variable expansion. Apply a
+change with
+.BR "systemctl restart @SERVER_UNIT@" .
+.TP
+.I /usr/lib/systemd/system/@SERVER_UNIT@
+Service unit for
+.BR "rkllm serve" .
+Shipped but never enabled or started by the package.
+.TP
+.I /usr/bin/rkllm\-fix\-freq\-<soc>
+Frequency lock helpers called as root.
+.SH EXAMPLES
+Interactive chat:
+.PP
+.nf
+.RS 4
+rkllm chat qwen2.5\-1.5b
+rkllm chat /data/models/qwen2.5\-1.5b.rkllm
+.RE
+.fi
+.PP
+One\-shot, suitable for scripts:
+.PP
+.nf
+.RS 4
+rkllm run qwen2.5\-1.5b "Summarise this text in one line."
+.RE
+.fi
+.PP
+API server with an API key, then a request from another terminal:
+.PP
+.nf
+.RS 4
+rkllm serve /data/models/qwen2.5\-1.5b.rkllm \-\-host 0.0.0.0 \-\-port 8080 \-\-api\-key sekret
+curl http://127.0.0.1:8080/v1/chat/completions \\
+  \-H 'Content\-Type: application/json' \\
+  \-H 'Authorization: Bearer sekret' \\
+  \-d '{"messages":[{"role":"user","content":"hello"}]}'
+.RE
+.fi
+.PP
+The same key through the environment, which keeps it out of
+.BR ps :
+.PP
+.nf
+.RS 4
+RKLLM_API_KEY=sekret rkllm serve /data/models/qwen2.5\-1.5b.rkllm
+.RE
+.fi
+.PP
+Verify an installation without a model:
+.PP
+.nf
+.RS 4
+rkllm selftest
+rkllm info
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Runtime error: model not found, library not loadable, inference failure.
+.TP
+.B 2
+No command given; the usage message was printed.
+.TP
+.B 130
+Interrupted with Ctrl\-C before completion.
+.SH NOTES
+A prompt far beyond the model's context window can make the runtime crash with
+SIGSEGV, which takes the whole service down. Requests larger than eight bytes
+per context token are therefore refused with HTTP 400 before they reach the
+runtime. The check is a byte budget, not a token count, because no tokeniser is
+available in this script.
+.PP
+Prompts are not tokenised here, so the
+.I usage
+figures in API responses are estimated by splitting on whitespace. Do not use
+them for billing.
+.SH SEE ALSO
+.BR systemctl (1),
+.BR curl (1)
+.PP
+Documentation for the SDK itself is installed under
+.IR /usr/share/doc/rkllm\-runtime/ ,
+and the upstream example sources under
+.IR /usr/share/rkllm\-runtime/examples/ .

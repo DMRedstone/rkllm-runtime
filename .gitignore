@@ -1,0 +1,15 @@
+# 本机会话记录，不入库
+.workbuddy/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 构建产物不入库，只发 GitHub Release
+交付/*.deb

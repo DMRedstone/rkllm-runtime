@@ -1,0 +1,26 @@
+# CMake package configuration for @PACKAGE@
+#
+# Usage from a consumer project:
+#   find_package(rkllm REQUIRED)
+#   target_link_libraries(my_app PRIVATE rkllm::rkllmrt)
+#
+# Provided imported target : rkllm::rkllmrt
+# Provided variables       : RKLLM_INCLUDE_DIRS, RKLLM_LIBRARIES, RKLLM_VERSION
+
+# Absolute install locations are baked in at packaging time; resolving them from
+# CMAKE_CURRENT_LIST_FILE would be off by one directory level because the config
+# lives in <libdir>/cmake/rkllm/.
+set(RKLLM_VERSION "@UPSTREAM_VERSION@")
+set(RKLLM_INCLUDE_DIRS "@PKGINCLUDE_DIR_ABS@")
+set(RKLLM_LIBRARY_DIRS "@LIBDIR_ABS@")
+set(RKLLM_LIBRARIES "@LIBDIR_ABS@/librkllmrt.so")
+
+# The upstream .so declares DT_SONAME "librkllmrt.so" (no version suffix), so the
+# file name must stay exactly librkllmrt.so for already linked binaries.
+if(NOT TARGET rkllm::rkllmrt)
+    add_library(rkllm::rkllmrt SHARED IMPORTED)
+    set_target_properties(rkllm::rkllmrt PROPERTIES
+        IMPORTED_LOCATION "${RKLLM_LIBRARIES}"
+        INTERFACE_INCLUDE_DIRECTORIES "${RKLLM_INCLUDE_DIRS}"
+        IMPORTED_NO_SONAME FALSE)
+endif()

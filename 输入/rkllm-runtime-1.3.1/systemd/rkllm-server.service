@@ -1,0 +1,35 @@
+[Unit]
+Description=RKLLM OpenAI-compatible inference server
+Documentation=file:/usr/share/doc/@PACKAGE@/README.Debian
+After=network.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/rkllm-server
+# Note for anyone tempted to add a ConditionPathExists: there is no single path
+# that reliably means "the NPU is usable". Drivers from 0.9.x onwards do NOT
+# create /dev/rknpu - they register the NPU as a DRM render node - so guarding on
+# that path silently skips the unit on perfectly working boards. Whether the NPU
+# really works is decided by rkllm_init() at startup, and its error message names
+# the reason. StartLimitBurst keeps a broken board from restarting forever.
+# Refuse to start until an operator has chosen a model.
+ExecStartPre=/bin/sh -c 'test -n "$$RKLLM_MODEL" || { echo "rkllm-server: set RKLLM_MODEL in /etc/default/rkllm-server first" >&2; exit 1; }'
+# Wrapped in /bin/sh on purpose. systemd expands an unset variable to an EMPTY
+# ARGUMENT, so a bare `${RKLLM_PLATFORM_ARG}` with nothing configured would pass
+# a stray "" to rkllm, which argparse rejects as an unrecognised argument - the
+# service then failed with exit code 2 and only "status=2" in the journal. An
+# unquoted empty variable in the shell disappears instead. The quoted ones are
+# the mandatory settings; the unquoted two are whole option words.
+ExecStart=/bin/sh -c 'exec /usr/bin/rkllm serve "$$RKLLM_MODEL" --host "$$RKLLM_HOST" --port "$$RKLLM_PORT" $$RKLLM_PLATFORM_ARG $$RKLLM_EXTRA_ARGS'
+Restart=on-failure
+RestartSec=5
+# The runtime warns that a low descriptor limit breaks long contexts.
+LimitNOFILE=102400
+# The helper that raises CPU/NPU/DDR clocks needs root, as does the NPU node.
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

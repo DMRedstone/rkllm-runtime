@@ -1,0 +1,286 @@
+{
+  "target": "http://192.0.2.10:8080",
+  "model": "qwen3.5-4b_w8a8_rk3588",
+  "mode": "full",
+  "started_at": 1792060202.0831237,
+  "elapsed_s": 429.9,
+  "completed": true,
+  "stopped_at_section": null,
+  "results": [
+    {
+      "section": "0",
+      "metric": "model",
+      "value": "qwen3.5-4b_w8a8_rk3588"
+    },
+    {
+      "section": "0",
+      "metric": "uptime_s",
+      "value": 681.0
+    },
+    {
+      "section": "0",
+      "metric": "counters",
+      "value": "requests=4 rejected=0 errors=0"
+    },
+    {
+      "section": "A",
+      "metric": "short prompt, 32 tok",
+      "value": "200  2.32s  in=2 out=15  6.5 tok/s"
+    },
+    {
+      "section": "A",
+      "metric": "medium prompt, 32 tok",
+      "value": "200  3.28s  in=200 out=10  3.0 tok/s"
+    },
+    {
+      "section": "A",
+      "metric": "long prompt, 32 tok",
+      "value": "200  11.98s  in=1200 out=10  0.8 tok/s"
+    },
+    {
+      "section": "A",
+      "metric": "generate 128 tok",
+      "value": "200  22.72s  in=17 out=200  8.8 tok/s"
+    },
+    {
+      "section": "A",
+      "metric": "generate 256 tok",
+      "value": "200  45.68s  in=17 out=370  8.1 tok/s"
+    },
+    {
+      "section": "B",
+      "metric": "concurrency=1  x24 requests",
+      "value": "wall 25.7s  qps 0.93  p50 1.07s  p90 1.09s  p99 1.09s  agg 0.9 tok/s  err 0",
+      "requests": 24,
+      "concurrency": 1,
+      "ok": 24,
+      "errors": 0,
+      "wall_s": 25.74,
+      "qps": 0.933,
+      "completion_tokens": 24,
+      "agg_tok_s": 0.93,
+      "p50_s": 1.074,
+      "p90_s": 1.091,
+      "p99_s": 1.092,
+      "max_s": 1.092
+    },
+    {
+      "section": "B",
+      "metric": "concurrency=2  x24 requests",
+      "value": "wall 25.5s  qps 0.94  p50 1.60s  p90 2.14s  p99 2.16s  agg 0.9 tok/s  err 0",
+      "requests": 24,
+      "concurrency": 2,
+      "ok": 24,
+      "errors": 0,
+      "wall_s": 25.52,
+      "qps": 0.94,
+      "completion_tokens": 24,
+      "agg_tok_s": 0.94,
+      "p50_s": 1.6,
+      "p90_s": 2.144,
+      "p99_s": 2.159,
+      "max_s": 2.162
+    },
+    {
+      "section": "B",
+      "metric": "concurrency=4  x24 requests",
+      "value": "wall 25.9s  qps 0.93  p50 2.71s  p90 4.31s  p99 4.37s  agg 0.9 tok/s  err 0",
+      "requests": 24,
+      "concurrency": 4,
+      "ok": 24,
+      "errors": 0,
+      "wall_s": 25.9,
+      "qps": 0.927,
+      "completion_tokens": 24,
+      "agg_tok_s": 0.93,
+      "p50_s": 2.711,
+      "p90_s": 4.31,
+      "p99_s": 4.37,
+      "max_s": 4.381
+    },
+    {
+      "section": "B",
+      "metric": "concurrency=8  x24 requests",
+      "value": "wall 26.5s  qps 0.91  p50 4.97s  p90 8.43s  p99 8.98s  agg 0.9 tok/s  err 0",
+      "requests": 24,
+      "concurrency": 8,
+      "ok": 24,
+      "errors": 0,
+      "wall_s": 26.52,
+      "qps": 0.905,
+      "completion_tokens": 24,
+      "agg_tok_s": 0.91,
+      "p50_s": 4.97,
+      "p90_s": 8.429,
+      "p99_s": 8.983,
+      "max_s": 9.03
+    },
+    {
+      "section": "B",
+      "metric": "concurrency=16  x24 requests",
+      "value": "wall 27.8s  qps 0.86  p50 7.43s  p90 15.75s  p99 18.19s  agg 0.9 tok/s  err 0",
+      "requests": 24,
+      "concurrency": 16,
+      "ok": 24,
+      "errors": 0,
+      "wall_s": 27.81,
+      "qps": 0.863,
+      "completion_tokens": 24,
+      "agg_tok_s": 0.86,
+      "p50_s": 7.427,
+      "p90_s": 15.746,
+      "p99_s": 18.193,
+      "max_s": 18.457
+    },
+    {
+      "section": "B",
+      "metric": "  server counters",
+      "value": "requests=129 rejected=0 errors=0"
+    },
+    {
+      "section": "C",
+      "metric": "40 sequential requests",
+      "value": "40 ok  0 failed  median 1.22s  agg 0.8 tok/s"
+    },
+    {
+      "section": "C",
+      "metric": "  latency drift",
+      "value": "first quarter 1.21s -> last quarter 1.22s  (delta +0.01s)"
+    },
+    {
+      "section": "C",
+      "metric": "  server counters",
+      "value": "requests=169 errors=0"
+    },
+    {
+      "section": "D",
+      "metric": "burst 1: 32 simultaneous",
+      "value": "wall 49.0s  statuses {200: 32}"
+    },
+    {
+      "section": "D",
+      "metric": "burst 2: 32 simultaneous",
+      "value": "wall 49.4s  statuses {200: 32}"
+    },
+    {
+      "section": "D",
+      "metric": "burst 3: 32 simultaneous",
+      "value": "wall 49.5s  statuses {200: 32}"
+    },
+    {
+      "section": "D",
+      "metric": "totals",
+      "value": "statuses {200: 96}"
+    },
+    {
+      "section": "D",
+      "metric": "  no explicit shed observed",
+      "value": "96 requests all queued/accepted"
+    },
+    {
+      "section": "D",
+      "metric": "  server counters",
+      "value": "requests=265 rejected=0 errors=0"
+    },
+    {
+      "section": "E",
+      "metric": "advertised guard",
+      "value": "context 4096 tokens, 32768 byte budget"
+    },
+    {
+      "section": "E",
+      "metric": "max_tokens = 0",
+      "value": "200  0.98s  {\"id\": \"chatcmpl-2f1c8744bbc24968be3735ec\", \"object\": \"chat.completion"
+    },
+    {
+      "section": "E",
+      "metric": "max_tokens = -1",
+      "value": "200  0.88s  {\"id\": \"chatcmpl-ed887f9145104c8ab7b25861\", \"object\": \"chat.completion"
+    },
+    {
+      "section": "E",
+      "metric": "max_tokens huge",
+      "value": "200  1.64s  {\"id\": \"chatcmpl-362b20391fc44349bce25475\", \"object\": \"chat.completion"
+    },
+    {
+      "section": "E",
+      "metric": "temperature = -1",
+      "value": "200  1.73s  {\"id\": \"chatcmpl-51ccfddee7da499d8b668187\", \"object\": \"chat.completion"
+    },
+    {
+      "section": "E",
+      "metric": "top_p = 2.0",
+      "value": "200  1.58s  {\"id\": \"chatcmpl-47be84c77dbc4183b8db7ce7\", \"object\": \"chat.completion"
+    },
+    {
+      "section": "E",
+      "metric": "2000 messages",
+      "value": "200  1.65s  {\"id\": \"chatcmpl-24cae213d010413e8ddb60bf\", \"object\": \"chat.completion"
+    },
+    {
+      "section": "E",
+      "metric": "unknown role",
+      "value": "200  1.65s  {\"id\": \"chatcmpl-d96f9932f6574a578baf98f3\", \"object\": \"chat.completion"
+    },
+    {
+      "section": "E",
+      "metric": "control chars",
+      "value": "200  1.55s  {\"id\": \"chatcmpl-b718f52f4ae14aedbdb0dd28\", \"object\": \"chat.completion"
+    },
+    {
+      "section": "E",
+      "metric": "emoji + CJK + rtl",
+      "value": "200  1.72s  {\"id\": \"chatcmpl-19fd647c592a4c7b969f429a\", \"object\": \"chat.completion"
+    },
+    {
+      "section": "E",
+      "metric": "prompt just under budget",
+      "value": "400  0.06s  {\"error\": {\"message\": \"prompt too long: about 10890 tokens for a 4096-"
+    },
+    {
+      "section": "E",
+      "metric": "prompt just over budget",
+      "value": "400  0.06s  {\"error\": {\"message\": \"prompt too long: about 10956 tokens for a 4096-"
+    },
+    {
+      "section": "E",
+      "metric": "CJK prompt near budget",
+      "value": "400  0.06s  {\"error\": {\"message\": \"prompt too long: about 10922 tokens for a 4096-"
+    },
+    {
+      "section": "E2",
+      "metric": "not JSON",
+      "value": "400  0.07s  {\"error\": {\"message\": \"invalid JSON body: Expecting value: l"
+    },
+    {
+      "section": "E2",
+      "metric": "JSON array",
+      "value": "400  0.06s  {\"error\": {\"message\": \"missing 'messages' in request body\", "
+    },
+    {
+      "section": "E2",
+      "metric": "JSON string",
+      "value": "400  0.06s  {\"error\": {\"message\": \"missing 'messages' in request body\", "
+    },
+    {
+      "section": "E2",
+      "metric": "truncated JSON",
+      "value": "400  0.06s  {\"error\": {\"message\": \"invalid JSON body: Expecting property"
+    },
+    {
+      "section": "E2",
+      "metric": "empty body",
+      "value": "400  0.06s  {\"error\": {\"message\": \"empty request body\", \"type\": \"invalid"
+    },
+    {
+      "section": "E2",
+      "metric": "deeply nested",
+      "value": "400  0.06s  {\"error\": {\"message\": \"no message with usable text: every me"
+    },
+    {
+      "section": "E2",
+      "metric": "8MB body",
+      "value": "400  0.02s  {\"error\": {\"message\": \"request body larger than 8388608 byte"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+#!/bin/sh
+# prerm for @PACKAGE@
+#
+# The package ships @SERVER_UNIT@ but never enables it. If an operator enabled
+# it by hand, `systemctl enable` created a symlink in /etc/systemd/system/ that
+# dpkg does not know about, so it has to be taken down here - otherwise removing
+# the package would leave a dangling symlink behind. deb-systemd-helper is the
+# standard tool for that and ships in init-system-helpers (essential).
+set -e
+
+case "$1" in
+    remove|deconfigure)
+        if command -v deb-systemd-helper >/dev/null 2>&1; then
+            deb-systemd-helper stop @SERVER_UNIT@ >/dev/null || true
+        fi
+        ;;
+    upgrade|failed-upgrade)
+        ;;
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

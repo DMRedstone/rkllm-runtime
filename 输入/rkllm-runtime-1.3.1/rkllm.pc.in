@@ -1,0 +1,11 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=@LIBDIR_ABS@
+includedir=@PKGINCLUDE_DIR_ABS@
+
+Name: @PACKAGE@
+Description: Rockchip RKLLM runtime (large language model inference on Rockchip NPU)
+URL: https://github.com/airockchip/rknn-llm
+Version: @UPSTREAM_VERSION@
+Libs: -L${libdir} -lrkllmrt
+Cflags: -I${includedir}

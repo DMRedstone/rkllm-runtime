@@ -1,0 +1,53 @@
+{
+  "_comment": "In-place text patches applied to upstream files while staging. Each entry lists the upstream path inside the release tarball. The literal token @...@ placeholders are substituted by tools/make_deb.py.",
+  "patches": [
+    {
+      "file": "examples/rkllm_server_demo/rkllm_server/flask_server.py",
+      "reason": "Upstream loads the runtime with ctypes.CDLL('lib/librkllmrt.so'), a path relative to the SDK tree that does not exist once the library is installed system-wide.",
+      "replacements": [
+        {
+          "find": "rkllm_lib = ctypes.CDLL('lib/librkllmrt.so')",
+          "replace": "def _load_rkllmrt():\n    \"\"\"Locate librkllmrt.so: local ./lib first, then the packaged system copy.\"\"\"\n    import os\n    candidates = [\n        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib', 'librkllmrt.so'),\n        '@LIBDIR_ABS@/librkllmrt.so',\n        '/usr/lib/librkllmrt.so',\n        'librkllmrt.so',\n    ]\n    for candidate in candidates:\n        try:\n            return ctypes.CDLL(candidate)\n        except OSError:\n            pass\n    raise OSError('librkllmrt.so not found; tried: ' + ', '.join(candidates))\n\nrkllm_lib = _load_rkllmrt()"
+        }
+      ]
+    },
+    {
+      "file": "examples/rkllm_server_demo/rkllm_server/gradio_server.py",
+      "reason": "Same ctypes CDLL path problem as flask_server.py.",
+      "replacements": [
+        {
+          "find": "rkllm_lib = ctypes.CDLL('lib/librkllmrt.so')",
+          "replace": "def _load_rkllmrt():\n    \"\"\"Locate librkllmrt.so: local ./lib first, then the packaged system copy.\"\"\"\n    import os\n    candidates = [\n        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib', 'librkllmrt.so'),\n        '@LIBDIR_ABS@/librkllmrt.so',\n        '/usr/lib/librkllmrt.so',\n        'librkllmrt.so',\n    ]\n    for candidate in candidates:\n        try:\n            return ctypes.CDLL(candidate)\n        except OSError:\n            pass\n    raise OSError('librkllmrt.so not found; tried: ' + ', '.join(candidates))\n\nrkllm_lib = _load_rkllmrt()"
+        }
+      ]
+    },
+    {
+      "file": "examples/rkllm_server_demo/build_rkllm_server_flask.sh",
+      "reason": "Upstream copies librkllmrt.so and the tuning scripts out of ../../rkllm-runtime and ../../scripts inside the SDK tree.",
+      "replacements": [
+        {
+          "find": "cp ../../rkllm-runtime/Linux/librkllm_api/aarch64/librkllmrt.so  ./rkllm_server/lib/",
+          "replace": "cp @LIBDIR_ABS@/librkllmrt.so ./rkllm_server/lib/"
+        },
+        {
+          "find": "cp ../../scripts/fix_freq_rk3576.sh ./rkllm_server\ncp ../../scripts/fix_freq_rk3588.sh ./rkllm_server\ncp ../../scripts/fix_freq_rv1126b.sh ./rkllm_server\ncp ../../scripts/fix_freq_rk3562.sh ./rkllm_server",
+          "replace": "for plat in 3576 3588 rv1126b 3562; do\n    cp /usr/bin/rkllm-fix-freq-rk${plat} ./rkllm_server/fix_freq_rk${plat}.sh\ndone"
+        }
+      ]
+    },
+    {
+      "file": "examples/rkllm_server_demo/build_rkllm_server_gradio.sh",
+      "reason": "Upstream copies librkllmrt.so and the tuning scripts out of ../../rkllm-runtime and ../../scripts inside the SDK tree.",
+      "replacements": [
+        {
+          "find": "cp ../../rkllm-runtime/Linux/librkllm_api/aarch64/librkllmrt.so  ./rkllm_server/lib/",
+          "replace": "cp @LIBDIR_ABS@/librkllmrt.so ./rkllm_server/lib/"
+        },
+        {
+          "find": "cp ../../scripts/fix_freq_rk3576.sh ./rkllm_server\ncp ../../scripts/fix_freq_rk3588.sh ./rkllm_server\ncp ../../scripts/fix_freq_rv1126b.sh ./rkllm_server\ncp ../../scripts/fix_freq_rk3562.sh ./rkllm_server",
+          "replace": "for plat in 3576 3588 rv1126b 3562; do\n    cp /usr/bin/rkllm-fix-freq-rk${plat} ./rkllm_server/fix_freq_rk${plat}.sh\ndone"
+        }
+      ]
+    }
+  ]
+}
