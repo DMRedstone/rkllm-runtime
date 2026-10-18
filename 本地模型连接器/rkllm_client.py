@@ -8,10 +8,10 @@ Windows / Linux / macOS 均可。
 **多目标**：支持同时配置**多个本地部署**（不同地址 / 令牌 / 模型），用目标名切换。
 配置是本目录下的**纯文本** `targets.conf`（参考 `targets.example.conf`），随目录一起移植：
 
-    # 一行一个目标：[名称 =] 地址 [密钥] [备注…] [model=模型名]
-    board = 192.0.2.10:8080 <token>            # 只写地址和密钥就行
-    192.0.2.50:8080 <token>                 # 名称省略时用地址作名称
-    board-b = 192.0.2.10:8080 <token> model=qwen2.5-1.5b   # 需要时再指定模型
+    # 一行一个目标：[名称 =] 地址[@密钥] [preset=档位] [键=值…] [备注…]
+    board = 192.0.2.10:8080@TOKEN             # 地址与密钥用 @ 连成一个字段，无歧义
+    192.0.2.50:8080                           # 无密钥直接写地址（addr@ 表示空密钥）
+    board-b = 192.0.2.10:8080@TOKEN model=qwen2.5-1.5b preset=1b   # 需要时再指定模型
 
 **配置来源优先级**：`RKLLM_CONFIG` 指定的文件 → 本目录 `targets.conf` → 本目录
 `targets.json`（旧格式，仍兼容）→ 环境变量单目标（`RKLLM_HOST` / `RKLLM_API_KEY` / `RKLLM_MODEL`）。
@@ -371,20 +371,29 @@ def _coerce_opt(raw_key, raw_val, lineno):
 def _entry(name, parts, lineno):
     """把字段列表组装成目标配置。
 
-    位置列只有两样：**地址**（第 1 列，必填）、**密钥**（第 2 列，可选）。
+    位置列只有一样：**地址**（第 1 列，必填）。地址可用 `@` 绑定密钥形成原子字段
+    （`地址@密钥`，无歧义；`地址@` 表示空密钥）——推荐写法。兼容旧式：地址后跟独立
+    密钥列（第 2 列裸词）。
     其余内容：`model=` / `key=` 等具名项按名解析；`preset=` 选档位；可识别的阈值项
     （见 OPT_KEYS）覆盖该档位的对应值；剩下的文字一律当备注。
     """
-    if not _looks_like_host(parts[0]):
+    addr = parts[0]
+    key_inline = None                          # None=未用 @ 形式；""=显式空密钥
+    if "@" in addr:
+        addr, _, key_inline = addr.partition("@")
+        key_inline = key_inline.strip()
+    if not _looks_like_host(addr):
         _warn("[local-rkllm] 配置第 %d 行地址 %r 看起来不像地址（缺 `.` 或 `:`），请确认\n"
-              % (lineno, parts[0]))
-    scheme, host = _split_base(parts[0])
+              % (lineno, addr))
+    scheme, host = _split_base(addr)
     if not name:
-        name = host                                   # 名称省略 → 用地址当名称
+        name = host                            # 名称省略 → 用地址当名称
     rest = parts[1:]
-    key = ""
-    if rest and "=" not in rest[0]:
-        key = rest.pop(0)                             # 第二列是密钥
+    key = "" if key_inline is not None else ""
+    if key_inline is not None:
+        key = key_inline
+    elif rest and "=" not in rest[0]:
+        key = rest.pop(0)                      # 旧式：第二列是密钥
     model, notes, opts, ability = FALLBACK_MODEL, [], {}, ""
     i = 0
     while i < len(rest):
@@ -425,16 +434,43 @@ def _entry(name, parts, lineno):
 def _parse_conf(text):
     """解析纯文本配置，返回 (targets, default)。
 
-    格式（一行一个目标，空白分隔、多余空格自动折叠）：
-        [名称 =] 地址 [密钥] [备注…] [model=模型名]
-    名称省略时用地址作名称；密钥省略按无令牌；模型省略用 FALLBACK_MODEL（实际以服务端
-    /health 返回为准）。独立一行 `default = 目标名` 指定默认目标（不写则取第一个）。
-    整行以 `#` / `;` 开头为注释，行内 ` #` 之后也是注释。
+    目标区格式（一行一个目标，空白分隔、多余空格自动折叠）：
+        [名称 =] 地址[@密钥] [preset=档位] [键=值…] [备注…]
+    名称省略时用地址作名称；密钥用 `@` 绑定在地址上（推荐，无歧义），旧式独立密钥列
+    仍兼容；模型省略用 FALLBACK_MODEL（实际以服务端 /health 返回为准）。独立一行
+    `default = 目标名` 指定默认目标（不写则取第一个）。整行以 `#` / `;` 开头为注释，
+    行内 ` #` 之后也是注释。
+
+    `[ability]` 段：段内一行 `目标名 = 能力描述`，覆盖该目标给调用方模型看的能力边界
+    （未写的回落到 preset 档位默认描述）。
     """
     targets, default = {}, None
+    section = None                             # None=目标区；"ability"=能力段
+    ability_map = {}
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if not line or line[0] in "#;":
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            sec = line[1:-1].strip().lower()
+            if sec in ("ability", "能力", "能力说明"):
+                section = "ability"
+            else:
+                section = None
+                _warn("[local-rkllm] 配置第 %d 行未知配置段 [%s]，该段内容按目标区处理\n"
+                      % (lineno, sec))
+            continue
+        if section == "ability":
+            hit = re.search(r"(?:^|\s)[#;]", line)   # 行内注释（段内描述中避免用 ` #`）
+            if hit:
+                line = line[:hit.start()].rstrip()
+            if "=" in line:
+                n, _, v = line.partition("=")
+                if n.strip():
+                    ability_map[n.strip()] = v.strip()
+            elif line:
+                _warn("[local-rkllm] 配置第 %d 行 [ability] 段缺少 `目标名 =`，已忽略：%r\n"
+                      % (lineno, line))
             continue
         hit = re.search(r"(?:^|\s)[#;]", line)        # 行内注释
         if hit:
@@ -452,12 +488,15 @@ def _parse_conf(text):
         if name.lower() in ("default", "默认"):
             default = parts[0]                        # default = board / default board
             continue
-        if not name and len(parts) > 1 and not _looks_like_host(parts[0]):
-            name = parts.pop(0)                       # 也接受 `board 192.0.2.10:8080 KEY`
+        if not name and len(parts) > 1 and not _looks_like_host(parts[0].split("@")[0]):
+            name = parts.pop(0)                       # 也接受 `board 192.0.2.10:8080@KEY`
         if name in targets:
             _warn("[local-rkllm] 配置第 %d 行目标名重复（%s），后者覆盖前者\n" % (lineno, name))
         name, entry = _entry(name, parts, lineno)
         targets[name] = entry
+    for name, entry in targets.items():           # [ability] 段后处理，位置无关
+        if name in ability_map:                   # 优先于档位默认与行内 ability=
+            entry["ability"] = ability_map[name]
     return targets, default
 
 
