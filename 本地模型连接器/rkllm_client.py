@@ -74,6 +74,7 @@ Windows / Linux / macOS 均可。
 import json
 import os
 import re
+import stat
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -343,6 +344,20 @@ def _coerce_opt(raw_key, raw_val, lineno):
             val = float(raw_val)
         elif key == "degen_check":
             val = raw_val.lower() in _TRUE_WORDS
+        elif key == "health":
+            # health 值会被拼进 URL（base + path）。含 `?` / `#` 会改变请求语义，
+            # `//host` 会变成协议相对 URL 指向别的主机——只接受受控取值或绝对路径。
+            low = raw_val.lower()
+            if low == "openai":
+                val = "/v1/models"
+            elif low in ("rkllm", "none"):
+                val = low
+            elif (not raw_val.startswith("/") or raw_val.startswith("//")
+                  or "?" in raw_val or "#" in raw_val):
+                raise ValueError(
+                    "health 必须是 rkllm / none / openai，或以单个 / 开头且不含 ?/# 的路径")
+            else:
+                val = raw_val
         else:
             val = raw_val
         if isinstance(val, (int, float)) and not isinstance(val, bool):
@@ -351,8 +366,6 @@ def _coerce_opt(raw_key, raw_val, lineno):
                     raise ValueError("不能为负数")
             elif val <= 0:
                 raise ValueError("必须为正数")
-        if key == "health" and val.lower() == "openai":
-            val = "/v1/models"                        # openai 兼容服务的通用探测端点
     except Exception:  # noqa: BLE001
         _warn("[local-rkllm] 配置第 %s 行 %s=%s 不是有效值，用默认 %r\n"
               % (lineno, raw_key, raw_val, DEFAULTS[key]))
@@ -550,6 +563,31 @@ def _parse_json(text):
     return targets, default
 
 
+def _warn_if_config_readable(path):
+    """配置文件含明文令牌而其他用户可读时告警。
+
+    `targets.conf` 里的令牌是明文（设计如此：只在本机、不入库），但文件若是
+    0644，同机任何账户都能读到。只在 POSIX 上判断——Windows 的 st_mode 不反映 ACL。
+    """
+    if os.name != "posix":
+        return
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        return
+    if not mode & 0o004:                       # 其他用户不可读，没问题
+        return
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return
+    if not re.search(r"@\S+|\b(?:key|token|apikey|api_key|密钥)\s*=", text, re.I):
+        return
+    _warn("[local-rkllm] %s 含明文令牌但其他用户可读（mode %03o）；建议 chmod 600\n"
+          % (path, mode))
+
+
 def load_targets():
     """读取目标配置，返回 (targets, default_name)。
 
@@ -579,6 +617,7 @@ def load_targets():
                 text = fh.read()
             targets, default = (_parse_json(text) if path.lower().endswith(".json")
                                 else _parse_conf(text))
+            _warn_if_config_readable(path)
         except Exception as exc:  # noqa: BLE001
             _warn("[local-rkllm] 配置文件解析失败（%s）：%s\n" % (path, exc))
     elif os.environ.get("RKLLM_CONFIG", "").strip():
@@ -1058,6 +1097,10 @@ def _cli(argv):
     i = 1
     while i < len(argv):
         if argv[i] == "--target":
+            if i + 1 >= len(argv):
+                sys.stderr.write("--target 后面缺少目标名；已配置：%s\n"
+                                 % ("、".join(load_targets()[0]) or "（无）"))
+                return 2
             target = argv[i + 1]; i += 2
         else:
             rest.append(argv[i]); i += 1
@@ -1069,8 +1112,15 @@ def _cli(argv):
     if cmd == "calibrate":
         tokens = 128
         for j, a in enumerate(rest):
-            if a == "--tokens" and j + 1 < len(rest):
-                tokens = int(rest[j + 1])
+            if a == "--tokens":
+                if j + 1 >= len(rest):
+                    sys.stderr.write("--tokens 后面缺少取值\n")
+                    return 2
+                try:
+                    tokens = int(rest[j + 1])
+                except ValueError:
+                    sys.stderr.write("--tokens 需要整数，收到 %r\n" % rest[j + 1])
+                    return 2
         c = calibrate(target=target, max_tokens=tokens)
         sys.stderr.write("[calibrate] %s @ %s：实测 %s tok/s（%s token / %ss）\n"
                          % (c["model"], c["target"], c["measured_tok_per_sec"],
@@ -1084,12 +1134,25 @@ def _cli(argv):
         i = 0
         while i < len(rest):
             a = rest[i]
+            if a in ("--file", "--system", "--max-tokens") and i + 1 >= len(rest):
+                sys.stderr.write("%s 后面缺少取值\n" % a)
+                return 2
             if a == "--file":
-                prompt = open(rest[i + 1], encoding="utf-8").read(); i += 2
+                try:
+                    prompt = open(rest[i + 1], encoding="utf-8").read()
+                except OSError as exc:
+                    sys.stderr.write("读不到 --file %s：%s\n" % (rest[i + 1], exc))
+                    return 2
+                i += 2
             elif a == "--system":
                 system = rest[i + 1]; i += 2
             elif a == "--max-tokens":
-                max_tokens = int(rest[i + 1]); i += 2
+                try:
+                    max_tokens = int(rest[i + 1])
+                except ValueError:
+                    sys.stderr.write("--max-tokens 需要整数，收到 %r\n" % rest[i + 1])
+                    return 2
+                i += 2
             else:
                 prompt = a; i += 1
         if prompt is None:
