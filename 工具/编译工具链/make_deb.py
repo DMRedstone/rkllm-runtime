@@ -43,12 +43,12 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-PACKAGING = Path(os.environ.get("RKLLM_PACKAGING_DIR") or (ROOT / "packaging"))
+PACKAGING = Path(os.environ.get("RKLLM_PACKAGING_DIR") or (ROOT.parent / "输入" / "rkllm-runtime-1.3.1"))
 
 # 上游 release tarball 位置（软编码）：优先环境变量 RKLLM_RELEASE_TARBALL，
 # 未设置时使用仓库内随附的精简上游库。换机器 / 换版本只需设该环境变量，不必改脚本。
 SOURCE_TARBALL = Path(os.environ.get("RKLLM_RELEASE_TARBALL")
-                      or ROOT / "输入" / "rknn-llm-release-v1.3.1.tar.gz")
+                      or ROOT.parent / "输入" / "rknn-llm-release-v1.3.1.tar.gz")
 TARBALL_PREFIX = "rknn-llm-release-v1.3.1"
 
 UPSTREAM_VERSION = "1.3.1"
