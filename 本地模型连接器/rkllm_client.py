@@ -76,6 +76,7 @@ import os
 import re
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import urllib.error
 import urllib.request
@@ -122,6 +123,7 @@ DEFAULTS = {
     "overrun": 1.56,         # 硬截断余量：服务端不遵守 max_tokens，实测超出 25%–56%
     "degen_check": True,     # 退化特征自检（重复词流）
     "health": "rkllm",       # 健康检查方式：rkllm | none | 任意 HTTP 路径
+    "link": "direct",        # 链路档位：direct=内网直连；tunnel=内网穿透（串行探测、限流）
 }
 
 # 配置行里可用的键名（含中文别名）→ DEFAULTS 的键
@@ -135,7 +137,8 @@ OPT_KEYS = {
     "auth_header": ("auth_header", "认证头"),
     "auth_prefix": ("auth_prefix", "认证前缀"),
     "overrun": ("overrun",), "degen_check": ("degen_check", "degen", "退化自检"),
-    "health": ("health", "健康检查"), "preset": ("preset", "档位", "模式", "通用选项"),
+    "health": ("health", "健康检查"), "link": ("link", "链路"),
+    "preset": ("preset", "档位", "模式", "通用选项"),
     "ability": ("ability", "能力", "能力说明"),
 }
 _INT_OPTS = ("max_in", "max_out", "context", "timeout_floor", "retries", "retry_wait")
@@ -144,6 +147,14 @@ _ZERO_OK = ("retries", "retry_wait", "chars_per_token", "prefill_tps")
 _TRUE_WORDS = ("on", "true", "yes", "1", "是", "开")
 
 _warned = set()
+
+# 链路档位。两种形态访问的是同一个板端服务，差异只在链路，所以按目标配，
+# 不用全局开关：同一进程里可能同时有直连目标与穿透目标。
+LINK_MODES = ("direct", "tunnel")
+LINK_TUNNEL_SLOTS = 2        # 穿透链路同时在飞的请求上限（隧道带宽/并发受限）
+_tunnel_slots = threading.Semaphore(LINK_TUNNEL_SLOTS)
+_context_probed = set()      # 已与服务端协商过 context_len 的目标
+_tps_samples = {}            # 目标名 -> 最近若干次实测吞吐（tok/s）
 
 
 def _warn(msg):
@@ -311,6 +322,13 @@ def _coerce_opt(raw_key, raw_val, lineno):
     if key is None:
         return None, None, False
     raw_val = raw_val.strip()
+    if key == "link":                                 # 链路：只认 direct / tunnel
+        val = raw_val.lower()
+        if val not in LINK_MODES:
+            _warn("[local-rkllm] 配置第 %s 行 link=%s 无效（可选：%s），按默认 %s 处理\n"
+                  % (lineno, raw_val, " / ".join(LINK_MODES), DEFAULTS["link"]))
+            return key, None, True
+        return key, val, True
     if key == "preset":                               # 档位：归一为档位名
         preset = PRESET_ALIASES.get(raw_val.lower())
         if preset is None:
@@ -363,7 +381,7 @@ def _entry(name, parts, lineno):
     if not name:
         name = host                            # 名称省略 → 用地址当名称
     rest = parts[1:]
-    key = "" if key_inline is not None else ""
+    key = ""
     if key_inline is not None:
         key = key_inline
     elif rest and "=" not in rest[0]:
@@ -400,6 +418,7 @@ def _entry(name, parts, lineno):
         _warn("[local-rkllm] 配置第 %d 行 preset=auto → 模型名 %r 认作 %s 档\n"
               % (lineno, model, preset))
     entry = dict(PRESETS[preset])
+    entry.setdefault("link", DEFAULTS["link"])
     entry.update(opts)
     entry.update({"preset": preset, "host": host, "scheme": scheme,
                   "api_key": _check_key(name, key),
@@ -423,6 +442,7 @@ def _parse_conf(text):
     （未写的回落到 preset 档位默认描述）。
     """
     targets, default = {}, None
+    default_decl = None                        # `default = X` 暂存，等目标全部解析完再判定
     section = None                             # None=目标区；"ability"=能力段
     ability_map = {}
     for lineno, raw in enumerate(text.splitlines(), 1):
@@ -463,11 +483,11 @@ def _parse_conf(text):
         parts = rest.split()
         if not parts:
             continue
-        if name.lower() in ("default", "默认"):
-            default = parts[0]                        # default = board / default board
-            continue
         if not name and len(parts) > 1 and not _looks_like_host(parts[0].split("@")[0]):
             name = parts.pop(0)                       # 也接受 `board 192.0.2.10:8080@KEY`
+        if name.lower() in ("default", "默认"):
+            default_decl = (lineno, name, parts)      # 事后判定：见函数末尾
+            continue
         if name in targets:
             _warn("[local-rkllm] 配置第 %d 行目标名重复（%s），后者覆盖前者\n" % (lineno, name))
         name, entry = _entry(name, parts, lineno)
@@ -475,6 +495,26 @@ def _parse_conf(text):
     for name, entry in targets.items():           # [ability] 段后处理，位置无关
         if name in ability_map:                   # 优先于档位默认与行内 ability=
             entry["ability"] = ability_map[name]
+
+    # `default = X` 有两种可能：声明默认目标，或"目标名就叫 default"。
+    # 只有 X 确实是已定义的目标名时才是声明——否则按目标定义解析。
+    # 旧实现在解析到该行时立刻 continue，名为 default 的目标会被静默吞掉，
+    # 而 `default = 127.0.0.1:8080` 这种写法还会把默认名变成地址字符串。
+    if default_decl:
+        lineno, name, parts = default_decl
+        if parts[0] in targets:
+            default = parts[0]
+        elif _looks_like_host(parts[0].split("@")[0]):
+            _warn("[local-rkllm] 配置第 %d 行 %s = %s 不是已定义的目标名，"
+                  "按「目标名 %s」解析\n" % (lineno, name, parts[0], name))
+            if name in targets:
+                _warn("[local-rkllm] 配置第 %d 行目标名重复（%s），后者覆盖前者\n"
+                      % (lineno, name))
+            n, entry = _entry(name, parts, lineno)
+            targets[n] = entry
+        else:
+            _warn("[local-rkllm] 配置第 %d 行默认目标 %r 不存在（已定义：%s），已忽略\n"
+                  % (lineno, parts[0], "、".join(targets) or "无"))
     return targets, default
 
 
@@ -527,6 +567,10 @@ def load_targets():
         cache_key = (path, None, None)
     if _targets_cache["key"] == cache_key and _targets_cache["value"] is not None:
         return _targets_cache["value"]
+
+    # 配置变了：已协商的上下文与实测样本都基于旧配置，一并作废
+    _context_probed.clear()
+    _tps_samples.clear()
 
     targets, default = {}, None
     if os.path.exists(path):
@@ -645,6 +689,94 @@ def _probe(name, cfg):
     return {"status": "ok", "model": model, "mode": mode}, None
 
 
+class _link_guard(object):
+    """链路闸门：穿透目标共享有限槽位，直连目标不受限。
+
+    按目标加锁只能保证「同一目标串行」；多个穿透目标走的是**同一条隧道**，
+    必须按链路分组限流，否则并发会互相挤占，甚至被穿透侧限流。
+    """
+
+    def __init__(self, cfg):
+        self._tunnel = cfg.get("link") == "tunnel"
+
+    def __enter__(self):
+        if self._tunnel:
+            _tunnel_slots.acquire()
+        return self
+
+    def __exit__(self, *_exc):
+        if self._tunnel:
+            _tunnel_slots.release()
+        return False
+
+
+def _negotiate_context(name, cfg, board):
+    """与服务端协商上下文长度：**只下调，不上调**。
+
+    板端模型按更小的 context 转换很常见（省内存），而配置里的 context 往往是
+    「这个模型理论上支持多大」。配大了就是 KV 越界 → 原生库段错误（changelog -9
+    记录过 32668 字节 prompt 打崩服务）。`/health` 的 `context_len` 是服务端自己
+    报的实际值，比任何估算都可靠。
+
+    只探一次（按目标记名），失败静默——协商是增强，不能因此让调用失败。
+    """
+    if name in _context_probed:
+        return cfg
+    _context_probed.add(name)
+    if cfg.get("health", "rkllm") != "rkllm":
+        return cfg                       # 非 rkllm 服务不会报这个字段
+    try:
+        info = board.health()
+    except Exception:                    # noqa: BLE001
+        return cfg
+    if not isinstance(info, dict):
+        return cfg
+    raw = info.get("context_len", info.get("n_ctx"))
+    try:
+        server_ctx = int(raw)
+    except (TypeError, ValueError):
+        return cfg
+    if server_ctx <= 0 or server_ctx >= int(cfg["context"]):
+        return cfg
+    old_ctx, old_in = cfg["context"], cfg["max_in"]
+    cfg["context"] = server_ctx
+    cap = server_ctx - 64 - int(cfg["max_out"])
+    if cap >= 256:
+        cfg["max_in"] = min(int(cfg["max_in"]), cap)
+        _warn("[local-rkllm] 目标 %s 服务端上下文为 %d（配置写的是 %d），"
+              "已按服务端下调：context=%d、max_in=%d。"
+              "请在配置里改正，避免每次重启都告警\n"
+              % (name, server_ctx, old_ctx, server_ctx, cfg["max_in"]))
+    else:
+        _warn("[local-rkllm] 目标 %s 服务端上下文只有 %d，连 max_out=%d 都放不下；"
+              "推理很可能失败，请换更小的模型或下调 max_out\n"
+              % (name, server_ctx, cfg["max_out"]))
+    return cfg
+
+
+def _observe_tps(name, cfg, usage, elapsed):
+    """用真实调用校准吞吐：**只下调，不上调**。
+
+    穿透链路的隧道开销、弱板子上的真实速度都体现在端到端耗时里，比配置里的
+    估算准。不上调是因为超时变小会误杀长尾请求——宁可等久一点。
+    """
+    ct = int((usage or {}).get("completion_tokens") or 0)
+    if ct < 40 or not elapsed or elapsed <= 0:
+        return                           # 样本太短，首 token 开销占比过高
+    samples = _tps_samples.setdefault(name, [])
+    samples.append(ct / float(elapsed))
+    del samples[:-5]                     # 只留最近 5 次
+    if len(samples) < 3:
+        return
+    measured = sorted(samples)[len(samples) // 2]      # 中位数，抗单次抖动
+    configured = float(cfg["tok_per_sec"])
+    if measured * 2 < configured:
+        cfg["_measured_tps"] = round(measured, 2)
+        _warn("[local-rkllm] 目标 %s 实测约 %.1f tok/s，不足配置值 %.1f 的一半；"
+              "后续超时改按实测推算（建议把 tok_per_sec=%.1f 写进配置）\n"
+              % (name, measured, configured, measured))
+
+
 def _lock_for(name):
     """取目标锁。
 
@@ -660,16 +792,23 @@ def _lock_for(name):
 # ---------------- 对外接口 ----------------
 
 def list_targets():
-    """列出所有已配置目标及其可用性（按各目标的 `health` 设置探测，不做推理）。"""
+    """列出所有已配置目标及其可用性（按各目标的 `health` 设置探测，不做推理）。
+
+    **所有目标都会探测**——探不全就不知道哪台还能用，不能因为链路慢就减少项
+    目。差异只在并发方式：`link=direct` 并发（墙钟约等于单次超时），
+    `link=tunnel` 串行并逐条打印进度（并发探测会互相挤占隧道，重则被限流）。
+    """
     targets, default = load_targets()
     default = default or (next(iter(targets)) if targets else None)
-    rows = []
-    for name, cfg in targets.items():
-        row = {"target": name, "host": cfg["host"], "model": cfg["model"], "note": cfg.get("note", ""),
+
+    def row_of(name, cfg):
+        row = {"target": name, "host": cfg["host"], "model": cfg["model"],
+               "note": cfg.get("note", ""), "link": cfg.get("link", "direct"),
                "is_default": name == default, "status": "unknown", "detail": "",
                "ability": cfg.get("ability") or ability_of(cfg.get("preset", "default")),
-               "budgets": {k: cfg[k] for k in ("preset", "context", "max_in", "max_out",
-                                               "tok_per_sec", "timeout_floor", "retries", "health")}}
+               "budgets": {k: cfg[k] for k in ("preset", "link", "context", "max_in",
+                                               "max_out", "tok_per_sec", "timeout_floor",
+                                               "retries", "health")}}
         try:
             info, _raw = _probe(name, cfg)
             if info.get("model"):
@@ -679,8 +818,22 @@ def list_targets():
         except Exception as exc:  # noqa: BLE001
             row["status"] = "error"
             row["detail"] = str(exc)[:160]
-        rows.append(row)
-    return {"config_path": CONFIG_PATH, "default": default, "count": len(rows), "targets": rows}
+        return row
+
+    order = list(targets)
+    rows = {}
+    direct = [n for n in order if targets[n].get("link") != "tunnel"]
+    tunnel = [n for n in order if targets[n].get("link") == "tunnel"]
+    if direct:
+        with ThreadPoolExecutor(max_workers=min(4, len(direct))) as pool:
+            for name, row in zip(direct, pool.map(lambda n: row_of(n, targets[n]), direct)):
+                rows[name] = row
+    for name in tunnel:                     # 穿透链路：串行，逐个报进度
+        sys.stderr.write("[local-rkllm] 探测 %s（穿透链路，串行）…\n" % name)
+        sys.stderr.flush()
+        rows[name] = row_of(name, targets[name])
+    return {"config_path": CONFIG_PATH, "default": default, "count": len(order),
+            "targets": [rows[n] for n in order]}
 
 
 def health(target=None):
@@ -699,8 +852,9 @@ def health(target=None):
     out["_target"] = name
     out["_host"] = cfg["host"]
     out["_health"] = cfg.get("health", "rkllm")
-    out["_budgets"] = {k: cfg[k] for k in ("preset", "context", "max_in", "max_out",
-                                           "tok_per_sec", "timeout_floor", "retries")}
+    out["_budgets"] = {k: cfg[k] for k in ("preset", "link", "context", "max_in",
+                                           "max_out", "tok_per_sec", "timeout_floor",
+                                           "retries")}
     out["_ability"] = cfg.get("ability") or ability_of(cfg.get("preset", "default"))
     return out
 
@@ -734,7 +888,7 @@ def _timeout_for(max_tokens, est_in=0, cfg=None):
     生成会把本来能成功的请求判成超时，再被 retries 放大三倍。
     """
     cfg = cfg or DEFAULTS
-    tps = max(0.1, float(cfg["tok_per_sec"]))
+    tps = max(0.1, float(cfg.get("_measured_tps") or cfg["tok_per_sec"]))
     prefill_tps = float(cfg.get("prefill_tps") or 0) or tps * 8
     return max(int(cfg["timeout_floor"]),
                int(20 + est_in / max(0.1, prefill_tps) + max_tokens / tps * 1.3))
@@ -768,6 +922,15 @@ def ask(prompt, system=None, max_tokens=None, temperature=0.7,
             "（该预算可在配置里用 max_in= 调整）。" % (est_in, name, safe_in),
             retryable=False)
 
+    # 1.5) 与服务端协商上下文（每个目标只探一次；只下调，防 KV 越界崩溃）
+    board = _board_for(name, cfg)
+    _negotiate_context(name, cfg, board)
+    if est_in > int(cfg["max_in"]):
+        raise LocalLLMError(
+            "输入约 %d token，超过目标 %s 协商后的输入预算 %d（服务端上下文只有 %d）；"
+            "请分段再逐段调用。" % (est_in, name, cfg["max_in"], cfg["context"]),
+            retryable=False)
+
     # 2) 输出预算：与输入共享上下文，装不下就拒绝
     mt = safe_out if max_tokens is None else min(int(max_tokens), safe_out)
     mt = max(64, mt)
@@ -790,7 +953,6 @@ def ask(prompt, system=None, max_tokens=None, temperature=0.7,
     if cfg.get("model_explicit"):
         extra["model"] = model
 
-    board = _board_for(name, cfg)
     if timeout is None:
         timeout = _timeout_for(mt, est_in, cfg)
 
@@ -798,7 +960,8 @@ def ask(prompt, system=None, max_tokens=None, temperature=0.7,
     attempt = 0
     for attempt in range(retries + 1):
         try:
-            with _lock_for(name):            # 同一目标内串行；不同目标互不阻塞
+            # 同目标串行；穿透目标还要挤隧道槽位（多个目标共用一条隧道）
+            with _lock_for(name), _link_guard(cfg):
                 status, text, elapsed, usage = board.ask(
                     prompt, max_tokens=mt, timeout=timeout, extra=extra)
             if status != 200:
@@ -820,6 +983,7 @@ def ask(prompt, system=None, max_tokens=None, temperature=0.7,
             # 退化特征自检：重复词流（实测越过约 1000 token 时的典型塌陷形态）
             if cfg.get("degen_check") and re.search(r"(\b\w{2,6}\b)(?:\s*\1){3,}", text[:600]):
                 truncated = True
+            _observe_tps(name, cfg, usage, elapsed)      # 实测吞吐：只下调超时依据
             return {
                 "text": text,
                 "target": name,
