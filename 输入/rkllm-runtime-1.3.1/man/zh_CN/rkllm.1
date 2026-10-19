@@ -306,7 +306,7 @@ rkllm run qwen2.5\-1.5b "用一句话概括这段文字。"
 .PP
 .nf
 .RS 4
-rkllm serve /data/models/qwen2.5\-1.5b.rkllm \-\-host 0.0.0.0 \-\-port 8080 \-\-api\-key 我的密钥
+RKLLM_API_KEY=我的密钥 rkllm serve /data/models/qwen2.5\-1.5b.rkllm \-\-host 0.0.0.0 \-\-port 8080
 curl http://127.0.0.1:8080/v1/chat/completions \\
   \-H 'Content\-Type: application/json' \\
   \-H 'Authorization: Bearer 我的密钥' \\
@@ -314,14 +314,13 @@ curl http://127.0.0.1:8080/v1/chat/completions \\
 .RE
 .fi
 .PP
-同样的密钥改用环境变量传入，可以避免出现在
-.BR ps 里：
-.PP
-.nf
-.RS 4
-RKLLM_API_KEY=我的密钥 rkllm serve /data/models/qwen2.5\-1.5b.rkllm
-.RE
-.fi
+用
+.B \-\-api\-key
+把密钥写在命令行上只适合一次性脚本：该值会出现在
+.B ps
+与
+.BR "systemctl status"
+的输出里，因此以上面的环境变量写法为准。
 .PP
 在没有模型的情况下验证安装：
 .PP

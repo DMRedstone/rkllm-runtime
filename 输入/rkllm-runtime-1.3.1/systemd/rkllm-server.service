@@ -30,6 +30,18 @@ LimitNOFILE=102400
 # The helper that raises CPU/NPU/DDR clocks needs root, as does the NPU node.
 User=root
 Group=root
+# Hardening. The service reads one model, talks to the NPU node and listens on
+# one TCP port; nothing else is needed.
+#   ProtectSystem=full keeps /usr, /boot and /etc read-only but leaves /sys
+#   writable, which the frequency helper requires (strict would be a needless
+#   extra risk here). ProtectHome is deliberately NOT set: models are commonly
+#   kept under /home or /root and hiding those directories would make the unit
+#   fail to start on those boards.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
 WantedBy=multi-user.target

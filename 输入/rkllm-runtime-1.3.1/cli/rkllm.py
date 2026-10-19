@@ -27,6 +27,7 @@ import hmac
 import json
 import os
 import queue
+import shlex
 import shutil
 import signal
 import subprocess
@@ -71,6 +72,23 @@ BIG_CORE_PLATFORMS = ("rk3588", "rk3576")
 NPU_DEBUGFS = "/sys/kernel/debug/rknpu"
 LEGACY_NPU_DEVICE = "/dev/rknpu"
 DRM_CLASS = "/sys/class/drm"
+
+# sysfs knobs the board tuning helpers write. These are candidates: a path that
+# does not exist on this SoC or kernel is skipped, which is what lets one table
+# serve RK3588/RK3576/RK3562/RV1126B.
+FREQ_GOVERNOR_PATHS = (
+    "/sys/class/devfreq/fdab0000.npu/governor",
+    "/sys/class/devfreq/fb000000.gpu/governor",
+    "/sys/class/devfreq/dmc/governor",
+    "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor",
+    "/sys/devices/system/cpu/cpufreq/policy4/scaling_governor",
+    "/sys/devices/system/cpu/cpufreq/policy6/scaling_governor",
+)
+FREQ_CPUIDLE_PATHS = tuple(
+    "/sys/devices/system/cpu/cpu%d/cpuidle/state1/disable" % cpu for cpu in range(8))
+
+# Snapshot taken right before a helper runs, replayed by restore_frequencies().
+_FREQ_SNAPSHOT = []
 
 
 def npu_status():
@@ -224,6 +242,68 @@ def _run_quiet(cmd):
         return 127, str(exc)
 
 
+def _snapshot_freq_state():
+    """Read the knobs a helper is about to change; unreadable ones are skipped."""
+    state = []
+    for path in FREQ_GOVERNOR_PATHS + FREQ_CPUIDLE_PATHS:
+        try:
+            with open(path) as handle:
+                state.append((path, handle.read().strip()))
+        except OSError:
+            continue
+    return state
+
+
+def _read_sysfs(path):
+    try:
+        with open(path) as handle:
+            return handle.read().strip()
+    except OSError:
+        return None
+
+
+def _write_sysfs(path, value):
+    """Write one sysfs knob; False when this process may not (or cannot)."""
+    if geteuid() == 0:
+        try:
+            with open(path, "w") as handle:
+                handle.write(value + "\n")
+            return True
+        except OSError:
+            return False
+    sudo = shutil.which("sudo")
+    if not sudo:
+        return False
+    code, _output = _run_quiet([sudo, "-n", "sh", "-c",
+                                "printf '%%s\\n' %s > %s"
+                                % (shlex.quote(value), shlex.quote(path))])
+    return code == 0
+
+
+def restore_frequencies(quiet=False):
+    """Put back every knob the tuning helper touched.
+
+    The upstream helpers only ever lock the clocks: cpuidle is disabled, the
+    governors are pinned to "userspace" and the frequencies to their maximum.
+    Nothing in them - and nothing in prerm/postrm - undoes that, so a one-shot
+    `rkllm run` used to leave the board at full clocks with deep idle disabled
+    until the next reboot.
+
+    Governors are restored before cpuidle on purpose: once the governor is back
+    to schedutil/ondemand the kernel picks frequencies itself, which is the
+    state cpuidle was switched off on top of.
+    """
+    global _FREQ_SNAPSHOT
+    state, _FREQ_SNAPSHOT = _FREQ_SNAPSHOT, []
+    if not state:
+        return "nothing to restore"
+    failed = [path for path, value in state if not _write_sysfs(path, value)]
+    if failed and not quiet:
+        sys.stderr.write("[rkllm] could not restore %d sysfs knob(s): %s\n"
+                         % (len(failed), ", ".join(failed[:3])))
+    return "ok" if not failed else "partial (%d failed)" % len(failed)
+
+
 def lock_frequencies(platform, enabled=True, quiet=False):
     """Raise CPU/NPU/DDR frequencies using the helper shipped with this package.
 
@@ -238,6 +318,8 @@ def lock_frequencies(platform, enabled=True, quiet=False):
     helper = FREQ_HELPERS.get(platform)
     if not helper or not os.path.exists(helper):
         return "skipped (helper %s not installed)" % (helper or platform)
+    global _FREQ_SNAPSHOT
+    _FREQ_SNAPSHOT = _snapshot_freq_state()      # taken before anything changes
     cmd = [helper]
     if geteuid() != 0:
         sudo = shutil.which("sudo")
@@ -248,6 +330,17 @@ def lock_frequencies(platform, enabled=True, quiet=False):
     if not quiet and code != 0:
         sys.stderr.write("[rkllm] frequency lock helper exited %s: %s\n"
                          % (code, output.strip()[:200]))
+    # The helper does not check what it writes: when the requested frequency is
+    # not in this board's available_frequencies table, devfreq rejects it and the
+    # script still exits 0 - with the governor already pinned to "userspace",
+    # which can leave the board slower than it started. At least say so.
+    if code == 0 and not any(_read_sysfs(path) == "userspace"
+                             for path in FREQ_GOVERNOR_PATHS):
+        if not quiet:
+            sys.stderr.write("[rkllm] frequency lock reported success but no governor "
+                             "switched to userspace - the board's frequency table may "
+                             "not contain the hardcoded value\n")
+        return "suspect (no governor changed)"
     return "ok" if code == 0 else "failed (exit %s)" % code
 
 
@@ -605,6 +698,9 @@ class RealEngine(EngineBase):
         self._sink_lock = threading.Lock()
         self._handle = ctypes.c_void_p()
         self._destroyed = False
+        # Set once rkllm_set_function_tools has been called: the runtime offers
+        # no documented way back, so /health reports it and the caller is warned.
+        self._function_tools_enabled = False
 
         param = _Param()
         param.model_path = model_path.encode("utf-8")
@@ -712,9 +808,31 @@ class RealEngine(EngineBase):
             self._handle, system_prompt.encode("utf-8"), b"", b"")
 
     def set_function_tools(self, system_prompt, tools_json, tool_response_str="tool_response"):
-        return self.lib.rkllm_set_function_tools(
-            self._handle, (system_prompt or "").encode("utf-8"),
-            tools_json.encode("utf-8"), tool_response_str.encode("utf-8"))
+        """Enable function calling on this handle. USE WITH CARE.
+
+        rkllm_set_function_tools has the same permanence trap as
+        rkllm_set_chat_template: the setting applies to every later rkllm_run
+        call on this handle and the runtime documents no way to switch it off,
+        so one request that carries "tools" changes the behaviour of all the
+        requests that follow until the process restarts. That is why nothing in
+        this script calls it unless the client asked for tools.
+
+        An empty system_prompt is dangerous for the same reason it is in
+        set_system_prompt - the runtime treats an empty value as "reset", not
+        "keep" - so a caller without a system prompt gets a neutral placeholder
+        rather than an empty string.
+
+        ctypes does not keep the buffers behind c_char_p alive, and the runtime
+        may retain these pointers for later runs; they are parked in _keep for
+        the lifetime of the engine.
+        """
+        if not (system_prompt or "").strip():
+            system_prompt = "You are a helpful assistant."
+        buffers = [system_prompt.encode("utf-8"), tools_json.encode("utf-8"),
+                   tool_response_str.encode("utf-8")]
+        self._keep.extend(buffers)
+        self._function_tools_enabled = True
+        return self.lib.rkllm_set_function_tools(self._handle, *buffers)
 
     def stream(self, prompt, role="user", enable_thinking=False,
                sampling=None, max_new_tokens=None):
@@ -1015,6 +1133,7 @@ def cmd_chat(args):
         sys.stdout.write("\n")
     finally:
         engine.destroy()
+        restore_frequencies(quiet=args.quiet)
     return exit_code
 
 
@@ -1034,6 +1153,7 @@ def cmd_run(args):
         sys.stdout.write("\n")
     finally:
         engine.destroy()
+        restore_frequencies(quiet=args.quiet)
     return 0
 
 
@@ -1257,6 +1377,7 @@ class Handler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "model": engine.model_name,
                 "busy": engine.is_running(),
+                "function_tools": bool(getattr(engine, "_function_tools_enabled", False)),
                 "queue_length": self.server.waiting,
                 "uptime_s": round(time.time() - self.server.stats["started"], 1),
                 "stats": dict(self.server.stats),
@@ -1296,6 +1417,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send_error_json(
                 "unknown endpoint %s; the completion endpoint is /v1/chat/completions and the "
                 "base_url for clients is http://<host>:<port>/v1" % path, 404, "not_found")
+            return
+
+        # A chunked body carries no Content-Length and BaseHTTPRequestHandler
+        # does not decode it: reading zero bytes would leave the chunk frames in
+        # the socket, where the next request on this keep-alive connection would
+        # parse them as part of its own body. Refuse the framing instead of
+        # smuggling it through.
+        if (self.headers.get("Transfer-Encoding") or "").strip().lower() not in ("", "identity"):
+            self.close_connection = True
+            self._reject("chunked request bodies are not supported; send the body with "
+                         "Content-Length and without Transfer-Encoding", 411)
             return
 
         body, problem = self._read_body()
@@ -1477,6 +1609,15 @@ class Handler(BaseHTTPRequestHandler):
         if tools:
             try:
                 engine.set_function_tools(system_prompt, json.dumps(tools))
+                if not getattr(self.server, "_warned_function_tools", False):
+                    self.server._warned_function_tools = True
+                    if not self.server.options.quiet:
+                        sys.stderr.write(
+                            "[rkllm] function calling enabled: this setting persists for "
+                            "every later request on this handle - the runtime offers no "
+                            "documented way to switch it off. Restart the service to "
+                            "return to plain chat.\n")
+                        sys.stderr.flush()
             except Exception as exc:
                 self.server.stats["errors"] += 1
                 self._send_error_json("failed to enable function calling: %s" % exc, 500,
@@ -1569,6 +1710,17 @@ def cmd_serve(args):
     sys.stderr.write("  history   : %s   api key : %s\n"
                      % ("on" if not args.no_history else "off",
                         "set" if args.api_key else "none"))
+    if not args.api_key and args.host not in ("127.0.0.1", "::1", "localhost"):
+        # Open by default is a deliberate choice for a LAN tool, but an operator
+        # who never set a key should not have to read the manual to find out that
+        # every host on the network can now reset the conversation and burn NPU
+        # time. This is a warning rather than a refusal: existing deployments
+        # start this way and must keep working.
+        sys.stderr.write("  WARNING   : no API key while listening on %s - any host that "
+                         "can reach this port can use the model and POST /v1/reset.\n"
+                         "              Set RKLLM_API_KEY in /etc/default/rkllm-server "
+                         "(and chmod 600 that file) before exposing the board.\n"
+                         % args.host)
     sys.stderr.write("  freq lock : %s\n" % state)
     sys.stderr.write("  status    : model loaded, listening. This is a foreground "
                      "service, so a quiet\n"
@@ -1590,6 +1742,7 @@ def cmd_serve(args):
         server.shutdown()
         server.server_close()
         engine.destroy()
+        restore_frequencies(quiet=args.quiet)
     return 0
 
 
@@ -1733,6 +1886,7 @@ def cmd_selftest(args):
     thread.daemon = True
     thread.start()
 
+    import http.client as http_client
     import urllib.error
     import urllib.request
 
@@ -1848,6 +2002,34 @@ def cmd_selftest(args):
         results.append(_selftest_result("invalid request rejected", status == 400,
                                         "status %s" % status))
 
+        # A chunked body carries no Content-Length. It must be refused, not read
+        # as an empty body: undecoded chunk frames would stay on the socket and
+        # be parsed as the next request on this keep-alive connection.
+        try:
+            conn = http_client.HTTPConnection("127.0.0.1", port, timeout=10)
+            conn.putrequest("POST", "/v1/chat/completions")
+            conn.putheader("Transfer-Encoding", "chunked")
+            conn.putheader("Content-Type", "application/json")
+            conn.endheaders()
+            raw = b'{"messages":[{"role":"user","content":"x"}]}'
+            conn.send(b"%x\r\n%s\r\n0\r\n\r\n" % (len(raw), raw))
+            response = conn.getresponse()
+            chunked_status = response.status
+            response.read()
+            conn.close()
+        except Exception as exc:                              # pragma: no cover
+            chunked_status = repr(exc)
+        results.append(_selftest_result("chunked body refused", chunked_status == 411,
+                                        "status %s" % chunked_status))
+
+        # The handle-level function-tools flag is permanent, so /health has to
+        # expose it: otherwise its effect on later requests is invisible.
+        status, body = http("GET", "/health")
+        results.append(_selftest_result(
+            "health reports function_tools", status == 200
+            and "function_tools" in json.loads(body),
+            "status %s" % status))
+
         # An oversized prompt must be refused here, not handed to the native
         # runtime: a 32 KB English prompt is about 8000 tokens against a 4096
         # token window, and the runtime segfaults when it overruns the KV cache.
@@ -1959,6 +2141,7 @@ def cmd_selftest(args):
         probe = object.__new__(RealEngine)        # bypass __init__: no model needed
         probe._handle = ctypes.c_void_p(1)
         probe.lib = _RecordingLib()
+        probe._keep = []                          # __init__ normally creates this
         probe.set_system_prompt("be nice")
         probe.set_function_tools("be nice", "[]")
         nulls = [call for call in probe.lib.calls if any(arg is None for arg in call)]

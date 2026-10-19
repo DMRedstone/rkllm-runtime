@@ -34,6 +34,15 @@
 #   本文件默认全局可读。若在其中填入密钥，请执行
 #   `chmod 600 @SERVER_DEFAULTS@`；该权限在升级后保留。
 #
+#   RKLLM_EXTRA_ARGS is different from every other entry: its value is spliced
+#   into the service command line and expanded by /bin/sh, so a value such as
+#   "--verbose; some-command" runs that command as root. Only root can write
+#   this file, so it is not a privilege boundary - but treat the entry as code,
+#   not as a list of options, and prefer the dedicated RKLLM_* entries.
+#   RKLLM_EXTRA_ARGS 与其它配置项不同：它的值会被拼进服务命令行并由 /bin/sh 展开，
+#   因此写成 "--verbose; 某命令" 会以 root 身份执行该命令。只有 root 能改本文件，
+#   所以它不构成提权边界；但请把它当作代码而非选项列表，优先使用专用 RKLLM_* 项。
+#
 # 每个参数都有一个专用配置项，可选值以注释形式给出（形如 `#RKLLM_XXX=...`）。
 # Every parameter has its own entry; optional values are shown commented out.
 

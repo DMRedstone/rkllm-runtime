@@ -337,7 +337,7 @@ API server with an API key, then a request from another terminal:
 .PP
 .nf
 .RS 4
-rkllm serve /data/models/qwen2.5\-1.5b.rkllm \-\-host 0.0.0.0 \-\-port 8080 \-\-api\-key sekret
+RKLLM_API_KEY=sekret rkllm serve /data/models/qwen2.5\-1.5b.rkllm \-\-host 0.0.0.0 \-\-port 8080
 curl http://127.0.0.1:8080/v1/chat/completions \\
   \-H 'Content\-Type: application/json' \\
   \-H 'Authorization: Bearer sekret' \\
@@ -345,14 +345,13 @@ curl http://127.0.0.1:8080/v1/chat/completions \\
 .RE
 .fi
 .PP
-The same key through the environment, which keeps it out of
-.BR ps :
-.PP
-.nf
-.RS 4
-RKLLM_API_KEY=sekret rkllm serve /data/models/qwen2.5\-1.5b.rkllm
-.RE
-.fi
+Putting the key on the command line with
+.B \-\-api\-key
+is still accepted for one-off scripts, but that value then shows up in
+.B ps
+and in
+.BR "systemctl status" ,
+so the environment form above is the one to copy.
 .PP
 Verify an installation without a model:
 .PP

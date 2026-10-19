@@ -8,6 +8,22 @@ set -e
 
 case "$1" in
     configure)
+        # The conffile ships 0644 and dpkg does not change the mode on upgrade.
+        # Once an API key is in it, world-readable means every local user can
+        # read the key - so say so here, at the one moment the operator is
+        # already looking at the install. Never fail the install over it.
+        if [ -f @SERVER_DEFAULTS@ ] \
+           && grep -Eq '^[[:space:]]*RKLLM_API_KEY=[^[:space:]]' @SERVER_DEFAULTS@; then
+            mode=$(stat -c '%a' @SERVER_DEFAULTS@ 2>/dev/null || echo "")
+            case "$mode" in
+                600|400|440|640) ;;
+                *)
+                    echo "rkllm-runtime: @SERVER_DEFAULTS@ contains an API key but its" >&2
+                    echo "               mode is ${mode:-unknown}; run" >&2
+                    echo "               chmod 600 @SERVER_DEFAULTS@" >&2
+                    ;;
+            esac
+        fi
         # Register librkllmrt.so (and the private dir declared in
         # /etc/ld.so.conf.d/@PACKAGE@.conf) with the dynamic linker cache.
         if command -v ldconfig >/dev/null 2>&1; then
