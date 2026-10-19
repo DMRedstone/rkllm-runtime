@@ -7,7 +7,7 @@
 此前有三份功能重叠的检查脚本，本文件把它们合并为一：
 
   * check_connectivity.py —— 仅探测 /health 与 /v1/models（无对话检查、无退出码）
-  * 01_health_check.py       —— 本文件，在连通性之上加了端到端对话与退出码
+  * health_check.py       —— 本文件，在连通性之上加了端到端对话与退出码
   * verify_board.py       —— 端到端验收，含 6 项深度检测（鉴权拒绝、system 消息
                              污染、system+多轮、system-only 探测、流式 [DONE] 终止、
                              超长 prompt 拒绝）
@@ -19,13 +19,13 @@
   --full    追加 7 项深度检测，即原 verify_board.py 的验收口径
             适合交付、升级、换板之后做一次完整体检
 
-退出码：0 全部通过，1 存在问题（可直接接入 CI 或 00_run_all.py 的编排）。
+退出码：0 全部通过，1 存在问题（可直接接入 CI 或 run_all.py 的编排）。
 
 用法
 ----
-    python 01_health_check.py --host 192.0.2.10:8080 --key KEY
-    python 01_health_check.py --host 192.0.2.10:8080 --key KEY --full
-    python 01_health_check.py --host 192.0.2.10:8080 --key KEY --prompt "你好"
+    python health_check.py --host 192.0.2.10:8080 --key KEY
+    python health_check.py --host 192.0.2.10:8080 --key KEY --full
+    python health_check.py --host 192.0.2.10:8080 --key KEY --prompt "你好"
 """
 from __future__ import annotations
 
@@ -34,8 +34,8 @@ import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
+
+from board_api import answer_of, build_base, request   # 共享 HTTP 层（同目录 board_api.py）
 
 # 强制 UTF-8 输出（Windows 控制台默认 GBK，会打不出中文）
 try:
@@ -53,35 +53,8 @@ TITLE_SYSTEM = (
     'nothing else: {"isNewTopic": boolean, "title": string}'
 )
 
-
-def request(base, key, path, payload=None, method="POST", timeout=10, send_key=True):
-    """发送一个请求，返回 (status, body_text, elapsed, error_repr)。
-
-    status 为 HTTP 码，或 "EXC" 表示客户端异常（连不上 / 超时）；
-    send_key=False 时故意不带 Authorization，用于验证鉴权是否生效。
-    """
-    headers = {"Content-Type": "application/json"}
-    if key and send_key:
-        headers["Authorization"] = "Bearer " + key
-    data = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(base + path, data=data, method=method, headers=headers)
-    started = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            return response.status, response.read().decode("utf-8", "replace"), \
-                time.time() - started, None
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8", "replace"), time.time() - started, None
-    except Exception as exc:  # noqa: BLE001
-        return "EXC", "", time.time() - started, repr(exc)
-
-
-def answer_of(body):
-    """从 chat/completions 响应里取出回答文本；解析失败返回 None。"""
-    try:
-        return json.loads(body)["choices"][0]["message"]["content"]
-    except Exception:  # noqa: BLE001
-        return None
+# request() / answer_of() 曾在 01、02、03、04、08、00 各写一份，签名与判读口径
+# 互不一致；现统一由 board_api 提供，本脚本只保留检查逻辑。
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +239,7 @@ def main():
     parser.add_argument("--timeout", type=float, default=60.0, help="单次对话检查超时（秒）")
     args = parser.parse_args()
 
-    base = "http://" + args.host
+    base = build_base(args.host)
     print("检查目标 : %s" % base)
     print("检查级别 : %s" % ("基础 + 深度（--full）" if args.full else "基础"))
 

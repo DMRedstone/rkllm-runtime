@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-09_make_rw_report.py —— 真实公文场景测试报告生成器
+make_rw_report.py —— 真实公文场景测试报告生成器
 
 输入
 ----
-  results/realworld_*.json   由 08_llm_realworld.py 产生的分组结果（自动合并各分组最新一份）
-  corpus/corpus.json         由 07_docx_corpus.py 产生的真实语料画像
+  results/realworld_*.json   由 llm_realworld.py 产生的分组结果（自动合并各分组最新一份）
+  corpus/corpus.json         由 docx_corpus.py 产生的真实语料画像
 
 输出
 ----
@@ -348,10 +348,10 @@ footer{margin-top:38px;padding-top:14px;border-top:1px solid var(--line);color:v
              "<li><b>串行化调用</b>：该板端服务不适合并发，建议加队列串行处理，避免并发崩溃。</li>"
              "</ul>")
     P.append("<h3>复现命令</h3>")
-    P.append("<pre># 1) 提取真实语料画像\npython 07_docx_corpus.py\n\n"
+    P.append("<pre># 1) 提取真实语料画像\npython docx_corpus.py\n\n"
              "# 2) 真实场景测试（A 串行 / B 分段 / C 迭代 / D 并发 / E 批量）\n"
-             "python 08_llm_realworld.py --host 192.0.2.10:8080 --key &lt;KEY&gt; --only a,b,c,d,e\n\n"
-             "# 3) 生成本报告\npython 09_make_rw_report.py</pre>")
+             "python llm_realworld.py --host 192.0.2.10:8080 --key &lt;KEY&gt; --only a,b,c,d,e\n\n"
+             "# 3) 生成本报告\npython make_rw_report.py</pre>")
 
     P.append("<footer>本报告由自动化脚本基于用户提供的 10 份真实公文生成。"
              "耗时/吞吐为客户端观测的端到端值（含网络与排队）；tokens 为服务端上报值。"

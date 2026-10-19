@@ -2,27 +2,27 @@
 # -*- coding: utf-8 -*-
 """一键编排：按正确顺序跑完整套板端测试，并生成报告。
 
-    python 00_run_all.py --host 192.0.2.10:8080 --key KEY
+    python run_all.py --host 192.0.2.10:8080 --key KEY
 
 为什么需要它
 ------------
 板端 NPU 是**独占资源**，压测与仿真不能同时跑，否则结果互相污染；且极限
 用例可能把服务打到崩溃。本脚本把整套流程串起来，并在每步之间做就绪等待：
 
-    1. 01_health_check.py      预检（服务器在线 / key 正确 / 推理链路通）
-    2. 02_llm_stress.py      压力测试
-    3. 03_llm_simulate.py    客户端行为仿真
-    4. 04_crash_probe.py      并发崩溃隔离实验
-    5. 05_make_report.py  汇总生成 report.html / report.md
+    1. health_check.py      预检（服务器在线 / key 正确 / 推理链路通）
+    2. llm_stress.py      压力测试
+    3. llm_simulate.py    客户端行为仿真
+    4. crash_probe.py      并发崩溃隔离实验
+    5. make_report.py  汇总生成 report.html / report.md
 
 任一步骤让服务崩溃时，脚本会轮询 /health 等待守护进程自动拉起后再继续。
 
 用法
 ----
-    python 00_run_all.py --host 192.0.2.10:8080 --key KEY
-    python 00_run_all.py --host 192.0.2.10:8080 --key KEY --quick           # 快速全流程
-    python 00_run_all.py --host 192.0.2.10:8080 --key KEY --skip-stress     # 只跑仿真等
-    python 00_run_all.py --host 192.0.2.10:8080 --key KEY --ready-timeout 120
+    python run_all.py --host 192.0.2.10:8080 --key KEY
+    python run_all.py --host 192.0.2.10:8080 --key KEY --quick           # 快速全流程
+    python run_all.py --host 192.0.2.10:8080 --key KEY --skip-stress     # 只跑仿真等
+    python run_all.py --host 192.0.2.10:8080 --key KEY --ready-timeout 120
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ import os
 import subprocess
 import sys
 import time
-import urllib.request
+from board_api import build_base, wait_ready   # 共享 HTTP 层
 
 # 强制 UTF-8 输出
 try:
@@ -63,28 +63,36 @@ def run_step(title, script, extra_args=None, timeout=None):
         return -2
 
 
-def wait_ready(host, key, timeout=90):
-    """轮询 /health，等待服务就绪。返回是否就绪。
+# wait_ready 由 board_api 提供（空 200 也视为存活，vLLM 就是那么回的）。
 
-    用于某一步把服务打崩之后、下一步开始之前的等待。
+
+def check_board_api_sync():
+    """两份 board_api.py 必须一致。
+
+    工具链与连接器共用同一份 HTTP 实现，但连接器要能整目录拷走，所以各自存
+    一份物理副本。这里做内容比对，防止改了一边忘了另一边——两边判读不一致
+    正是这次要消灭的问题。
     """
-    url = "http://%s/health" % host
-    started = time.time()
-    while time.time() - started < timeout:
-        try:
-            req = urllib.request.Request(url, method="GET",
-                                         headers={"Authorization": "Bearer " + key} if key else {})
-            with urllib.request.urlopen(req, timeout=5) as response:
-                if response.status == 200:
-                    waited = time.time() - started
-                    if waited > 1:
-                        print("    服务已恢复（等待 %.1fs）" % waited)
-                    return True
-        except Exception:  # noqa: BLE001
-            pass
-        time.sleep(1.0)
-    print("    !! 服务在 %ss 内未恢复" % timeout)
-    return False
+    here = os.path.dirname(os.path.abspath(__file__))
+    ours = os.path.join(here, "board_api.py")
+    theirs = os.path.join(here, "..", "..", "本地模型连接器", "board_api.py")
+    if not os.path.exists(theirs):
+        return True                     # 只部署了工具链：无从比较
+    try:
+        with open(ours, "rb") as fh:
+            mine = fh.read()
+        with open(theirs, "rb") as fh:
+            other = fh.read()
+    except OSError as exc:
+        print("    无法比较 board_api.py：%r" % exc)
+        return True
+    if mine != other:
+        print("    !! 两份 board_api.py 内容不一致：")
+        print("       %s" % ours)
+        print("       %s" % theirs)
+        print("       改一份后必须同步另一份，否则连接器与工具链的判读会不同。")
+        return False
+    return True
 
 
 def main():
@@ -103,6 +111,7 @@ def main():
     args = parser.parse_args()
 
     common = ["--host", args.host, "--key", args.key]
+    check_board_api_sync()
     results_dir = os.path.join(HERE, "results")
     os.makedirs(results_dir, exist_ok=True)
 
@@ -110,7 +119,7 @@ def main():
         parser.error("必须用 --host 或环境变量 RKLLM_HOST 指定板端地址（示例地址不作为默认，防止静默打向不可达目标）")
 
     # 1) 预检：服务不可达 / key 错误 时提前失败，避免后续白跑
-    if run_step("预检 健康检查", "01_health_check.py", common) != 0:
+    if run_step("预检 健康检查", "health_check.py", common) != 0:
         print("\n预检未通过，终止。请确认服务在线且 key 正确。")
         return 1
 
@@ -124,7 +133,7 @@ def main():
             stress_args.append("--quick")
         if not args.limits:
             stress_args.append("--skip-limits")   # 默认不跑会压垮服务的 E 段
-        codes.append(("压力测试", run_step("压力测试", "02_llm_stress.py", stress_args)))
+        codes.append(("压力测试", run_step("压力测试", "llm_stress.py", stress_args)))
         wait_ready(args.host, args.key, args.ready_timeout)
 
     # 3) 仿真测试
@@ -132,16 +141,16 @@ def main():
         sim_args = list(common) + ["--vu", str(args.vu)]
         if args.quick:
             sim_args += ["--vu-seconds", "20"]
-        codes.append(("仿真测试", run_step("仿真测试", "03_llm_simulate.py", sim_args)))
+        codes.append(("仿真测试", run_step("仿真测试", "llm_simulate.py", sim_args)))
         wait_ready(args.host, args.key, args.ready_timeout)
 
     # 4) 崩溃隔离实验
     if not args.skip_crash:
-        codes.append(("崩溃复现", run_step("崩溃复现", "04_crash_probe.py", common)))
+        codes.append(("崩溃复现", run_step("崩溃复现", "crash_probe.py", common)))
         wait_ready(args.host, args.key, args.ready_timeout)
 
     # 5) 汇总报告
-    run_step("生成报告", "05_make_report.py", [])
+    run_step("生成报告", "make_report.py", [])
 
     findings = [(n, c) for n, c in codes if c == 2]
     failed = [(n, c) for n, c in codes if c not in (0, 2)]

@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """本地板端小模型（rkllm serve）的调用封装 —— 自包含 · 多目标 · 可选复用主项目工具链。
 
-**独立性**：纯标准库（`urllib` / `json` / `threading` / `importlib`），不依赖任何项目目录、
+**独立性**：纯标准库（`urllib` / `json` / `threading`），HTTP 客户端是同目录的
+`board_api.py`（与工具链同一份），不依赖任何其它项目目录、
 不依赖第三方包。把 `local-rkllm/` 整个目录拷到任意能访问板端服务的机器即可工作，
 Windows / Linux / macOS 均可。
 
@@ -17,9 +18,9 @@ Windows / Linux / macOS 均可。
 `targets.json`（旧格式，仍兼容）→ 环境变量单目标（`RKLLM_HOST` / `RKLLM_API_KEY` / `RKLLM_MODEL`）。
 **代码中不含任何具体地址**，未配置时直接报错并给出配置指引。
 
-**可选的复用**：若同机存在主项目的测试工具链脚本（`02_llm_stress.py`，内含 `Board` 类），
-可用环境变量 `RKLLM_BOARD_SCRIPT` 指定以复用其 HTTP 层；未指定或加载失败时自动降级到
-内置客户端。**复用是增强，不是依赖。**
+**HTTP 层**：由同目录 `board_api.py` 提供（工具链目录里那份的副本，内容一致）。
+旧版用 `RKLLM_BOARD_SCRIPT` 从工具链脚本里 exec 出 Board 类——脚本名以数字开头不是
+合法模块名才需要那种 hack；现在两边共用同一模块，该变量已废弃。
 
 **默认阈值 = RK3588 特化值**（2026-10-15 报告 + 2026-10-16 实机校准，Qwen3.5-4B / OrangePi 5 Plus 8G / rkllm serve）：
   · 单流吞吐：2026-10-16 实机 6.3–6.9 tok/s（含 prefill 的端到端；旧报告 8–9 tok/s 为长文稳态）
@@ -63,7 +64,6 @@ Windows / Linux / macOS 均可。
     RKLLM_HOST         单目标快捷方式：板端地址（不含 http://）
     RKLLM_API_KEY      单目标快捷方式：令牌
     RKLLM_MODEL        单目标快捷方式：模型名
-    RKLLM_BOARD_SCRIPT 可选：主项目工具链脚本路径，用于复用其 Board 类
 
 命令行用法：
     python rkllm_client.py targets
@@ -71,7 +71,6 @@ Windows / Linux / macOS 均可。
     python rkllm_client.py calibrate [--target board-b] [--tokens 128]    # 实机校准吞吐
     python rkllm_client.py ask "把下面这段改写得更简洁：……" [--target board-b]
 """
-import importlib.util
 import json
 import os
 import re
@@ -80,6 +79,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+
+import board_api   # 与工具链同一份 HTTP 实现（本目录保留副本）
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_NAMES = ("targets.conf", "targets.json")   # 依次查找；.conf 为主推格式
@@ -101,7 +102,6 @@ def find_config():
 ENV_HOST = os.environ.get("RKLLM_HOST", "").strip()
 ENV_KEY = os.environ.get("RKLLM_API_KEY", "").strip()
 ENV_MODEL = os.environ.get("RKLLM_MODEL", "").strip()
-BOARD_SCRIPT = os.environ.get("RKLLM_BOARD_SCRIPT", "").strip()
 ENV_PRESET = os.environ.get("RKLLM_PRESET", "").strip().lower()   # 单目标快捷方式的档位
 
 # ---- 默认阈值：RK3588 + Qwen3.5-4B 实测特化值（依据见模块 docstring）。
@@ -114,7 +114,11 @@ DEFAULTS = {
     "timeout_floor": 60,     # 超时下限（秒）
     "retries": 2,            # 失败重试次数（等守护进程拉起服务）
     "retry_wait": 8,         # 重试前等待（秒）
-    "chars_per_token": 1.6,  # 中文为主文本，1 token ≈ 1.6 字符（保守）
+    "chars_per_token": 0,    # 0 = 按 CJK 占比自动（中文 1.6 / 拉丁 3.5）
+    "prefill_tps": 0,        # 0 = 取 tok_per_sec × 8；长输入的超时要靠它
+    "base_path": "",         # 网关 / 内网穿透的路径前缀（如 /rkllm）
+    "auth_header": "Authorization",   # Azure 用 api-key、Anthropic 网关用 x-api-key
+    "auth_prefix": "Bearer ",
     "overrun": 1.56,         # 硬截断余量：服务端不遵守 max_tokens，实测超出 25%–56%
     "degen_check": True,     # 退化特征自检（重复词流）
     "health": "rkllm",       # 健康检查方式：rkllm | none | 任意 HTTP 路径
@@ -126,13 +130,17 @@ OPT_KEYS = {
     "context": ("context", "上下文"), "tok_per_sec": ("tok_per_sec", "tps", "吞吐"),
     "timeout_floor": ("timeout_floor", "timeout", "超时"), "retries": ("retries", "重试"),
     "retry_wait": ("retry_wait",), "chars_per_token": ("chars_per_token", "cpt"),
+    "prefill_tps": ("prefill_tps", "prefill"),
+    "base_path": ("base_path", "路径前缀"),
+    "auth_header": ("auth_header", "认证头"),
+    "auth_prefix": ("auth_prefix", "认证前缀"),
     "overrun": ("overrun",), "degen_check": ("degen_check", "degen", "退化自检"),
     "health": ("health", "健康检查"), "preset": ("preset", "档位", "模式", "通用选项"),
     "ability": ("ability", "能力", "能力说明"),
 }
 _INT_OPTS = ("max_in", "max_out", "context", "timeout_floor", "retries", "retry_wait")
-_FLOAT_OPTS = ("tok_per_sec", "chars_per_token", "overrun")
-_ZERO_OK = ("retries", "retry_wait")        # 这两项允许取 0（不重试 / 不等待）
+_FLOAT_OPTS = ("tok_per_sec", "chars_per_token", "overrun", "prefill_tps")
+_ZERO_OK = ("retries", "retry_wait", "chars_per_token", "prefill_tps")
 _TRUE_WORDS = ("on", "true", "yes", "1", "是", "开")
 
 _warned = set()
@@ -151,23 +159,23 @@ PRESETS = {
     "default": dict(DEFAULTS),
     # 以下尺寸档为**跨平台保守估算**（非实测）：吞吐故意取小，只用于把超时上限放宽；
     # 实际硬件更快不会变慢，更慢则请用 tok_per_sec= 覆盖。
-    "1b": {"max_in": 3000, "max_out": 512, "context": 4096, "tok_per_sec": 60,
-           "timeout_floor": 60, "retries": 2, "retry_wait": 5, "chars_per_token": 1.6,
+    "1b": {"max_in": 3000, "max_out": 512, "context": 4096, "tok_per_sec": 8,
+           "timeout_floor": 60, "retries": 2, "retry_wait": 5, "chars_per_token": 0,
            "overrun": 1.3, "degen_check": False, "health": "rkllm"},
-    "3b": {"max_in": 5500, "max_out": 1024, "context": 8192, "tok_per_sec": 40,
-           "timeout_floor": 120, "retries": 2, "retry_wait": 5, "chars_per_token": 1.6,
+    "3b": {"max_in": 5500, "max_out": 1024, "context": 8192, "tok_per_sec": 5,
+           "timeout_floor": 120, "retries": 2, "retry_wait": 5, "chars_per_token": 0,
            "overrun": 1.3, "degen_check": False, "health": "rkllm"},
-    "4b": {"max_in": 6000, "max_out": 1024, "context": 8192, "tok_per_sec": 30,
-           "timeout_floor": 120, "retries": 2, "retry_wait": 5, "chars_per_token": 1.6,
+    "4b": {"max_in": 6000, "max_out": 1024, "context": 8192, "tok_per_sec": 4,
+           "timeout_floor": 120, "retries": 2, "retry_wait": 5, "chars_per_token": 0,
            "overrun": 1.3, "degen_check": False, "health": "rkllm"},
-    "7b": {"max_in": 6000, "max_out": 1536, "context": 8192, "tok_per_sec": 20,
-           "timeout_floor": 180, "retries": 2, "retry_wait": 5, "chars_per_token": 1.6,
+    "7b": {"max_in": 6000, "max_out": 1536, "context": 8192, "tok_per_sec": 3,
+           "timeout_floor": 180, "retries": 2, "retry_wait": 5, "chars_per_token": 0,
            "overrun": 1.25, "degen_check": False, "health": "rkllm"},
-    "14b": {"max_in": 12000, "max_out": 2048, "context": 16384, "tok_per_sec": 10,
-            "timeout_floor": 240, "retries": 2, "retry_wait": 5, "chars_per_token": 1.6,
+    "14b": {"max_in": 12000, "max_out": 2048, "context": 16384, "tok_per_sec": 2,
+            "timeout_floor": 240, "retries": 2, "retry_wait": 5, "chars_per_token": 0,
             "overrun": 1.25, "degen_check": False, "health": "rkllm"},
-    "32b": {"max_in": 24000, "max_out": 3072, "context": 32768, "tok_per_sec": 5,
-            "timeout_floor": 300, "retries": 1, "retry_wait": 5, "chars_per_token": 1.6,
+    "32b": {"max_in": 24000, "max_out": 3072, "context": 32768, "tok_per_sec": 1,
+            "timeout_floor": 300, "retries": 1, "retry_wait": 5, "chars_per_token": 0,
             "overrun": 1.2, "degen_check": False, "health": "rkllm"},
 }
 # 各档位的**能力边界**（给调用方模型看的提示词素材）：写清能干什么、不能干什么
@@ -224,60 +232,26 @@ FALLBACK_MODEL = "qwen3.5-4b_w8a8_rk3588"   # 仅显示与请求体用；实际�
 
 _boards = {}                 # 目标名 -> 客户端实例
 _locks = {}                  # 目标名 -> 锁（不同目标可并行，同一目标内串行）
+_locks_guard = threading.Lock()   # 保护 _locks 的创建（check-then-act 竞态）
+_targets_cache = {"key": None, "value": None}
 
 
 class LocalLLMError(Exception):
-    """调用板端小模型时的可读错误。"""
+    """调用板端小模型时的可读错误。
 
-
-class _SimpleBoard(object):
-    """自包含的最小 HTTP 客户端 —— 主项目工具链不可用时的兜底实现。
-
-    与工具链 `Board` 类保持相同的调用接口（`ask` / `health` / `last_health_problem`），
-    只覆盖连接器实际用到的部分，纯标准库。
+    `retryable=False` 表示重试不可能成功（4xx、空响应、输入越界），ask() 会
+    立即失败，而不是把同一个错误再等三遍。
     """
 
-    def __init__(self, host, key, timeout=240, scheme="http"):
-        self.base = scheme + "://" + host
-        self.key = key
-        self.timeout = timeout
-        self.last_health_problem = None
+    def __init__(self, message, retryable=True):
+        Exception.__init__(self, message)
+        self.retryable = retryable
 
-    def _open(self, path, payload=None, method="POST", timeout=None):
-        data = json.dumps(payload).encode("utf-8") if payload is not None else None
-        req = urllib.request.Request(self.base + path, data=data, method=method)
-        req.add_header("Content-Type", "application/json")
-        if self.key:
-            req.add_header("Authorization", "Bearer " + self.key)
-        return urllib.request.urlopen(req, timeout=timeout or self.timeout)
 
-    def ask(self, content, max_tokens=32, timeout=None, extra=None):
-        """返回 (status, content, elapsed, usage)，与工具链 Board.ask 同签名。"""
-        payload = {"messages": [{"role": "user", "content": content}], "max_tokens": max_tokens}
-        if extra:
-            payload.update(extra)
-        started = time.time()
-        try:
-            with self._open("/v1/chat/completions", payload, timeout=timeout) as resp:
-                body = resp.read().decode("utf-8", "replace")
-                data = json.loads(body)
-                text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
-                return resp.status, text, time.time() - started, data.get("usage")
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read().decode("utf-8", "replace")[:120], time.time() - started, None
-        except Exception as exc:  # noqa: BLE001
-            return "EXC", repr(exc), time.time() - started, None
-
-    def health(self):
-        """读取 /health。成功返回 dict，失败返回 None 并记录原因。"""
-        try:
-            with self._open("/health", method="GET", timeout=HEALTH_TIMEOUT) as resp:
-                info = json.loads(resp.read().decode("utf-8"))
-            self.last_health_problem = None
-            return info
-        except Exception as exc:  # noqa: BLE001
-            self.last_health_problem = repr(exc)[:120]
-            return None
+# HTTP 客户端统一由同目录的 board_api.py 提供（与 工具/大模型测试工具链
+# 里的那一份内容相同，本目录保留副本以便整目录移植）。改造前这里有一份
+# _SimpleBoard，它在健康判定、认证头与 URL 拼接上与工具链的 Board 不一致，
+# 同一个服务能得出两种结论。
 
 
 # ---------------- 目标配置 ----------------
@@ -395,6 +369,7 @@ def _entry(name, parts, lineno):
     elif rest and "=" not in rest[0]:
         key = rest.pop(0)                      # 旧式：第二列是密钥
     model, notes, opts, ability = FALLBACK_MODEL, [], {}, ""
+    model_explicit = False
     i = 0
     while i < len(rest):
         tok = rest[i]
@@ -403,7 +378,9 @@ def _entry(name, parts, lineno):
             ability = " ".join([tok.split("=", 1)[1]] + rest[i + 1:]).strip()
             break                                     # 其后所有文字都算能力说明
         if low.startswith(("model=", "模型=")):
-            model = tok.split("=", 1)[1].strip() or FALLBACK_MODEL
+            explicit = tok.split("=", 1)[1].strip()
+            model = explicit or FALLBACK_MODEL
+            model_explicit = bool(explicit)
         elif low.startswith(("key=", "token=", "apikey=", "api_key=", "密钥=")):
             key = tok.split("=", 1)[1].strip()
         elif "=" in tok:
@@ -426,7 +403,8 @@ def _entry(name, parts, lineno):
     entry.update(opts)
     entry.update({"preset": preset, "host": host, "scheme": scheme,
                   "api_key": _check_key(name, key),
-                  "model": model, "note": " ".join(notes),
+                  "model": model, "model_explicit": model_explicit,
+                  "note": " ".join(notes),
                   "ability": ability or ability_of(preset)})
     return name, entry
 
@@ -512,6 +490,7 @@ def _parse_json(text):
         if not isinstance(cfg, dict) or not cfg.get("host"):
             continue
         preset = PRESET_ALIASES.get(str(cfg.get("preset", "default")).lower(), "default")
+        model_explicit = bool(cfg.get("model"))
         model = cfg.get("model") or FALLBACK_MODEL
         if preset == "auto":
             preset = detect_preset(model) or "default"
@@ -524,7 +503,8 @@ def _parse_json(text):
         scheme, _host = _split_base(cfg["host"])
         entry.update({"preset": preset, "host": _host, "scheme": scheme,
                       "api_key": _check_key(name, cfg.get("api_key") or ""),
-                      "model": model, "note": cfg.get("note") or "",
+                      "model": model, "model_explicit": model_explicit,
+                      "note": cfg.get("note") or "",
                       "ability": cfg.get("ability") or ability_of(preset)})
         targets[name] = entry
     return targets, default
@@ -534,11 +514,20 @@ def load_targets():
     """读取目标配置，返回 (targets, default_name)。
 
     优先级：配置文件（`RKLLM_CONFIG` → `targets.conf` → `targets.json`）→ 环境变量单目标。
-    两者皆无时返回空字典（由 resolve 报错）。
+    结果按 (路径, mtime, 大小) 缓存：ask() 每次调用都走这里，配置没变就不重复
+    解析；文件一改（mtime 变化）立即生效，保持「改配置不用重启」的既有行为。
     """
     global CONFIG_PATH
     path = find_config()
     CONFIG_PATH = path
+    try:
+        info = os.stat(path)
+        cache_key = (path, info.st_mtime_ns, info.st_size)
+    except OSError:
+        cache_key = (path, None, None)
+    if _targets_cache["key"] == cache_key and _targets_cache["value"] is not None:
+        return _targets_cache["value"]
+
     targets, default = {}, None
     if os.path.exists(path):
         try:
@@ -556,10 +545,12 @@ def load_targets():
         scheme, _host = _split_base(ENV_HOST)
         entry.update({"preset": preset, "host": _host, "scheme": scheme,
                       "api_key": _check_key("env", ENV_KEY),
-                      "model": ENV_MODEL or FALLBACK_MODEL, "note": "来自环境变量",
-                      "ability": ability_of(preset)})
+                      "model": ENV_MODEL or FALLBACK_MODEL,
+                      "model_explicit": bool(ENV_MODEL),
+                      "note": "来自环境变量", "ability": ability_of(preset)})
         targets["env"] = entry
         default = "env"
+    _targets_cache.update({"key": cache_key, "value": (targets, default)})
     return targets, default
 
 
@@ -581,34 +572,44 @@ def resolve(target=None):
 
 
 def _board_for(name, cfg):
-    """按目标惰性创建客户端实例（工具链 Board 或内置兜底，接口一致）。
+    """按目标惰性创建 board_api.Board（与工具链共用同一实现）。
 
-    缓存键含地址 / 令牌 / 超时下限：改了配置会自动重建实例、立即生效，无需重启服务。
+    缓存键含地址 / 令牌 / 超时下限 / 协议 / 路径前缀 / 认证头：改配置会自动
+    重建实例、立即生效，无需重启服务。
     """
     sig = (name, cfg["host"], cfg.get("api_key", ""), cfg.get("timeout_floor"),
-           cfg.get("scheme", "http"))
+           cfg.get("scheme", "http"), cfg.get("base_path", ""),
+           cfg.get("auth_header", "Authorization"), cfg.get("auth_prefix", "Bearer "))
     if sig not in _boards:
-        cls = _load_board_class() or _SimpleBoard
-        kw = {"timeout": int(cfg.get("timeout_floor", DEFAULTS["timeout_floor"]))}
-        if cls is _SimpleBoard:                       # 工具链 Board 接口不含 scheme
-            kw["scheme"] = cfg.get("scheme", "http")
-        _boards[sig] = cls(cfg["host"], cfg.get("api_key", ""), **kw)
-        sys.stderr.write("[local-rkllm] 目标 %s → %s://%s（客户端：%s）\n"
-                         % (name, cfg.get("scheme", "http"), cfg["host"],
-                            "工具链 Board" if cls is not _SimpleBoard else "内置兜底"))
+        _boards[sig] = board_api.Board(
+            cfg["host"], cfg.get("api_key", ""),
+            timeout=int(cfg.get("timeout_floor", DEFAULTS["timeout_floor"])),
+            scheme=cfg.get("scheme", "http"),
+            base_path=cfg.get("base_path", ""),
+            auth_header=cfg.get("auth_header", "Authorization"),
+            auth_prefix=cfg.get("auth_prefix", "Bearer "))
+        prefix = "/" + cfg["base_path"].strip("/") if cfg.get("base_path") else ""
+        sys.stderr.write("[local-rkllm] 目标 %s → %s://%s%s（board_api）\n"
+                         % (name, cfg.get("scheme", "http"), cfg["host"], prefix))
     return _boards[sig]
 
 
-def _probe_path(host, key, path, scheme="http"):
-    """通用探测：任意 HTTP 路径，2xx 即视为可用；尽力从中解析出模型名。"""
-    req = urllib.request.Request(scheme + "://" + host + path, method="GET")
-    if key:
-        req.add_header("Authorization", "Bearer " + key)
-    try:
-        with urllib.request.urlopen(req, timeout=HEALTH_TIMEOUT) as resp:
-            body = resp.read().decode("utf-8", "replace")
-    except Exception as exc:  # noqa: BLE001
-        return False, "", repr(exc)[:120]
+def _probe_path(name, cfg, path):
+    """通用探测：任意 HTTP 路径，2xx 即视为可用；尽力解析出模型名。
+
+    走 board_api 的 URL/认证规则——旧实现自己拼 `scheme + "://" + host + path`，
+    漏掉了路径前缀与自定义认证头。
+    """
+    status, body, _elapsed, err = board_api.request(
+        board_api.build_base(cfg["host"], cfg.get("scheme", "http")),
+        cfg.get("api_key", ""), path, None, "GET", HEALTH_TIMEOUT,
+        auth_header=cfg.get("auth_header", "Authorization"),
+        auth_prefix=cfg.get("auth_prefix", "Bearer "),
+        base_path=cfg.get("base_path", ""))
+    if status == "EXC":
+        return False, "", (err or "connection error")[:120]
+    if not (isinstance(status, int) and 200 <= status < 300):
+        return False, "", "HTTP %s" % status
     model = ""
     try:
         data = json.loads(body)
@@ -618,7 +619,7 @@ def _probe_path(host, key, path, scheme="http"):
         elif isinstance(data, dict):
             model = data.get("model") or ""
     except Exception:  # noqa: BLE001
-        pass                                       # 非 JSON 也算可用，只是拿不到模型名
+        pass                                   # 非 JSON 也算可用，只是拿不到模型名
     return True, model, ""
 
 
@@ -638,45 +639,22 @@ def _probe(name, cfg):
             return {"status": "unreachable", "detail": board.last_health_problem or ""}, None
         return ({"status": raw.get("status", "ok"), "model": raw.get("model"),
                  "busy": raw.get("busy"), "queue_length": raw.get("queue_length")}, raw)
-    ok, model, detail = _probe_path(cfg["host"], cfg.get("api_key", ""), mode,
-                                    cfg.get("scheme", "http"))
+    ok, model, detail = _probe_path(name, cfg, mode)
     if not ok:
         return {"status": "unreachable", "detail": detail}, None
     return {"status": "ok", "model": model, "mode": mode}, None
 
 
 def _lock_for(name):
-    if name not in _locks:
-        _locks[name] = threading.Lock()
-    return _locks[name]
+    """取目标锁。
 
-
-def _load_board_class():
-    """尝试加载主项目工具链的 Board 类。不可用则返回 None（不抛错，复用属可选增强）。
-
-    脚本文件名以数字开头，不是合法 Python 标识符、无法直接 import，故走动态加载。
-    加载期间关闭字节码缓存写入，避免在主项目目录里留下 `__pycache__`。
+    check-then-act 必须加锁：两个线程同时首访同一目标时各自创建一把锁并互相
+    覆盖，之后各持不同的锁对象，串行化形同虚设——而 NPU 只接受一个请求。
     """
-    if not BOARD_SCRIPT or not os.path.exists(BOARD_SCRIPT):
-        if BOARD_SCRIPT:
-            _warn("[local-rkllm] 指定的工具链脚本不存在，改用内置客户端：%s\n" % BOARD_SCRIPT)
-        return None
-    try:
-        spec = importlib.util.spec_from_file_location("rkllm_toolchain_stress", BOARD_SCRIPT)
-        mod = importlib.util.module_from_spec(spec)
-        prev = sys.dont_write_bytecode
-        sys.dont_write_bytecode = True
-        try:
-            spec.loader.exec_module(mod)
-        finally:
-            sys.dont_write_bytecode = prev
-        cls = getattr(mod, "Board", None)
-        if cls is None:
-            _warn("[local-rkllm] 工具链脚本中未找到 Board 类，改用内置客户端\n")
-        return cls
-    except Exception as exc:  # noqa: BLE001
-        _warn("[local-rkllm] 加载工具链脚本失败（%s），改用内置客户端\n" % exc)
-        return None
+    with _locks_guard:
+        if name not in _locks:
+            _locks[name] = threading.Lock()
+        return _locks[name]
 
 
 # ---------------- 对外接口 ----------------
@@ -727,32 +705,54 @@ def health(target=None):
     return out
 
 
+def _cpt_for(text, cfg=None):
+    """1 token 约等于多少字符；配置为 0/未配置时按 CJK 占比自动选。
+
+    固定 1.6 是为中文定的：英文实际约 4 字符/token，用 1.6 会高估 2.5 倍，
+    一段 12000 字符的英文会被算成 7500 token 而误拒。
+    """
+    cpt = (cfg or DEFAULTS).get("chars_per_token") or 0
+    if cpt > 0:
+        return cpt
+    if not text:
+        return 1.6
+    cjk = sum(1 for ch in text if "\u3400" <= ch <= "\u9fff")
+    return 1.6 if cjk * 3 >= len(text) else 3.5
+
+
 def _est_tokens(text, cfg=None):
-    """按字符数保守估算 token 数（默认中文为主约 1 token ≈ 1.6 字符）。"""
+    """按字符数保守估算 token 数（默认按语言自动选 1.6 / 3.5）。"""
     if not text:
         return 0
-    cpt = (cfg or DEFAULTS)["chars_per_token"]
-    return int(len(text) / cpt) + 1
+    return int(len(text) / _cpt_for(text, cfg)) + 1
 
 
-def _timeout_for(max_tokens, cfg=None):
-    """按目标的实测吞吐推算超时：生成耗时 + 固定余量。"""
+def _timeout_for(max_tokens, est_in=0, cfg=None):
+    """按吞吐推算超时：prefill + 生成 + 固定余量。
+
+    旧公式只有生成项：小 NPU 上 2000 token 的 prefill 就要一两百秒，光算
+    生成会把本来能成功的请求判成超时，再被 retries 放大三倍。
+    """
     cfg = cfg or DEFAULTS
-    return max(int(cfg["timeout_floor"]), int(20 + max_tokens / cfg["tok_per_sec"] * 1.3))
+    tps = max(0.1, float(cfg["tok_per_sec"]))
+    prefill_tps = float(cfg.get("prefill_tps") or 0) or tps * 8
+    return max(int(cfg["timeout_floor"]),
+               int(20 + est_in / max(0.1, prefill_tps) + max_tokens / tps * 1.3))
 
 
 def ask(prompt, system=None, max_tokens=None, temperature=0.7,
         max_output_chars=None, timeout=None, retries=None, target=None):
     """单轮问答。返回 text / target / model / truncated / est_input_tokens / max_tokens / elapsed / retries / usage。
 
-    防护行为（阈值取**该目标生效的配置**，默认即 RK3588 特化值）：
-      · 输入超 `max_in` → 直接抛错并提示分段，不发请求（避开长 prompt 崩溃高发区）
-      · max_tokens 封顶到 `max_out`（服务端不遵守该参数，只能客户端截）
-      · 输出超长 → 硬截断并置 truncated=True；另做退化特征自检（`degen_check`）
-      · 请求失败 → 等待 `retry_wait` 秒后重试，共 `retries` 次（等守护进程拉起服务）
+    防护行为（阈值取**该目标生效的配置**）：
+      · 输入超 `max_in` → 直接抛错并提示分段，不发请求
+      · 输出预算与输入共享上下文；装不下时拒绝，而不是把负数兜成 64 造成越界
+      · `model` 只在配置里显式写了才进请求体（rkllm 忽略它，vLLM 用它路由）
+      · 200 但正文为空 → 报错，而不是静默返回空串
+      · 4xx（除 408/429）不重试；连接错误 / 5xx 才重试
     """
     if not prompt or not prompt.strip():
-        raise LocalLLMError("prompt 不能为空")
+        raise LocalLLMError("prompt 不能为空", retryable=False)
 
     name, cfg = resolve(target)
     model = cfg["model"]
@@ -765,34 +765,54 @@ def ask(prompt, system=None, max_tokens=None, temperature=0.7,
     if est_in > safe_in:
         raise LocalLLMError(
             "输入约 %d token，超过目标 %s 的输入预算 %d。请先分段再逐段调用"
-            "（该预算为实测值，可在配置里用 max_in= 调整）。" % (est_in, name, safe_in))
+            "（该预算可在配置里用 max_in= 调整）。" % (est_in, name, safe_in),
+            retryable=False)
 
-    # 2) 输出预算
+    # 2) 输出预算：与输入共享上下文，装不下就拒绝
     mt = safe_out if max_tokens is None else min(int(max_tokens), safe_out)
     mt = max(64, mt)
-    mt = max(64, min(mt, cfg["context"] - est_in - 64))
+    room = cfg["context"] - est_in - 64
+    if room < 64:
+        raise LocalLLMError(
+            "输入约 %d token 已占满 %s 的 %d 上下文，留不出输出空间；请分段。"
+            % (est_in, name, cfg["context"]), retryable=False)
+    mt = min(mt, room)
+    cpt = _cpt_for(prompt, cfg)
     if max_output_chars is None:
-        max_output_chars = int(mt * cfg["chars_per_token"] * cfg["overrun"])  # 留出 max_tokens 不遵守的余量
+        max_output_chars = int(mt * cpt * cfg["overrun"])   # 服务端不遵守 max_tokens
 
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
+    extra = {"temperature": temperature, "messages": messages}
+    if cfg.get("model_explicit"):
+        extra["model"] = model
+
     board = _board_for(name, cfg)
     if timeout is None:
-        timeout = _timeout_for(mt, cfg)
+        timeout = _timeout_for(mt, est_in, cfg)
 
     last_err = None
+    attempt = 0
     for attempt in range(retries + 1):
         try:
             with _lock_for(name):            # 同一目标内串行；不同目标互不阻塞
                 status, text, elapsed, usage = board.ask(
-                    prompt, max_tokens=mt, timeout=timeout,
-                    extra={"model": model, "temperature": temperature, "messages": messages})
+                    prompt, max_tokens=mt, timeout=timeout, extra=extra)
             if status != 200:
-                raise LocalLLMError("目标 %s 返回 HTTP %s：%s" % (name, status, str(text)[:120]))
+                retryable = not (isinstance(status, int) and 400 <= status < 500
+                                 and status not in (408, 429))
+                raise LocalLLMError(
+                    "目标 %s 返回 HTTP %s：%s" % (name, status, str(text)[:120]),
+                    retryable=retryable)
             text = text or ""
+            if not text.strip() and not int((usage or {}).get("completion_tokens") or 0):
+                raise LocalLLMError(
+                    "目标 %s 返回 200 但正文为空——响应可能不是 OpenAI 兼容结构"
+                    "（用 health= 指向 /v1/models 可先核对端点）" % name,
+                    retryable=False)
             truncated = False
             if len(text) > max_output_chars:
                 text = text[:max_output_chars]
@@ -814,9 +834,12 @@ def ask(prompt, system=None, max_tokens=None, temperature=0.7,
             }
         except Exception as exc:  # noqa: BLE001
             last_err = exc
+            if getattr(exc, "retryable", True) is False:
+                break
             if attempt < retries:
                 time.sleep(cfg["retry_wait"])       # 等守护进程把服务拉起来
-    raise LocalLLMError("目标 %s 调用失败（已重试 %d 次）：%s" % (name, retries, last_err)) from last_err
+    raise LocalLLMError("目标 %s 调用失败（已重试 %d 次）：%s"
+                        % (name, attempt, last_err)) from last_err
 
 
 def calibrate(target=None, max_tokens=384):

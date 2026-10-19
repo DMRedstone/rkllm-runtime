@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """把压力 / 仿真测试的 JSON 结果渲染成一份可读的测试报告。
 
-    python 05_make_report.py [--dir results] [--out report.html] [--md report.md]
+    python make_report.py [--dir results] [--out report.html] [--md report.md]
 
 读取 results 目录下最新的 stress_*.json、simulate_*.json，以及可选的
 extra.json（板端资源占用、max_tokens 验证、崩溃事件等补充数据），生成：
@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import glob
+
+from board_api import newest   # 与 export_csv 共用同一实现
 import html
 import json
 import os
@@ -28,12 +30,6 @@ try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:  # noqa: BLE001
     pass
-
-
-def newest(pattern):
-    """返回匹配 pattern 的文件中字典序（≈时间序）最大的一个路径，无匹配返回 None。"""
-    files = sorted(glob.glob(pattern))
-    return files[-1] if files else None
 
 
 def load(path):

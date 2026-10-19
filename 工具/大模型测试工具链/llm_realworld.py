@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-08_llm_realworld.py —— 真实公文场景测试（基于用户提供的 10 份真实文档）
+llm_realworld.py —— 真实公文场景测试（基于用户提供的 10 份真实文档）
 
 为什么做这个测试
 ----------------
@@ -22,12 +22,12 @@
 
 只读语料
 --------
-语料由 07_docx_corpus.py 生成于 corpus/corpus.json，本脚本不接触原始 docx。
+语料由 docx_corpus.py 生成于 corpus/corpus.json，本脚本不接触原始 docx。
 
 用法
 ----
-    python 08_llm_realworld.py --host 192.0.2.10:8080 --key <KEY>
-    python 08_llm_realworld.py --host ... --key ... --only a,b       # 只跑指定组
+    python llm_realworld.py --host 192.0.2.10:8080 --key <KEY>
+    python llm_realworld.py --host ... --key ... --only a,b       # 只跑指定组
 """
 
 import argparse
@@ -37,8 +37,7 @@ import re
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
+from board_api import build_base, health_ok, post_chat, wait_ready   # 共享 HTTP 层
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS_PATH = os.path.join(HERE, "corpus", "corpus.json")
@@ -78,54 +77,10 @@ PROMPTS = {
 # ---------------------------------------------------------------------------
 
 
-def post_chat(base, key, payload, timeout=600):
-    """调用 /v1/chat/completions，返回统一结构（含端到端时延与 token 用量）。"""
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        base + "/v1/chat/completions", data=data, method="POST",
-        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
-    t0 = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            body = r.read().decode("utf-8", "replace")
-        dt = time.time() - t0
-        j = json.loads(body)
-        usage = j.get("usage") or {}
-        ch = (j.get("choices") or [{}])[0]
-        return {"ok": True, "dt": dt,
-                "text": (ch.get("message") or {}).get("content", "") or "",
-                "prompt_tokens": usage.get("prompt_tokens"),
-                "completion_tokens": usage.get("completion_tokens"),
-                "finish_reason": ch.get("finish_reason")}
-    except urllib.error.HTTPError as e:
-        return {"ok": False, "dt": time.time() - t0, "error": "HTTP %d" % e.code,
-                "body": e.read().decode("utf-8", "replace")[:200], "text": ""}
-    except Exception as e:  # 连接中断 / 超时——在崩溃场景下常见
-        return {"ok": False, "dt": time.time() - t0, "error": "%s: %s" % (type(e).__name__, e),
-                "text": ""}
+# post_chat / health_ok / wait_ready 曾在本文件内各写一份；现由 board_api 提供，
+# 返回结构与判读口径与其余脚本一致。
 
 
-def health_ok(base, key, timeout=5):
-    """健康检查；用于并发测试后判断服务是否存活。"""
-    try:
-        req = urllib.request.Request(base + "/health", headers={"Authorization": "Bearer " + key})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status == 200
-    except Exception:
-        return False
-
-
-def wait_ready(base, key, max_wait=180):
-    """等待守护进程把服务拉起，返回恢复耗时（秒），超时返回 None。"""
-    t0 = time.time()
-    while time.time() - t0 < max_wait:
-        if health_ok(base, key):
-            return time.time() - t0
-        time.sleep(5)
-    return None
-
-
-# ---------------------------------------------------------------------------
 # 质量粗判（无需人工即可给出「像不像样」的量化线索）
 # ---------------------------------------------------------------------------
 
@@ -395,7 +350,7 @@ def main():
     ap.add_argument("--concurrency", type=int, default=3, help="D 组并发数")
     args = ap.parse_args()
 
-    base = args.host if args.host.startswith(("http://", "https://")) else "http://" + args.host
+    base = build_base(args.host)
     os.makedirs(SAMPLES_DIR, exist_ok=True)
 
     if not health_ok(base, args.key):

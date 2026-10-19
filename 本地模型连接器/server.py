@@ -19,6 +19,7 @@ stdout 只输出协议报文，一切日志与告警走 stderr，绝不污染 st
 import json
 import os
 import sys
+import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -27,13 +28,24 @@ if HERE not in sys.path:
 import rkllm_client as rc  # noqa: E402  同目录，路径已插入 sys.path
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "local-rkllm", "version": "1.0.0"}
+SERVER_INFO = {"name": "local-rkllm", "version": "1.1.0"}
 
-# 写进 ask / batch 的工具描述，用来约束调用方模型
+# 单次 batch 的规模上限。MCP 工具调用是同步的，一个 500 段的批次会把连接器
+# 锁死几十分钟（弱板子上更久），调用方只会看到「工具无响应」。
+MAX_SEGMENTS = 50
+MAX_TOTAL_CHARS = 200_000
+
+_WRITE_LOCK = threading.Lock()   # stdout 只能有一个写者
+_CANCELLED = set()               # 已取消的 request id（MCP notifications/cancelled）
+
+# 写进 ask / batch 的工具描述，用来约束调用方模型。
+# 不写死「3～150 秒」：那是 RK3588 上的经验值，弱板子上 768 token 可能要 5 分钟，
+# 写死会让调用方模型误判超时。耗时改为按目标的 max_out / tok_per_sec 推算。
 ABILITY_NOTE = (
-    "调用前先用 local_llm_targets 查看目标的档位与能力边界，不要把超出该目标能力"
-    "的任务交给它——例如让 1B/4B 档写长文、写代码、做多步推理，或要求超过其输出上限"
-    "的长度。单次调用耗时 3～150 秒，调用方需容忍长等待。"
+    "调用前先用 local_llm_targets 查看目标的档位与能力边界：budgets 里的 "
+    "tok_per_sec 与 max_out 相乘相除就是单次耗时量级（弱板子上可能长达数分钟），"
+    "调用方需容忍长等待。不要把超出该目标能力的任务交给它——例如让 1B/4B 档写长文、"
+    "写代码、做多步推理，或要求超过其输出上限的长度。"
 )
 
 TOOLS = [
@@ -141,12 +153,25 @@ def tool_ask(args):
     return {"content": blocks}
 
 
-def tool_batch(args):
+def tool_batch(args, rid=None):
     segments = args.get("segments")
     if not isinstance(segments, list) or not segments:
         raise ValueError("segments 必须是非空字符串数组")
+    if len(segments) > MAX_SEGMENTS:
+        raise ValueError("segments 有 %d 段，单次最多 %d 段；请分批调用"
+                         % (len(segments), MAX_SEGMENTS))
+    total = sum(len(s) for s in segments if isinstance(s, str))
+    if total > MAX_TOTAL_CHARS:
+        raise ValueError("segments 合计 %d 字符，单次最多 %d；请分批调用"
+                         % (total, MAX_TOTAL_CHARS))
     results = []
     for i, seg in enumerate(segments):
+        if rid is not None and str(rid) in _CANCELLED:
+            for j in range(i, len(segments)):
+                results.append({"index": j, "ok": False, "error": "已取消"})
+            sys.stderr.write("[local-rkllm] batch 在 %d/%d 处取消\n"
+                             % (i, len(segments)))
+            break
         kw = _ask_kwargs({"prompt": seg, "system": args.get("system"),
                           "max_tokens": args.get("max_tokens"), "target": args.get("target")})
         try:
@@ -178,13 +203,13 @@ HANDLERS = {
 }
 
 
-def call_tool(name, args):
+def call_tool(name, args, rid=None):
     fn = HANDLERS.get(name)
     if fn is None:
         return {"content": [_text("未知工具：%s（可用：%s）" % (name, "、".join(HANDLERS)))],
                 "isError": True}
     try:
-        result = fn(args or {})
+        result = fn(args or {}, rid) if fn is tool_batch else fn(args or {})
     except Exception as exc:  # noqa: BLE001
         return {"content": [_text(str(exc))], "isError": True}
     result.setdefault("isError", False)
@@ -208,7 +233,7 @@ def handle(msg):
     if method == "tools/list":
         return True, {"jsonrpc": "2.0", "id": mid, "result": {"tools": TOOLS}}
     if method == "tools/call":
-        result = call_tool(params.get("name"), params.get("arguments") or {})
+        result = call_tool(params.get("name"), params.get("arguments") or {}, mid)
         return True, {"jsonrpc": "2.0", "id": mid, "result": result}
     if method == "ping":
         return True, {"jsonrpc": "2.0", "id": mid, "result": {}}
@@ -218,6 +243,24 @@ def handle(msg):
         return True, {"jsonrpc": "2.0", "id": mid, "result": {"prompts": []}}
     return True, {"jsonrpc": "2.0", "id": mid,
                   "error": {"code": -32601, "message": "不支持的方法：%s" % method}}
+
+
+def _send(payload):
+    """写一条响应。MCP 允许乱序响应（按 id 匹配），但 stdout 只能有一个写者。"""
+    with _WRITE_LOCK:
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+
+def _dispatch(msg):
+    """在工作线程里执行一次 tools/call，再把响应写回去。"""
+    try:
+        send, payload = handle(msg)
+    except Exception as exc:  # noqa: BLE001
+        send, payload = True, {"jsonrpc": "2.0", "id": msg.get("id"),
+                               "error": {"code": -32603, "message": str(exc)[:300]}}
+    if send and payload is not None:
+        _send(payload)
 
 
 def main():
@@ -230,6 +273,7 @@ def main():
     sys.stderr.write("[local-rkllm] MCP 服务已启动（stdio）：%s\n" % "、".join(HANDLERS))
     sys.stderr.flush()
 
+    workers = []
     for raw in sys.stdin:
         raw = raw.strip()
         if not raw:
@@ -237,20 +281,39 @@ def main():
         try:
             msg = json.loads(raw)
         except Exception:  # noqa: BLE001
-            sys.stdout.write(json.dumps(
-                {"jsonrpc": "2.0", "id": None,
-                 "error": {"code": -32700, "message": "解析失败：不是合法 JSON"}},
-                ensure_ascii=False) + "\n")
-            sys.stdout.flush()
+            _send({"jsonrpc": "2.0", "id": None,
+                   "error": {"code": -32700, "message": "解析失败：不是合法 JSON"}})
             continue
+
+        method = msg.get("method")
+        # 取消通知：只记下 id。单次 ask 是阻塞的 HTTP 调用，无法中断；batch 会在
+        # 下一段之前自行停下（旧实现阻塞在 handle() 里，根本读不到这条通知）。
+        if method == "notifications/cancelled":
+            rid = (msg.get("params") or {}).get("requestId")
+            if rid is not None:
+                _CANCELLED.add(str(rid))
+                sys.stderr.write("[local-rkllm] 收到取消通知：%s\n" % rid)
+                sys.stderr.flush()
+            continue
+
+        # tools/call 可能跑几分钟；放到工作线程，主循环继续读 stdin。
+        if method == "tools/call" and msg.get("id") is not None:
+            worker = threading.Thread(target=_dispatch, args=(msg,), daemon=True)
+            worker.start()
+            workers = [w for w in workers if w.is_alive()]
+            workers.append(worker)
+            continue
+
         try:
             send, payload = handle(msg)
         except Exception as exc:  # noqa: BLE001  兜底：任何异常都不能中断服务
             send, payload = True, {"jsonrpc": "2.0", "id": msg.get("id"),
                                    "error": {"code": -32603, "message": str(exc)[:300]}}
         if send and payload is not None:
-            sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            sys.stdout.flush()
+            _send(payload)
+
+    for worker in workers:      # stdin 已关闭：把在跑的调用等完，别丢响应
+        worker.join()
 
 
 if __name__ == "__main__":

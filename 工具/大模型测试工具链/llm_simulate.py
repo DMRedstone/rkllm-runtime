@@ -25,9 +25,9 @@ WorkBuddy 风格）真实的使用模式，用来暴露压测发现不了的问�
 
 用法
 ----
-    python 03_llm_simulate.py --host 192.0.2.10:8080 --key KEY
-    python 03_llm_simulate.py --host 192.0.2.10:8080 --key KEY --vu 3 --vu-seconds 45
-    python 03_llm_simulate.py --host 192.0.2.10:8080 --key KEY --skip-concurrent --skip-mixed
+    python llm_simulate.py --host 192.0.2.10:8080 --key KEY
+    python llm_simulate.py --host 192.0.2.10:8080 --key KEY --vu 3 --vu-seconds 45
+    python llm_simulate.py --host 192.0.2.10:8080 --key KEY --skip-concurrent --skip-mixed
 """
 from __future__ import annotations
 
@@ -41,6 +41,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+
+from board_api import auth_headers, build_base, join_url   # 共享 HTTP 层
 
 # 强制 UTF-8 输出，避免 Windows 控制台中文乱码
 try:
@@ -78,7 +80,7 @@ class Client(object):
         timeout -- 默认超时（秒）
         system  -- system 提示词；缺省为一段本地助手设定
         """
-        self.base = "http://" + host
+        self.base = build_base(host)
         self.key = key
         self.timeout = timeout
         self.history = []
@@ -92,11 +94,10 @@ class Client(object):
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if stream:
             headers["Accept"] = "text/event-stream"
-        if self.key:
-            headers["Authorization"] = "Bearer " + self.key
+        headers.update(auth_headers(self.key))
         data = json.dumps(payload).encode() if payload is not None else None
-        request = urllib.request.Request(self.base + path, data=data, method=method,
-                                         headers=headers)
+        request = urllib.request.Request(join_url(self.base, path), data=data,
+                                         method=method, headers=headers)
         return urllib.request.urlopen(request, timeout=timeout or self.timeout)
 
     def health(self):
@@ -563,7 +564,7 @@ def main():
                  info["stats"]["errors"]))
 
     final = {
-        "target": "http://" + args.host,
+        "target": build_base(args.host),
         "model": info["model"] if info else None,
         "alive_at_end": STATE["alive"],
         "died_at": STATE["died_at"],

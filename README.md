@@ -41,7 +41,7 @@ python 工具/编译工具链/make_deb.py --arch arm64 --emit-tree
 python 工具/编译工具链/verify_deb.py 交付/rkllm-runtime_1.3.1-12_arm64.deb
 
 # 板端测试全流程
-cd 工具/大模型测试工具链 && python 00_run_all.py --host <板端地址> --key <令牌>
+cd 工具/大模型测试工具链 && python run_all.py --host <板端地址> --key <令牌>
 ```
 
 ## 关于上游源料

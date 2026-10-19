@@ -16,3 +16,11 @@ Thumbs.db
 
 工具/build/
 工具/dist/
+
+# 测试工具链的运行产物（报告、结果、语料）
+工具/大模型测试工具链/report*.html
+工具/大模型测试工具链/report*.md
+工具/大模型测试工具链/results/
+工具/大模型测试工具链/corpus/
+工具/大模型测试工具链/csv/
+工具/大模型测试工具链/realworld_samples/

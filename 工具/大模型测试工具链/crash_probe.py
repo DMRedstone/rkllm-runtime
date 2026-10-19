@@ -17,8 +17,8 @@
 
 用法
 ----
-    python 04_crash_probe.py --host 192.0.2.10:8080 --key KEY
-    python 04_crash_probe.py --host 192.0.2.10:8080 --key KEY --repeat 5
+    python crash_probe.py --host 192.0.2.10:8080 --key KEY
+    python crash_probe.py --host 192.0.2.10:8080 --key KEY --repeat 5
 """
 from __future__ import annotations
 
@@ -28,8 +28,7 @@ import os
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
+from board_api import build_base, health_ok, req, wait_ready   # 共享 HTTP 层
 
 # 强制 UTF-8 输出
 try:
@@ -58,42 +57,7 @@ HISTORY = [
 RESULTS = []
 
 
-def req(base, key, payload, timeout=120, raw_method="POST", path="/v1/chat/completions"):
-    """发送一次请求。
-
-    返回 (status, elapsed, err)：status 为 HTTP 码或 "EXC"；err 为客户端的
-    异常描述（用于识别 RemoteDisconnected 这类连接中断）。
-    """
-    headers = {"Content-Type": "application/json"}
-    if key:
-        headers["Authorization"] = "Bearer " + key
-    data = json.dumps(payload).encode() if payload is not None else None
-    request = urllib.request.Request(base + path, data=data, method=raw_method, headers=headers)
-    started = time.time()
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            response.read()
-            return response.status, time.time() - started, None
-    except urllib.error.HTTPError as exc:
-        return exc.code, time.time() - started, None
-    except Exception as exc:  # noqa: BLE001
-        return "EXC", time.time() - started, repr(exc)
-
-
-def health_ok(base, key):
-    """探测 /health 是否返回 200（服务是否存活）。"""
-    status, _, _ = req(base, key, None, timeout=5, raw_method="GET", path="/health")
-    return status == 200
-
-
-def wait_ready(base, key, timeout=90):
-    """等待服务恢复（守护进程自动拉起），返回等待秒数；超时返回 None。"""
-    started = time.time()
-    while time.time() - started < timeout:
-        if health_ok(base, key):
-            return time.time() - started
-        time.sleep(1.0)
-    return None
+# req / health_ok / wait_ready 曾在本文件内各写一份；现由 board_api 统一提供。
 
 
 def fire_concurrently(base, key, payloads, timeout=120):
@@ -160,7 +124,7 @@ def main():
                         help="结果 JSON 输出目录")
     args = parser.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
-    base = args.host if args.host.startswith(("http://", "https://")) else "http://" + args.host
+    base = build_base(args.host)
     rep = max(1, args.repeat)
 
     # 实验开始前确保服务在线（若刚崩过，等它自动拉起）

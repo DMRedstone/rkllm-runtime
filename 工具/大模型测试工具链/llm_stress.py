@@ -17,7 +17,7 @@
 2. 每次请求都读取服务端返回的 usage，吞吐按服务端上报的 completion_tokens
    聚合计算，而不是靠字符数估算；
 3. 超长 prompt 的守卫探测不再写死上下文长度，改为由命令行参数传入；
-4. 全部结果落盘为 JSON，供报告生成器（05_make_report.py）消费；
+4. 全部结果落盘为 JSON，供报告生成器（make_report.py）消费；
 5. 段序保持「先温和、后敌意」：可能压垮服务的极限用例放在最后。
 
 段落对照
@@ -28,9 +28,9 @@
 
 用法
 ----
-    python 02_llm_stress.py --host 192.0.2.10:8080 --key KEY
-    python 02_llm_stress.py --host 192.0.2.10:8080 --key KEY --quick          # 快速模式
-    python 02_llm_stress.py --host 192.0.2.10:8080 --key KEY --skip-limits    # 跳过可能压垮服务的 E 段
+    python llm_stress.py --host 192.0.2.10:8080 --key KEY
+    python llm_stress.py --host 192.0.2.10:8080 --key KEY --quick          # 快速模式
+    python llm_stress.py --host 192.0.2.10:8080 --key KEY --skip-limits    # 跳过可能压垮服务的 E 段
 
 注意
 ----
@@ -50,6 +50,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+
+from board_api import Board, build_base, pct   # 共享 HTTP 层与百分位口径
 
 # Windows 控制台默认可能不是 UTF-8，中文输出会乱码，这里强制切到 UTF-8。
 try:
@@ -82,159 +84,18 @@ def header(text):
     print("\n=== %s" % text)
 
 
-def pct(values, p):
-    """线性插值法计算百分位数（无第三方依赖）。
+# HTTP 客户端与 pct() 曾在本文件内实现（Board 类 + 局部 pct）；现统一由
+# board_api 提供，本脚本只保留压测逻辑。alive() 包装保留原「不可达时 note
+# 一条告警」的行为——board_api.Board.alive 只返回布尔与 info。
 
-    values -- 数值列表（内部会排序，不修改原列表）
-    p      -- 百分位，0~100
-    返回对应百分位值；列表为空时返回 None。
-    """
-    if not values:
-        return None
-    values = sorted(values)
-    k = (len(values) - 1) * p / 100.0
-    lo, hi = int(k), min(int(k) + 1, len(values) - 1)
-    return values[lo] + (values[hi] - values[lo]) * (k - lo)
+def alive(board, label):
+    """存活探测 + 不可达告警。"""
+    ok, info = board.alive()
+    if not ok:
+        note("", "  !! SERVICE UNREACHABLE after %s" % label,
+             board.last_health_problem or "no /health")
+    return ok, info
 
-
-class Board(object):
-    """板端服务的最小 HTTP 客户端封装。
-
-    仅依赖标准库 urllib，便于在无 pip 环境的机器上直接运行。
-    """
-
-    def __init__(self, host, key, timeout=240):
-        """
-        host    -- "ip:port"
-        key     -- Bearer 令牌；为空则不发 Authorization 头
-        timeout -- 默认单请求超时（秒）
-        """
-        self.base = host if host.startswith(("http://", "https://")) else "http://" + host
-        self.key = key
-        self.timeout = timeout
-        self.last_health_problem = None  # 记录最近一次 /health 失败原因，便于区分「服务挂了」与「key 不对」
-
-    def reset(self):
-        """POST /v1/reset：清空服务端会话历史（耐力段用它钉死上下文变量）。"""
-        request = self._request("/v1/reset", payload={}, method="POST")
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                return response.status
-        except urllib.error.HTTPError as exc:
-            return exc.code
-        except Exception:  # noqa: BLE001
-            return None
-
-    def _request(self, path, payload=None, method="POST", timeout=None):
-        """构造一个 urllib Request 对象（不做实际发送）。"""
-        headers = {"Content-Type": "application/json"}
-        if self.key:
-            headers["Authorization"] = "Bearer " + self.key
-        # payload 既支持 dict（自动序列化），也支持 bytes（用于畸形请求体测试）
-        data = payload if isinstance(payload, bytes) else (
-            json.dumps(payload).encode() if payload is not None else None)
-        return urllib.request.Request(self.base + path, data=data, method=method,
-                                      headers=headers)
-
-    def call(self, path="/v1/chat/completions", payload=None, method="POST", timeout=None):
-        """发送一次请求并读取完整响应。
-
-        返回 (status, body_text, elapsed_s, usage_dict_or_None)。
-        status 为 HTTP 状态码，或字符串 "EXC" 表示客户端异常；
-        usage 为响应体中的 usage 字段（含 completion_tokens），解析失败为 None。
-        """
-        request = self._request(path, payload, method, timeout)
-        started = time.time()
-        try:
-            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
-                body = response.read().decode("utf-8", "replace")
-                usage = None
-                try:
-                    usage = json.loads(body).get("usage")
-                except Exception:  # noqa: BLE001
-                    pass
-                return response.status, body, time.time() - started, usage
-        except urllib.error.HTTPError as exc:
-            # 4xx/5xx 也会进这里，把错误体读出来便于诊断
-            return exc.code, exc.read().decode("utf-8", "replace"), time.time() - started, None
-        except Exception as exc:  # noqa: BLE001
-            return "EXC", repr(exc), time.time() - started, None
-
-    def stream(self, payload, timeout=None):
-        """发送流式（SSE）请求，返回 (status, text, elapsed, ttft)。
-
-        ttft（time to first token）只统计到「第一个有内容的增量」，
-        不计服务端先发的那条仅含 role 的空 chunk，避免低估首字延迟。
-        """
-        payload = dict(payload, stream=True)   # 防御：调用方漏传 stream 时不会静默读到空结果
-        request = self._request("/v1/chat/completions", payload, timeout=timeout)
-        started = time.time()
-        try:
-            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
-                ttft = None
-                pieces = []
-                while True:
-                    line = response.readline()
-                    if not line:
-                        break
-                    if line.startswith(b"data: "):
-                        chunk = line[6:].strip()
-                        if chunk != b"[DONE]":
-                            try:
-                                delta = json.loads(chunk)["choices"][0]["delta"].get("content")
-                            except Exception:  # noqa: BLE001
-                                delta = None
-                            if delta:
-                                if ttft is None:
-                                    ttft = time.time() - started
-                                pieces.append(delta)
-                return response.status, "".join(pieces), time.time() - started, ttft
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read().decode("utf-8", "replace"), time.time() - started, None
-        except Exception as exc:  # noqa: BLE001
-            return "EXC", repr(exc), time.time() - started, None
-
-    def ask(self, content, max_tokens=32, timeout=None, extra=None):
-        """发送一次单轮对话并取出回答文本。
-
-        返回 (status, content, elapsed, usage)。extra 可覆盖/追加请求参数。
-        """
-        payload = {"messages": [{"role": "user", "content": content}], "max_tokens": max_tokens}
-        if extra:
-            payload.update(extra)
-        status, body, elapsed, usage = self.call(payload=payload, timeout=timeout)
-        if status == 200:
-            try:
-                return status, json.loads(body)["choices"][0]["message"]["content"], elapsed, usage
-            except Exception:  # noqa: BLE001
-                return "BAD", body[:80], elapsed, usage
-        return status, body[:80], elapsed, usage
-
-    def health(self):
-        """读取 /health。成功返回解析后的 dict，失败返回 None 并记录原因。"""
-        status, body, _, _ = self.call("/health", method="GET", timeout=10)
-        if status != 200:
-            self.last_health_problem = ("HTTP %s %s" % (status, body[:70])
-                                        if status != "EXC" else body[:90])
-            return None
-        self.last_health_problem = None
-        try:
-            return json.loads(body)
-        except Exception:  # noqa: BLE001
-            self.last_health_problem = "unparsable /health response"
-            return None
-
-    def alive(self, label):
-        """存活探测。返回 (是否存活, health_info 或 None)。
-
-        不可用时打印一条醒目的告警（带最近一次失败原因），便于定位崩溃点。
-        """
-        info = self.health()
-        if info is None:
-            note("", "  !! SERVICE UNREACHABLE after %s" % label,
-                 self.last_health_problem or "no /health")
-            return False, None
-        return True, info
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +136,7 @@ def baseline(board, quick):
     ]
     for label, content, max_tokens in probes:
         status, text, elapsed, usage = board.ask(content, max_tokens=max_tokens)
-        ok, _ = board.alive(label)
+        ok, _ = alive(board, label)
         if status != 200:
             note("A", label, "%s  %.2fs  %s" % (status, elapsed, text))
         else:
@@ -309,7 +170,7 @@ def streaming_vs_blocking(board, quick):
     status, text, elapsed, ttft = board.stream(
         {"messages": [{"role": "user", "content": prompt}],
          "max_tokens": tokens, "stream": True})
-    ok, _ = board.alive("A2 streaming")
+    ok, _ = alive(board, "A2 streaming")
     note("A2", "流式 %d tok" % tokens,
          "%s  total %.2fs  首字 %s  %d chars  %s"
          % (status, elapsed, ("%.2fs" % ttft) if ttft else "n/a", len(text),
@@ -390,7 +251,7 @@ def concurrency_curve(board, quick, levels, reqs_per_level, max_tokens):
              % (wall, stats["qps"] or 0, stats["p50_s"] or 0, stats["p90_s"] or 0,
                 stats["p99_s"] or 0, stats["agg_tok_s"] or 0, errors),
              extra=stats)
-    ok, info = board.alive("concurrency")
+    ok, info = alive(board, "concurrency")
     if info:
         note("B", "  server counters", "requests=%s rejected=%s errors=%s"
              % (info["stats"]["requests"], info["stats"]["rejected"], info["stats"]["errors"]))
@@ -416,7 +277,7 @@ def endurance(board, quick):
         else:
             failures += 1
             note("C", "  request %d failed" % index, "%s  %s" % (status, text))
-    ok, info = board.alive("endurance")
+    ok, info = alive(board, "endurance")
     if latencies:
         # 比较「前四分之一」与「后四分之一」的中位延迟，量化漂移
         first = statistics.median(latencies[:max(1, len(latencies) // 4)])
@@ -480,7 +341,7 @@ def overload(board, quick, burst_size):
     else:
         note("D", "  no explicit shed observed",
              "%d requests all queued/accepted" % len(all_rows))
-    ok, info = board.alive("overload")
+    ok, info = alive(board, "overload")
     if info:
         note("D", "  server counters", "requests=%s rejected=%s errors=%s"
              % (info["stats"]["requests"], info["stats"]["rejected"], info["stats"]["errors"]))
@@ -532,7 +393,7 @@ def limits(board, context_len, quick):
         timeout = 300 if "budget" in label or "2000" in label else None
         status, body, elapsed, _ = board.call(payload=payload, timeout=timeout)
         detail = "%s  %.2fs  %s" % (status, elapsed, body[:70].replace("\n", " "))
-        ok, _ = board.alive(label)
+        ok, _ = alive(board, label)
         note("E", label, detail + ("" if ok else "   <== SERVICE DIED"))
         if not ok:
             return False, label
@@ -572,7 +433,7 @@ def limits(board, context_len, quick):
         _conn.close()
     except Exception as exc:  # noqa: BLE001
         _status, _bodytxt = "EXC", repr(exc)
-    _ok, _ = board.alive("chunked transfer")
+    _ok, _ = alive(board, "chunked transfer")
     note("E2c", "chunked body (no Content-Length)",
          "%s  %s%s" % (_status, _bodytxt[:60].replace("\n", " "),
                        "" if _ok else "   <== SERVICE DIED"))
@@ -589,7 +450,7 @@ def limits(board, context_len, quick):
         except Exception as exc:  # noqa: BLE001
             status, body = "EXC", repr(exc)
         elapsed = time.time() - started
-        ok, _ = board.alive(label)
+        ok, _ = alive(board, label)
         note("E2", label, "%s  %.2fs  %s%s" % (status, elapsed, body[:60].replace("\n", " "),
                                                "" if ok else "  <== SERVICE DIED"))
         if not ok:
@@ -661,7 +522,7 @@ def main():
     # 汇总落盘，供报告生成器读取
     elapsed = time.time() - started_at
     summary = {
-        "target": "http://" + args.host,
+        "target": build_base(args.host),
         "model": info.get("model"),
         "mode": "quick" if args.quick else "full",
         "started_at": started_at,

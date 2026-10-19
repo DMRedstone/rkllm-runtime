@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-07_docx_corpus.py —— 真实公文语料提取器
+docx_corpus.py —— 真实公文语料提取器
 
 作用
 ----
@@ -24,9 +24,9 @@
 
 用法
 ----
-    python 07_docx_corpus.py                 # 提取全部并打印画像
-    python 07_docx_corpus.py --out corpus/corpus.json
-    RKLLM_CORPUS_DIR=/path/to/语料 python 07_docx_corpus.py   # 用外部语料目录
+    python docx_corpus.py                 # 提取全部并打印画像
+    python docx_corpus.py --out corpus/corpus.json
+    RKLLM_CORPUS_DIR=/path/to/语料 python docx_corpus.py   # 用外部语料目录
 """
 
 import argparse

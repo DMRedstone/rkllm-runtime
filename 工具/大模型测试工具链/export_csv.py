@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """把测试结果 JSON 导出为 CSV，便于做表、画图或二次分析。
 
-    python 06_export_csv.py [--dir results] [--outdir csv]
+    python export_csv.py [--dir results] [--outdir csv]
 
 读取 results 目录下最新的 stress_*.json 与 simulate_*.json，导出三张表：
 
@@ -17,6 +17,8 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+
+from board_api import newest   # 与 make_report 共用同一实现
 import json
 import os
 import sys
@@ -27,12 +29,6 @@ try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:  # noqa: BLE001
     pass
-
-
-def newest(pattern):
-    """返回匹配 pattern 的最新（字典序最大）文件路径，无匹配返回 None。"""
-    files = sorted(glob.glob(pattern))
-    return files[-1] if files else None
 
 
 def load(path):
