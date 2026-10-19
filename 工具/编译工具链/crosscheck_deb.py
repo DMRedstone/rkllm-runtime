@@ -12,12 +12,12 @@ import sys
 import tarfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from tools.verify_deb import parse_ar, read_tar_xz  # noqa: E402
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from verify_deb import parse_ar, read_tar_xz  # noqa: E402
 # 上游 release tarball 位置（软编码）：优先环境变量 RKLLM_RELEASE_TARBALL，未设置时使用仓库内随附的精简上游库。
 SOURCE = Path(os.environ.get("RKLLM_RELEASE_TARBALL")
-              or ROOT.parent / "输入" / "rknn-llm-release-v1.3.1.tar.gz")
+              or HERE.parent.parent / "输入" / "rknn-llm-release-v1.3.1.tar.gz")
 PREFIX = "rknn-llm-release-v1.3.1"
 
 # upstream path -> expected path inside the package; byte identical unless noted
@@ -57,7 +57,7 @@ def source_hashes() -> dict[str, str]:
 
 
 def deb_payload(deb: Path):
-    import tools.verify_deb as vd  # reuse the ar reader
+    import verify_deb as vd  # reuse the ar reader
     return vd.parse_ar(deb.read_bytes())
 
 

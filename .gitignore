@@ -13,3 +13,6 @@ Thumbs.db
 
 # 构建产物不入库，只发 GitHub Release
 交付/*.deb
+
+工具/build/
+工具/dist/
