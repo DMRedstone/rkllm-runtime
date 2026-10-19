@@ -152,7 +152,7 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default=os.environ.get("RKLLM_HOST", "192.0.2.10:8080"),
                         help="host:port（可用 RKLLM_HOST 覆盖）")
-    parser.add_argument("--key", default=os.environ.get("RKLLM_KEY", ""),
+    parser.add_argument("--key", default=os.environ.get("RKLLM_KEY") or os.environ.get("RKLLM_API_KEY", ""),
                         help="API key（可用 RKLLM_KEY 覆盖）")
     parser.add_argument("--repeat", type=int, default=3, help="每个场景的重复次数")
     parser.add_argument("--outdir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -160,7 +160,7 @@ def main():
                         help="结果 JSON 输出目录")
     args = parser.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
-    base = "http://" + args.host
+    base = args.host if args.host.startswith(("http://", "https://")) else "http://" + args.host
     rep = max(1, args.repeat)
 
     # 实验开始前确保服务在线（若刚崩过，等它自动拉起）
@@ -194,6 +194,8 @@ def main():
              "两个并发长 prompt —— 验证是否与 prompt 长度/并发 prefill 有关", rep)
     scenario(base, args.key, "S5 4x concurrent chat", [chat_with_history] * 4,
              "四个并发中长对话请求", rep)
+    scenario(base, args.key, "S6 8x concurrent chat", [chat_with_history] * 8,
+             "八个并发中长对话请求 —— 并发阶梯升到 8，覆盖更陡的峰值", rep)
 
     out = os.path.join(args.outdir, "crashprobe_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
     with open(out, "w", encoding="utf-8") as fh:

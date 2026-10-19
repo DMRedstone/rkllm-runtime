@@ -190,23 +190,34 @@ def run_task(base, key, task, text, max_tokens=1024, timeout=600, retries=3):
     """
     prompt = PROMPTS[task].format(text=text)
     payload = {"messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens}
-    crashes, wait_s, res = 0, 0.0, None
+    # F-5：失败分类——HTTP 4xx 是请求级拒绝（重试无意义，记 rejected）；连接中断/超时
+    # 才是崩溃信号（记 crashes 并重试）；每条记录存 recovery_s，数据可自证。
+    crashes, rejected, wait_s, recovery_s, res = 0, 0, 0.0, None, None
     for _ in range(retries + 1):
         res = post_chat(base, key, payload, timeout=timeout)
         if res["ok"]:
+            break
+        _err = res.get("error", "")
+        if _err.startswith("HTTP 4"):
+            rejected += 1
             break
         crashes += 1
         rec = wait_ready(base, key, max_wait=120)
         if rec is None:
             break
         wait_s += rec
+        recovery_s = rec
     verdict, note = judge(task, text, res)
     if crashes:
         prefix = "" if note in ("正常", "") else note + "；"
         note = prefix + "遭遇崩溃 %d 次（已自动重试）" % crashes
+    elif rejected:
+        prefix = "" if note in ("正常", "") else note + "；"
+        note = prefix + "请求被服务端拒绝（HTTP 4xx，不重试）"
     return {
         "task": task, "ok": res["ok"], "verdict": verdict, "note": note,
         "dt": round(res["dt"], 2), "wait_s": round(wait_s, 1), "crashes": crashes,
+        "rejected": rejected, "recovery_s": round(recovery_s, 1) if recovery_s else None,
         "in_chars": len(text), "in_tok": res.get("prompt_tokens"),
         "out_chars": len(res["text"]), "out_tok": res.get("completion_tokens"),
         "finish_reason": res.get("finish_reason"),
@@ -379,12 +390,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default=os.environ.get("RKLLM_HOST", "192.0.2.10:8080"))
-    ap.add_argument("--key", default=os.environ.get("RKLLM_KEY", ""))
+    ap.add_argument("--key", default=os.environ.get("RKLLM_KEY") or os.environ.get("RKLLM_API_KEY", ""))
     ap.add_argument("--only", default="a,b,c,d,e", help="只跑指定组，逗号分隔")
     ap.add_argument("--concurrency", type=int, default=3, help="D 组并发数")
     args = ap.parse_args()
 
-    base = "http://" + args.host
+    base = args.host if args.host.startswith(("http://", "https://")) else "http://" + args.host
     os.makedirs(SAMPLES_DIR, exist_ok=True)
 
     if not health_ok(base, args.key):

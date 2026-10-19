@@ -43,6 +43,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def run_step(title, script, extra_args=None, timeout=None):
+    timeout = timeout or 1800   # 默认单步上限 30 分钟：子脚本死锁时不至于挂死编排器
     """运行同目录下的一个子脚本，实时把输出透传到当前终端。
 
     返回子进程退出码（负数表示异常/超时）。
@@ -89,8 +90,8 @@ def wait_ready(host, key, timeout=90):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--host", default=os.environ.get("RKLLM_HOST", "192.0.2.10:8080"))
-    parser.add_argument("--key", default=os.environ.get("RKLLM_KEY", ""))
+    parser.add_argument("--host", default=os.environ.get("RKLLM_HOST"))
+    parser.add_argument("--key", default=os.environ.get("RKLLM_KEY") or os.environ.get("RKLLM_API_KEY", ""))
     parser.add_argument("--quick", action="store_true", help="快速模式（传给压测/仿真）")
     parser.add_argument("--skip-stress", action="store_true", help="跳过压力测试")
     parser.add_argument("--skip-simulate", action="store_true", help="跳过仿真测试")
@@ -105,10 +106,16 @@ def main():
     results_dir = os.path.join(HERE, "results")
     os.makedirs(results_dir, exist_ok=True)
 
+    if not args.host:
+        parser.error("必须用 --host 或环境变量 RKLLM_HOST 指定板端地址（示例地址不作为默认，防止静默打向不可达目标）")
+
     # 1) 预检：服务不可达 / key 错误 时提前失败，避免后续白跑
     if run_step("预检 健康检查", "01_health_check.py", common) != 0:
         print("\n预检未通过，终止。请确认服务在线且 key 正确。")
         return 1
+
+    # 退出码语义：0=全绿；2=完成但有 finding（子脚本返回 2）；1=有步骤失败/未完成
+    codes = []
 
     # 2) 压力测试
     if not args.skip_stress:
@@ -117,7 +124,7 @@ def main():
             stress_args.append("--quick")
         if not args.limits:
             stress_args.append("--skip-limits")   # 默认不跑会压垮服务的 E 段
-        run_step("压力测试", "02_llm_stress.py", stress_args)
+        codes.append(("压力测试", run_step("压力测试", "02_llm_stress.py", stress_args)))
         wait_ready(args.host, args.key, args.ready_timeout)
 
     # 3) 仿真测试
@@ -125,20 +132,32 @@ def main():
         sim_args = list(common) + ["--vu", str(args.vu)]
         if args.quick:
             sim_args += ["--vu-seconds", "20"]
-        run_step("仿真测试", "03_llm_simulate.py", sim_args)
+        codes.append(("仿真测试", run_step("仿真测试", "03_llm_simulate.py", sim_args)))
         wait_ready(args.host, args.key, args.ready_timeout)
 
     # 4) 崩溃隔离实验
     if not args.skip_crash:
-        run_step("崩溃复现", "04_crash_probe.py", common)
+        codes.append(("崩溃复现", run_step("崩溃复现", "04_crash_probe.py", common)))
         wait_ready(args.host, args.key, args.ready_timeout)
 
     # 5) 汇总报告
     run_step("生成报告", "05_make_report.py", [])
 
+    findings = [(n, c) for n, c in codes if c == 2]
+    failed = [(n, c) for n, c in codes if c not in (0, 2)]
+
     print("\n" + "=" * 70)
     print("全流程完成。报告：%s" % os.path.join(HERE, "report.html"))
+    print("步骤退出码（0=全绿 2=有finding）：")
+    for n, c in codes:
+        print("  %-10s -> %d" % (n, c))
     print("=" * 70)
+    if failed:
+        print("有步骤失败（退出码非 0/2）：", failed)
+        return 1
+    if findings:
+        print("完成但有 finding（详见各段结果）：", [n for n, _ in findings])
+        return 2
     return 0
 
 

@@ -155,6 +155,13 @@ def check_basic(base, key, prompt, timeout):
 def check_full(base, key, timeout):
     """7 项深度检测 + 1 项收尾存活核对。返回 (通过数, 失败数)。"""
     passed = failed = 0
+    # B-3：errors 是服务启动以来的累计值——记录基线，检测 8 改比「本次检查期间增量」
+    _status0, _body0, _e0, _err0 = request(base, key, "/health", method="GET", timeout=8)
+    _errors_base = 0
+    try:
+        _errors_base = int((json.loads(_body0).get("stats") or {}).get("errors") or 0)
+    except Exception:  # noqa: BLE001
+        pass
 
     def rec(name, ok, detail=""):
         nonlocal passed, failed
@@ -186,6 +193,9 @@ def check_full(base, key, timeout):
         "%s  %.1fs" % (status, elapsed))
 
     # 3) 关键回归：system 请求之后，普通请求不能被「污染」成模板回显
+    #    先 /v1/reset 清掉检测 2 的 system 上下文——污染与历史残留两个变量分离
+    _rst_status, _, _, _ = request(base, key, "/v1/reset", payload={}, timeout=8)
+    rec("检测3前置reset", _rst_status in (200, 204), "HTTP %s" % _rst_status)
     status, body, elapsed, err = ask(
         {"messages": [{"role": "user", "content": "用一句话介绍杭州"}],
          "max_tokens": 64}, "污染检测")
@@ -234,8 +244,10 @@ def check_full(base, key, timeout):
     except Exception:  # noqa: BLE001
         pass
     stats = info.get("stats", {}) if isinstance(info, dict) else {}
-    rec("检查后服务存活", status == 200 and stats.get("errors", 0) == 0,
-        "requests=%s errors=%s" % (stats.get("requests"), stats.get("errors")))
+    _errors_now = int(stats.get("errors") or 0)
+    rec("检查后服务存活", status == 200 and _errors_now == _errors_base,
+        "requests=%s errors=%s（本次检查期间增量 %d）"
+        % (stats.get("requests"), _errors_now, _errors_now - _errors_base))
 
     return passed, failed
 
@@ -245,7 +257,7 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default=os.environ.get("RKLLM_HOST", "192.0.2.10:8080"),
                         help="host:port（可用 RKLLM_HOST 覆盖）")
-    parser.add_argument("--key", default=os.environ.get("RKLLM_KEY", ""),
+    parser.add_argument("--key", default=os.environ.get("RKLLM_KEY") or os.environ.get("RKLLM_API_KEY", ""),
                         help="API key（可用 RKLLM_KEY 覆盖）")
     parser.add_argument("--prompt", default="你好，请用一句话自我介绍",
                         help="端到端对话检查使用的提示词")

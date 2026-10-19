@@ -60,7 +60,7 @@ def table(headers, rows):
 
 
 def pill(text, kind="ok"):
-    return Raw("<span class='pill %s'>%s</span>" % (kind, esc(text)))
+    return Raw("<span class='pill %s'>%s</span>" % (esc(str(kind)), esc(text)))
 
 
 def count_crashes(data):

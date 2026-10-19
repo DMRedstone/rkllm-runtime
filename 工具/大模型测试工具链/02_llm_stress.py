@@ -109,10 +109,21 @@ class Board(object):
         key     -- Bearer 令牌；为空则不发 Authorization 头
         timeout -- 默认单请求超时（秒）
         """
-        self.base = "http://" + host
+        self.base = host if host.startswith(("http://", "https://")) else "http://" + host
         self.key = key
         self.timeout = timeout
         self.last_health_problem = None  # 记录最近一次 /health 失败原因，便于区分「服务挂了」与「key 不对」
+
+    def reset(self):
+        """POST /v1/reset：清空服务端会话历史（耐力段用它钉死上下文变量）。"""
+        request = self._request("/v1/reset", payload={}, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+        except Exception:  # noqa: BLE001
+            return None
 
     def _request(self, path, payload=None, method="POST", timeout=None):
         """构造一个 urllib Request 对象（不做实际发送）。"""
@@ -335,7 +346,8 @@ def concurrency_curve(board, quick, levels, reqs_per_level, max_tokens):
     """
     header("B. concurrency -> throughput curve (NPU serves one request at a time)")
     for level in levels:
-        reqs = max(1, reqs_per_level)
+        # 请求数取 level 的整数倍，保证各档批结构一致（跨档 p50/p99 可比）
+        reqs = max(level, ((reqs_per_level + level - 1) // level) * level)
         lock = threading.Lock()
         rows = []
 
@@ -397,6 +409,7 @@ def endurance(board, quick):
     for index in range(rounds):
         status, text, elapsed, usage = board.ask(
             "连续第 %d 次提问，回答 ok 就行" % index, max_tokens=16)
+        board.reset()   # 每轮清历史：钉死上下文长度，让 drift 只归因于时间/温度，而非历史累积
         if status == 200:
             latencies.append(elapsed)
             toks.append((usage or {}).get("completion_tokens") or 0)
@@ -431,7 +444,9 @@ def overload(board, quick, burst_size):
     burst_size -- 每轮同时发起的请求数
     """
     header("D. overload / backpressure (how does it shed load?)")
-    bursts = 2 if quick else 3
+    # 并发阶梯：必须越过服务端队列容量（request_queue_size=256）才可能触发背压 503/429
+    ladder = [min(burst_size, 16), 64, 256] if not quick else [min(burst_size, 16), 64]
+    ladder = sorted({s for s in ladder if s > 0})
     all_rows = []
     lock = threading.Lock()
 
@@ -442,7 +457,8 @@ def overload(board, quick, burst_size):
         with lock:
             all_rows.append((status, elapsed))
 
-    for round_index in range(bursts):
+    for burst_size in ladder:
+        note("D", "burst", "flooding with %d concurrent short requests" % burst_size)
         threads = [threading.Thread(target=flooder) for _ in range(burst_size)]
         started = time.time()
         for th in threads:
@@ -482,7 +498,8 @@ def limits(board, context_len, quick):
     每个用例后做存活探测；一旦服务不可用，立即返回并指明肇事用例。
     """
     header("E. limit conditions (least -> most hostile)")
-    budget = (context_len or 4096) * 8   # 服务端守卫按字节预算（context_len x 8）
+    budget = (context_len or 4096) * 3   # 服务端守卫按 3 字节/token 估算
+                                         # （cli/rkllm.py: estimated_tokens = (bytes+2)//3；8 是已废弃的旧版值）
     note("E", "advertised guard", "context %s tokens, %s byte budget" % (context_len, budget))
 
     cases = [
@@ -507,7 +524,7 @@ def limits(board, context_len, quick):
                                       "max_tokens": 8}),
         ("prompt just over budget", {"messages": [{"role": "user", "content": "a" * (budget + 100)}],
                                      "max_tokens": 8}),
-        ("CJK prompt near budget", {"messages": [{"role": "user", "content": "测试" * (budget // 6)}],
+        ("CJK prompt near budget", {"messages": [{"role": "user", "content": "测" * (budget // 3)}],
                                     "max_tokens": 8}),
     ]
     for label, payload in cases:
@@ -532,6 +549,35 @@ def limits(board, context_len, quick):
         ("8MB body", json.dumps({"messages": [{"role": "user",
                                                "content": "a" * (8 * 1024 * 1024 + 1000)}]}).encode()),
     ]
+
+    # E2-chunked：Transfer-Encoding: chunked（服务端只认 Content-Length——已知裂缝，见全库报告 P0-5）
+    header("E2c. chunked transfer (server only reads Content-Length)")
+    try:
+        import http.client as _hc
+        _host = board.base.split("//", 1)[-1]
+        _conn = _hc.HTTPConnection(_host, timeout=120)
+        _body = json.dumps({"messages": [{"role": "user", "content": "hi"}],
+                            "max_tokens": 4}).encode()
+        _conn.putrequest("POST", "/v1/chat/completions")
+        _conn.putheader("Transfer-Encoding", "chunked")
+        if board.key:
+            _conn.putheader("Authorization", "Bearer " + board.key)
+        _conn.endheaders()
+        for _i in range(0, len(_body), 64):
+            _chunk = _body[_i:_i + 64]
+            _conn.send(b"%x\r\n" % len(_chunk) + _chunk + b"\r\n")
+        _conn.send(b"0\r\n\r\n")
+        _resp = _conn.getresponse()
+        _status, _bodytxt = _resp.status, _resp.read().decode("utf-8", "replace")
+        _conn.close()
+    except Exception as exc:  # noqa: BLE001
+        _status, _bodytxt = "EXC", repr(exc)
+    _ok, _ = board.alive("chunked transfer")
+    note("E2c", "chunked body (no Content-Length)",
+         "%s  %s%s" % (_status, _bodytxt[:60].replace("\n", " "),
+                       "" if _ok else "   <== SERVICE DIED"))
+    if not _ok:
+        return False, "chunked transfer"
     for label, raw in raw_cases:
         request = board._request("/v1/chat/completions", raw)
         started = time.time()
@@ -559,8 +605,8 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default=os.environ.get("RKLLM_HOST", "192.0.2.10:8080"),
                         help="host:port（可用环境变量 RKLLM_HOST 覆盖）")
-    parser.add_argument("--key", default=os.environ.get("RKLLM_KEY", ""),
-                        help="API key（可用环境变量 RKLLM_KEY 覆盖）")
+    parser.add_argument("--key", default=os.environ.get("RKLLM_KEY") or os.environ.get("RKLLM_API_KEY", ""),
+                        help="API key（环境变量 RKLLM_KEY 或 RKLLM_API_KEY）")
     parser.add_argument("--quick", action="store_true", help="快速模式：减少请求轮数")
     parser.add_argument("--skip-limits", action="store_true",
                         help="跳过 E 段（该段可能把服务压垮）")
@@ -630,6 +676,7 @@ def main():
     print("\nresults written to %s" % out)
     if not survived:
         print("*** the service did not survive section %s - that is a finding" % stopped_at)
+        return 2   # 完成但有 finding
     return 0
 
 

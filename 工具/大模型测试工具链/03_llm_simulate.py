@@ -298,10 +298,28 @@ def background_title(client):
     return client.check("background", "concurrent title generation")
 
 
+def _bisect_reject(client, lo, hi):
+    """在 (lo 通过, hi 被拒) 之间二分查找确切拒绝边界（字符数），返回边界值或 None。"""
+    for _ in range(6):
+        if hi - lo <= 256:
+            return hi
+        mid = (lo + hi) // 2
+        document = mid * "a"
+        try:
+            client.chat("请用一句话概括这段文档：\n" + document, max_tokens=16, keep=False)
+            lo = mid
+        except urllib.error.HTTPError:
+            hi = mid
+        except Exception:  # noqa: BLE001
+            return None
+    return hi
+
+
 def long_paste(client, sizes):
     """场景 3：用户逐级粘贴长文档并请求摘要（板端最易被拒/被压垮的场景）。
 
     返回被拒绝的 (尺寸, 状态码) 列表；若服务崩溃则返回空列表。
+    若相邻档位跨越了拒绝线（前通过后被拒），自动二分查找确切拒绝边界。
     """
     step("4", "用户粘贴长文档（真实客户端最容易出事的场景）")
     paragraph = ("在嵌入式设备上部署大语言模型需要考虑内存占用、NPU 算力、量化精度"
@@ -326,6 +344,14 @@ def long_paste(client, sizes):
             if not client.check("paste", "long paste %d chars" % size):
                 return []                     # 服务崩溃：停止后续
             rejected.append((size, exc.code))  # 服务存活：请求级失败，继续尝试更短文档
+            # F-3：档距可能跨过拒绝线——用已知的通过/拒绝邻点二分出确切边界
+            _passed = [s for s in sizes if s < size and s not in [r[0] for r in rejected]]
+            if _passed:
+                _lo = max(_passed)
+                boundary = _bisect_reject(client, _lo, size)
+                if boundary:
+                    print("        -> 二分拒绝边界 ≈ %d 字符" % boundary)
+                    record("paste", "reject_boundary_chars", True, str(boundary))
             continue
         except Exception as exc:  # noqa: BLE001
             print("        -> 请求异常: %r" % exc)
@@ -352,6 +378,26 @@ def interruption(client):
     except Exception as exc:  # noqa: BLE001
         print("      流式异常: %r" % exc)
         record("interruption", "abort_mid_stream", False, repr(exc))
+    # B-2：中断后立刻轮询 /health 的 busy，量化「服务端是否仍在空跑推理」（全库报告 P1-4）
+    try:
+        _t0 = time.time()
+        _busy_tail = None
+        while time.time() - _t0 < 180:
+            _h = client.health() if hasattr(client, "health") else None
+            _busy = bool(_h.get("busy")) if isinstance(_h, dict) else None
+            if _busy is False:
+                _busy_tail = time.time() - _t0
+                break
+            if _busy is None:
+                break
+            time.sleep(1.0)
+        if _busy_tail is not None:
+            print("      服务端 busy 恢复 False 用时 %.1fs（中断后仍在推理的时长）" % _busy_tail)
+            record("interruption", "server_busy_tail_s", True, "%.1fs" % _busy_tail)
+        else:
+            record("interruption", "server_busy_tail_s", False, "180s 内未观察到 busy=False")
+    except Exception as exc:  # noqa: BLE001
+        print("      busy 轮询异常: %r" % exc)
     time.sleep(1.5)
     return client.check("interruption", "after interruption")
 
@@ -449,7 +495,7 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default=os.environ.get("RKLLM_HOST", "192.0.2.10:8080"),
                         help="host:port（可用 RKLLM_HOST 覆盖）")
-    parser.add_argument("--key", default=os.environ.get("RKLLM_KEY", ""),
+    parser.add_argument("--key", default=os.environ.get("RKLLM_KEY") or os.environ.get("RKLLM_API_KEY", ""),
                         help="API key（可用 RKLLM_KEY 覆盖）")
     parser.add_argument("--paste-sizes", default="800,3000,8000,16000",
                         help="长文档场景的字符数，逗号分隔")
