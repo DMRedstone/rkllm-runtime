@@ -33,8 +33,19 @@ rkllm-runtime (@VERSION@) unstable; urgency=medium
     privilege boundary, but the entry should not be able to surprise anyone.
   * Both manual pages use RKLLM_API_KEY in their first API example instead of
     --api-key, which the same page warns would be visible in ps.
-  * Self test: two new checks (chunked body refused, health reports
-    function_tools), and the NULL-probe stub learned about the _keep list.
+  * The queue-full 503 now carries Retry-After: 5, matching the other
+    back-pressure exit, the one that gives up waiting for the NPU. Two branches
+    of the same status code that differed in headers forced every client to
+    special-case one of them.
+  * A non-streaming request aborts once its client has gone away. Such a
+    request writes nothing while generating, so a disconnect used to stay
+    invisible until the whole generation finished - the NPU and infer_lock
+    remained busy producing an answer nobody would read. select(2) plus
+    MSG_PEEK separates "idle" from "a pipelined request is waiting" without
+    consuming those bytes, and is polled twice a second.
+  * Self test: four new checks (chunked body refused, health reports
+    function_tools, queue-full 503 carries Retry-After, non-streaming
+    disconnect probe), and the NULL-probe stub learned about the _keep list.
 
   [ Test toolchain ]
   * Stress test: the prompt-budget guard now assumes 3 bytes per token, which
@@ -56,12 +67,29 @@ rkllm-runtime (@VERSION@) unstable; urgency=medium
     (a step failed), a per-step summary, and a watchdog so a hung child cannot
     wedge the run. The board client accepts https and reads RKLLM_API_KEY as
     well as RKLLM_KEY.
+  * One HTTP layer for the whole toolchain (board_api.py) instead of seven
+    hand-rolled clients that disagreed about percentiles and about whether an
+    empty 200 from /health means alive. The scripts lost their numeric
+    prefixes, so the modules can be imported rather than exec'd.
+  * A new quality.py reports the shapes a machine can judge: finish_reason
+    distribution, measured overrun, repetition/degeneration, mojibake,
+    streaming-versus-blocking parity, and response attribution under
+    concurrency (a response delivered to the wrong request). The report gained
+    a section for them. Semantic quality still needs a human reader.
 
   [ Packaging ]
   * make_deb falls back to the repository layout when neither
     RKLLM_PACKAGING_DIR nor RKLLM_RELEASE_TARBALL is set; crosscheck_deb drops
     an import left over from the old package structure; .gitignore covers the
     build output directories.
+  * The packaging tools no longer fail quietly. emit_tree refuses to write a
+    regular file where a symlink was requested - the verification tree must
+    describe the same package dpkg sees - and re-reads is_symlink(), because
+    Windows can leave an unresolvable entry behind without raising. The ar
+    header length is checked with a real raise instead of an assert that
+    `python -O` strips. The foreign-architecture filter matches whole path
+    segments rather than substrings, so a file that merely carries the marker
+    in its name is no longer dropped from the package.
 
  -- @MAINTAINER@  @DATE@
 
