@@ -1,0 +1,38 @@
+# Line endings are declared here, not left to each clone's core.autocrlf.
+#
+#   * text      - treat the path as text unconditionally. "text=auto" is NOT
+#                 enough: with core.autocrlf=true (the default of most Windows
+#                 installs) git turns the AUTO branch into "check out as CRLF"
+#                 and ignores eol=lf, so the very files this rule exists for
+#                 would still come out with CRLF. Only an explicit "text"
+#                 makes the result independent of the local configuration.
+#   * eol=lf    - store and check out with LF on every platform.
+#
+# Because "text" is unconditional, every binary format in this repository is
+# named below. Add a line here when a new one appears - an unnamed binary would
+# be treated as text and corrupted.
+#
+# Why it matters: a shebang of "#!/bin/sh\r" fails on Linux with
+# "bad interpreter: /bin/sh^M". rsync-backup.sh, e2e.sh, harness.sh, the mock-*
+# helpers and both build-linux.sh are exactly that kind of file, and a Windows
+# checkout used to rewrite them to CRLF without anyone noticing.
+# postinst/prerm/postrm and the systemd unit are read verbatim by dpkg/systemd.
+* text eol=lf
+
+*.docx  binary
+*.pdf   binary
+*.jpg   binary
+*.png   binary
+*.gif   binary
+*.ico   binary
+*.gz    binary
+*.zip   binary
+*.xz    binary
+*.7z    binary
+*.bin   binary
+*.so    binary
+*.rknn  binary
+*.rkllm binary
+*.woff  binary
+*.woff2 binary
+*.mp4   binary
