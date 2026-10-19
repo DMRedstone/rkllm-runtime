@@ -27,7 +27,9 @@ import hmac
 import json
 import os
 import queue
+import select
 import shlex
+import socket
 import shutil
 import signal
 import subprocess
@@ -1315,17 +1317,20 @@ class Handler(BaseHTTPRequestHandler):
             return
         sys.stderr.write("[rkllm] %s - %s\n" % (self.address_string(), fmt % args))
 
-    def _send_json(self, payload, status=200):
+    def _send_json(self, payload, status=200, headers=None):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_error_json(self, message, status=400, error_type="invalid_request_error"):
+    def _send_error_json(self, message, status=400, error_type="invalid_request_error",
+                         headers=None):
         self._send_json({"error": {"message": message, "type": error_type,
-                                   "param": None, "code": None}}, status)
+                                   "param": None, "code": None}}, status, headers)
 
     def _reject(self, message, status=400, error_type="invalid_request_error"):
         """Count the refusal, say why in the journal, then answer.
@@ -1481,7 +1486,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.server.queue_slots.acquire(blocking=False):
             self.server.stats["rejected"] += 1
             self._send_error_json("server queue is full (%d already waiting), retry later"
-                                  % self.server.options.max_queue, 503, "server_error")
+                                  % self.server.options.max_queue, 503, "server_error",
+                                  {"Retry-After": "5"})
             return
         self.server.adjust_waiting(1)
         try:
@@ -1509,6 +1515,20 @@ class Handler(BaseHTTPRequestHandler):
             self.server.queue_slots.release()
 
     # -- inference --------------------------------------------------------
+
+    def _client_gone(self):
+        """客户端是否已断开（非流式推理期间没有写操作，靠 BrokenPipe 发现不了）。
+
+        可读 + MSG_PEEK 读到 EOF 才算断开；可读但仍有数据是 pipelined 的下一
+        请求，不能当断开。MSG_PEEK 不消费数据，后续解析不受影响。
+        """
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            if not readable:
+                return False
+            return self.connection.recv(1, socket.MSG_PEEK) == b""
+        except (OSError, ValueError):
+            return True                      # 套接字已不可用，按断开处理
 
     def _begin_stream(self):
         self.send_response(200)
@@ -1659,10 +1679,25 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
         else:
+            # 非流式请求在客户端断开后仍在跑满整段推理，白占 NPU 与 infer_lock
+            # （下一次请求要等它跑完）。每 0.5 秒探一次，断开即 abort。
+            last_probe = time.monotonic()
             try:
                 for fragment in engine.stream(prompt, role=role, enable_thinking=thinking,
                                               sampling=sampling, max_new_tokens=max_tokens):
                     pieces.append(fragment)
+                    now = time.monotonic()
+                    if now - last_probe >= 0.5:
+                        last_probe = now
+                        if self._client_gone():
+                            engine.abort()
+                            self.close_connection = True
+                            if not self.server.options.quiet:
+                                sys.stderr.write(
+                                    "[rkllm] client disconnected during a non-streaming "
+                                    "request; inference aborted\n")
+                                sys.stderr.flush()
+                            return
             except _Failure as exc:
                 self.server.stats["errors"] += 1
                 self._send_error_json(str(exc), 500, "server_error")
@@ -2029,6 +2064,64 @@ def cmd_selftest(args):
             "health reports function_tools", status == 200
             and "function_tools" in json.loads(body),
             "status %s" % status))
+
+        # Two back-pressure exits (queue full, NPU wait timeout) must speak the
+        # same dialect: a bare 503 tells a client "retry later" without saying
+        # when. Emptying the semaphore makes the queue-full branch deterministic
+        # instead of racing real concurrency.
+        saved_slots = server.queue_slots
+        server.queue_slots = threading.BoundedSemaphore(0)
+        try:
+            probe = http_client.HTTPConnection("127.0.0.1", port, timeout=10)
+            probe.request("POST", "/v1/chat/completions",
+                          body=json.dumps({"messages": [{"role": "user", "content": "x"}]}),
+                          headers={"Content-Type": "application/json"})
+            reply = probe.getresponse()
+            queue_status, retry_after = reply.status, reply.getheader("Retry-After")
+            reply.read()
+            probe.close()
+        finally:
+            server.queue_slots = saved_slots
+        results.append(_selftest_result(
+            "queue-full 503 carries Retry-After",
+            queue_status == 503 and retry_after == "5",
+            "status %s, Retry-After %r" % (queue_status, retry_after)))
+
+        # A non-streaming request has no writes, so a client that walks away is
+        # invisible until the whole generation finishes - it keeps the NPU and
+        # infer_lock busy for nothing. The probe must tell three states apart:
+        # idle, data waiting (a pipelined request - not a disconnect), and EOF.
+        left, right = socket.socketpair()
+        try:
+            probe_handler = Handler.__new__(Handler)      # skip __init__: it makes a connection
+            probe_handler.connection = left
+            idle = probe_handler._client_gone()
+            right.sendall(b"GET / HTTP/1.1\r\n")          # bytes still queued
+            with_data = probe_handler._client_gone()
+        finally:
+            right.close()
+            left.close()
+
+        # EOF needs a connection with nothing left to read: MSG_PEEK can only see
+        # the queued bytes, never the FIN behind them.
+        left2, right2 = socket.socketpair()
+        try:
+            probe2 = Handler.__new__(Handler)
+            probe2.connection = left2
+            right2.close()                                # peer gone -> FIN
+            deadline = time.monotonic() + 1.0             # FIN 到达是异步的
+            eof = False
+            while time.monotonic() < deadline:
+                eof = probe2._client_gone()
+                if eof:
+                    break
+                time.sleep(0.02)
+        finally:
+            left2.close()
+        results.append(_selftest_result(
+            "non-streaming disconnect probe",
+            idle is False and with_data is False and eof is True,
+            "idle=%s with_data=%s eof=%s" % (idle, with_data, eof)))
 
         # An oversized prompt must be refused here, not handed to the native
         # runtime: a 32 KB English prompt is about 8000 tokens against a 4096

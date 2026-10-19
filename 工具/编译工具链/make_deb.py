@@ -35,6 +35,7 @@ import io
 import json
 import os
 import posixpath
+import re
 import sys
 import tarfile
 import time
@@ -186,8 +187,9 @@ class Classifier:
             return self.drop(rel, size, "PC 端转换工具(x86_64 wheel)")
         if rel.startswith("rknpu-driver/"):
             return self.drop(rel, size, "NPU 内核驱动(已安装,不属于本包)")
-        other_arch = ["armhf", "armeabi", "arm64-v8a"] if ctx.arch == "arm64" else ["aarch64", "arm64-v8a"]
-        if any(marker in low for marker in other_arch):
+        other_arch = (["armhf", "armeabi", "arm64-v8a"] if ctx.arch == "arm64"
+                      else ["aarch64", "arm64-v8a"])
+        if _mentions_arch(low, other_arch):
             return self.drop(rel, size, "非目标架构")
         if ctx.profile == "slim" and ("/opencv-linux-" in low or "/haarcascades" in low):
             return self.drop(rel, size, "slim: 剔除自带 OpenCV(依赖系统 libopencv-dev)")
@@ -488,10 +490,30 @@ def collect_dirs(paths) -> list[str]:
     return sorted(dirs)
 
 
+def _mentions_arch(rel_low: str, markers) -> bool:
+    """路径里是否出现了某个架构标记，按"非字母数字边界"匹配。
+
+    原来的 `marker in low` 是纯子串：`libmyarmhflib.so`、`armhfnotes.txt`
+    这类不含架构语义的文件名会被当成"非目标架构"丢掉，而丢弃只进统计、
+    构建照常成功——查都查不出来。
+
+    边界用 `[^a-z0-9]` 而不是 `[-_.]` 分词：`arm64-v8a` 自带 `-`，分词会把
+    它拆成 `arm64` + `v8a` 反而匹配不上。
+    """
+    for marker in markers:
+        pattern = r"(?:^|[^a-z0-9])" + re.escape(marker) + r"(?:$|[^a-z0-9])"
+        if re.search(pattern, rel_low):
+            return True
+    return False
+
+
 def ar_member(name: str, payload: bytes) -> bytes:
     header = f"{name:<16}{0:<12}{ROOT_UID:<6}{ROOT_GID:<6}{0o100644:<8o}{len(payload):<10}`\n"
-    # ar headers are 60 bytes; values are space padded, not zero padded
-    assert len(header) == 60, len(header)
+    # ar headers are 60 bytes; values are space padded, not zero padded.
+    # assert 在 `python -O` 下会被整条剔除，坏头就会静默产出损坏的 deb。
+    if len(header) != 60:
+        raise SystemExit("ar header for %r is %d bytes, expected 60: %r"
+                         % (name, len(header), header))
     blob = header.encode("ascii") + payload
     if len(blob) % 2:
         blob += b"\n"
@@ -566,8 +588,20 @@ def emit_tree(items, ctx: BuildContext, tree_dir: Path) -> None:
         if item.data is None:
             try:
                 target.symlink_to(item.link)
-            except OSError:
-                target.write_text(item.link or "", encoding="utf-8")
+            except OSError as exc:
+                raise SystemExit(
+                    "cannot create symlink %s -> %s: %s\n"
+                    "The staged tree is only useful if it matches the real package; "
+                    "writing a regular file in its place would make dpkg-deb's view "
+                    "differ from what we build. Fix permissions/filesystem, or drop "
+                    "--emit-tree." % (item.dest, item.link, exc)) from exc
+            # Windows 上无权限时 symlink_to 可能不抛异常，却留下一个解析不了的
+            # 条目——只捕获 OSError 挡不住这种情况，必须回读确认。
+            if not target.is_symlink():
+                raise SystemExit(
+                    "symlink %s -> %s was not created as a symlink (platform or "
+                    "permission). On Windows this needs Developer Mode or an elevated "
+                    "shell; alternatively build in WSL." % (item.dest, item.link))
         else:
             target.write_bytes(item.data)
             os.chmod(target, item.mode)
