@@ -229,6 +229,18 @@ class Board(object):
         except Exception as exc:                                    # noqa: BLE001
             return "EXC", repr(exc), time.time() - started, None
 
+    def reset(self, timeout=15):
+        """清空服务端上下文（`/v1/reset`）→ bool。
+
+        11.8 的 C 段耐力测试每轮都要调它：不清历史的话，延迟漂移里会同时混着
+        "上下文逐轮变长"和"热降频"两个变量，测出的 drift 无法归因。11.9 把 HTTP
+        层统一到本模块时漏了这个方法，调用点（llm_stress:383）会直接 AttributeError。
+
+        只认 200/204：别的状态说明重置没生效，耐力测试的结果不可信。
+        """
+        status, _body, _elapsed, _err = self.call("/v1/reset", {}, timeout=timeout)
+        return status in (200, 204)
+
     def health(self, timeout=None):
         """读健康端点 → dict 或 None（失败原因在 last_health_problem）。
 

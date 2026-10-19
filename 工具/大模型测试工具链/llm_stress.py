@@ -52,6 +52,8 @@ import urllib.error
 import urllib.request
 
 from board_api import Board, build_base, pct   # 共享 HTTP 层与百分位口径
+from quality import (check_attribution, collect_sample,   # 内容形态分析（不判语义）
+                     finish_reason_stats, overrun_stats, shape_metrics, stream_parity)
 
 # Windows 控制台默认可能不是 UTF-8，中文输出会乱码，这里强制切到 UTF-8。
 try:
@@ -167,27 +169,135 @@ def streaming_vs_blocking(board, quick):
     tokens = 48 if quick else 96
 
     # 流式：记录到「第一个有内容的增量」为止的耗时
-    status, text, elapsed, ttft = board.stream(
+    status, stream_text, elapsed, ttft = board.stream(
         {"messages": [{"role": "user", "content": prompt}],
          "max_tokens": tokens, "stream": True})
     ok, _ = alive(board, "A2 streaming")
     note("A2", "流式 %d tok" % tokens,
          "%s  total %.2fs  首字 %s  %d chars  %s"
-         % (status, elapsed, ("%.2fs" % ttft) if ttft else "n/a", len(text),
+         % (status, elapsed, ("%.2fs" % ttft) if ttft else "n/a", len(stream_text),
             "alive" if ok else "DIED"))
     if not ok:
         return False
 
     # 阻塞：同样内容，一次返回
-    status, text, elapsed_block, usage = board.ask(prompt, max_tokens=tokens)
+    status, block_text, elapsed_block, usage = board.ask(prompt, max_tokens=tokens)
     note("A2", "阻塞 %d tok" % tokens,
-         "%s  total %.2fs  %d chars" % (status, elapsed_block, len(text)))
+         "%s  total %.2fs  %d chars" % (status, elapsed_block, len(block_text)))
 
     if ttft and elapsed_block:
         note("A2", "流式的首字提前量",
              "阻塞需 %.2fs 才有内容，流式 %.2fs 即有首字（提前约 %.0f%%）"
              % (elapsed_block, ttft, 100.0 * (elapsed_block - ttft) / elapsed_block))
-    return True
+
+    # 只比 TTFT 看不出流式丢字、重复首字、[DONE] 前缺尾块——必须比内容。
+    parity = stream_parity(block_text, stream_text)
+    note("A2", "流式内容一致性",
+         "%s  阻塞 %d 字 / 流式 %d 字，公共前缀 %d"
+         % (parity["verdict"], parity["blocking_chars"], parity["streamed_chars"],
+            parity["common_prefix"]),
+         extra=parity)
+    return parity["verdict"] in ("identical", "equivalent")
+
+
+# ---------------------------------------------------------------------------
+# A3. 响应归属（串包）
+# ---------------------------------------------------------------------------
+
+def attribution(board, quick):
+    """A3 段：并发下每个响应是否回到了发起它的那个请求。
+
+    并发压测只看状态码与延迟，「响应跑到别人的请求上」完全看不出来，而后果是
+    用户拿到别人的答案。做法：每个请求的 prompt 里埋一个只属于它的标记，然后看
+    响应里出现的是自己的标记还是别人的。
+    """
+    header("A3. response attribution under concurrency (cross-talk)")
+    count = 4 if quick else 8
+    markers = ["MK%02dQZ" % i for i in range(count)]
+    collected = {}
+    lock = threading.Lock()
+
+    def worker(index):
+        marker = markers[index]
+        prompt = "请原样输出下面这串字符，不要加任何解释、标点或换行：%s" % marker
+        status, text, _elapsed, _usage = board.ask(prompt, max_tokens=24, timeout=180)
+        with lock:
+            collected[index] = (marker, text if status == 200 else "")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(count)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    verdict = check_attribution([collected[i] for i in sorted(collected)])
+    note("A3", "x%d concurrent attributed" % count,
+         "%s  matched %d / missing %d / foreign %d"
+         % (verdict["verdict"], verdict["matched"], verdict["missing"], verdict["foreign"]),
+         extra=verdict)
+    return alive(board, "A3 attribution")[0]
+
+
+# ---------------------------------------------------------------------------
+# A5. 输出形态：截断 / overrun / 退化 / 乱码
+# ---------------------------------------------------------------------------
+
+def output_shape(board, quick):
+    """A5 段：输出在形态上还能不能用（不判语义）。
+
+    语义质量（改写得好不好）只能人看；这里只抓机器能判的四种形态：
+      · finish_reason=length 或请求长度与实际严重不符（截断）
+      · 实际输出 / 请求 max_tokens 的比值（overrun 的依据，配置项靠它定）
+      · 塌成重复词流（越长约 1000 token 越常见）
+      · 多字节字符在字节预算处被切断（U+FFFD）
+
+    跑完顺便 reset 一次：这一段会灌进较长的输出，不清掉会污染后续段的上下文。
+    """
+    header("A5. output shape (truncation / overrun / degeneration)")
+    tiers = [32, 128] if quick else [32, 128, 384]
+    repeats = 2 if quick else 3
+    for requested in tiers:
+        samples, texts = [], []
+        for _ in range(repeats):
+            status, body, elapsed, _usage = board.call(
+                payload={"messages": [{"role": "user",
+                                       "content": "请写一段约 %d 字的说明文，主题是秋天的早晨，"
+                                                  "语言平实，不要分点。" % (requested * 2)}],
+                         "max_tokens": requested},
+                timeout=900)
+            if status != 200:
+                continue
+            try:
+                data = json.loads(body)
+                choice = (data.get("choices") or [{}])[0]
+                text = ((choice.get("message") or {}).get("content") or "")
+                tokens = int(((data.get("usage") or {}).get("completion_tokens")) or 0)
+                reason = choice.get("finish_reason")
+            except (ValueError, AttributeError):
+                continue
+            samples.append(collect_sample(requested, reason, tokens, text, elapsed))
+            texts.append(text)
+        if not samples:
+            note("A5", "max_tokens=%d" % requested, "all requests failed")
+            continue
+        reasons = finish_reason_stats(samples)
+        overrun = overrun_stats(samples)
+        shape = shape_metrics(max(texts, key=len))
+        note("A5", "max_tokens=%d  x%d" % (requested, len(samples)),
+             "finish %s  trunc %.0f%%  overrun中位 %.2f 最大 %.2f  degen %.2f  %d 字"
+             % (reasons["counts"], reasons["truncated_pct"], overrun.get("median") or 0,
+                overrun.get("max") or 0, shape["degen"], shape["chars"]),
+             extra={"requested": requested, "finish": reasons, "overrun": overrun,
+                    "shape": shape, "samples": samples})
+        if shape["degen"] > 0.55:
+            note("A5", "  !! degeneration at max_tokens=%d" % requested,
+                 "degen %.2f，最长整段复现 %d 字" % (shape["degen"], shape["longest_repeat"]))
+        if shape["mojibake"] > 0:
+            note("A5", "  !! mojibake at max_tokens=%d" % requested,
+                 "U+FFFD 占比 %.3f（多字节字符被切断）" % shape["mojibake"])
+
+    board.call("/v1/reset", payload={}, timeout=15)
+    return alive(board, "A5 shape")[0]
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +428,7 @@ def overload(board, quick, burst_size):
         with lock:
             all_rows.append((status, elapsed))
 
-    for burst_size in ladder:
+    for index, burst_size in enumerate(ladder):
         note("D", "burst", "flooding with %d concurrent short requests" % burst_size)
         threads = [threading.Thread(target=flooder) for _ in range(burst_size)]
         started = time.time()
@@ -330,7 +440,7 @@ def overload(board, quick, burst_size):
         statuses = {}
         for status, _ in all_rows[-burst_size:]:
             statuses[status] = statuses.get(status, 0) + 1
-        note("D", "burst %d: %d simultaneous" % (round_index + 1, burst_size),
+        note("D", "burst %d: %d simultaneous" % (index + 1, burst_size),
              "wall %.1fs  statuses %s" % (wall, statuses))
     statuses = {}
     for status, _ in all_rows:
@@ -503,6 +613,8 @@ def main():
     steps = [
         ("A", lambda: baseline(board, args.quick)),
         ("A2", lambda: streaming_vs_blocking(board, args.quick)),
+        ("A3", lambda: attribution(board, args.quick)),
+        ("A5", lambda: output_shape(board, args.quick)),
         ("B", lambda: concurrency_curve(board, args.quick, levels,
                                         args.concurrency_requests, args.concurrency_tokens)),
         ("C", lambda: endurance(board, args.quick)),

@@ -33,8 +33,12 @@ except Exception:  # noqa: BLE001
 
 
 def load(path):
-    """读取并解析 JSON；path 为空或文件不存在返回 None。"""
-    if not path:
+    """读取并解析 JSON；path 为空或文件不存在返回 None。
+
+    docstring 一直这么写，但实现少了一步存在性检查——`extra.json` 是可选的
+    （报告里用 `if extra and ...` 守卫），缺了它却会让整个报告生成失败。
+    """
+    if not path or not os.path.exists(path):
         return None
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
@@ -124,6 +128,132 @@ def concurrency_chart(points):
                  % (w - pad_r, pad_t - 10, max_qps))
     parts.append("</svg>")
     return "".join(parts)
+
+
+SHAPE_SECTIONS = ("A2", "A3", "A5")
+
+
+def shape_records(stress):
+    """取内容形态相关的记录（A2 一致性 / A3 归属 / A5 输出形态）。"""
+    if not stress:
+        return []
+    return [r for r in stress["results"] if r.get("section") in SHAPE_SECTIONS]
+
+
+def shape_markdown(stress):
+    """「内容形态」一节的 markdown 行；无数据时返回空列表。
+
+    这一节只回答"输出在形态上还能不能用"。语义质量（改写是否保留术语、摘要是否
+    抓到重点）无法自动评分，必须人读 `results/realworld_samples/`。
+    """
+    rows = shape_records(stress)
+    if not rows:
+        return []
+    out = ["## 内容形态（机器可判的部分）", "",
+           "> 语义质量无法自动评分，须人工阅读 `results/realworld_samples/*.txt`。"
+           "本节只判**形态**：是否截断、是否塌成重复词流、流式与阻塞是否一致、"
+           "并发下响应是否串包。", ""]
+
+    a3 = [r for r in rows if r["section"] == "A3"]
+    if a3:
+        out += ["### 并发响应归属（串包）", "",
+                "| 并发 | 判定 | 命中自己的标记 | 未照做 | 串包 |",
+                "|---|---|---|---|---|"]
+        for r in a3:
+            out.append("| %d | %s | %s | %s | **%s** |"
+                       % (r.get("total") or 0, r.get("verdict"), r.get("matched"),
+                          r.get("missing"), r.get("foreign")))
+        out += ["", "> 串包（foreign>0）表示响应跑到了别人的请求上——用户会拿到别人的答案，"
+                    "比「未照做」（模型没遵循指令）严重得多。", ""]
+
+    a2 = [r for r in rows if r["section"] == "A2" and r.get("verdict")]
+    if a2:
+        out += ["### 流式与非流式的一致性", "",
+                "| 判定 | 阻塞字数 | 流式字数 | 长度比 | 公共前缀 |",
+                "|---|---|---|---|---|"]
+        for r in a2:
+            out.append("| %s | %s | %s | %.3f | %s |"
+                       % (r["verdict"], r.get("blocking_chars"), r.get("streamed_chars"),
+                          r.get("len_ratio") or 0, r.get("common_prefix")))
+        out += ["", "> `identical` / `equivalent` 正常；`mismatch` 表示流式丢字、重复首字或"
+                    "尾块缺失；`empty` 表示流式没有任何内容。只比 TTFT 看不出这些问题。", ""]
+
+    a5 = [r for r in rows if r["section"] == "A5" and isinstance(r.get("requested"), int)]
+    if a5:
+        out += ["### 输出长度与形态", "",
+                "| 请求 max_tokens | 样本 | finish_reason | 截断率 | overrun 中位 | overrun 最大 | 退化分 | 最长复现 | 字数 |",
+                "|---|---|---|---|---|---|---|---|---|"]
+        for r in a5:
+            fin = r.get("finish") or {}
+            ov = r.get("overrun") or {}
+            sh = r.get("shape") or {}
+            out.append("| %d | %d | %s | %.0f%% | %.2f | %.2f | %.2f | %d | %d |"
+                       % (r["requested"], fin.get("total") or 0,
+                          fin.get("counts"), fin.get("truncated_pct") or 0,
+                          ov.get("median") or 0, ov.get("max") or 0,
+                          sh.get("degen") or 0, sh.get("longest_repeat") or 0,
+                          sh.get("chars") or 0))
+        out += ["", "> **overrun** = 实际输出 token ÷ 请求 max_tokens。客户端配置项 `overrun` "
+                    "按它定：取中位数与 1.5 之间的较大者，既覆盖常规溢出，也不放过失控输出。", "",
+                "> **退化分**（0–1）= 8-gram 重复率（权重 0.7）+ 字级熵（0.3）。"
+                "<0.35 正常，0.35–0.55 可疑（建议人工复核），>0.55 判为退化。"
+                "它只抓「塌成重复词流」这一形态，不评价内容好坏。", ""]
+    return out
+
+
+def shape_html(stress):
+    """「内容形态」一节的 HTML parts；无数据时返回空列表。"""
+    rows = shape_records(stress)
+    if not rows:
+        return []
+    parts = ["<h2>内容形态（机器可判的部分）</h2>",
+             "<div class='note'>语义质量无法自动评分，须人工阅读 "
+             "<code>results/realworld_samples/</code>。本节只判<b>形态</b>：是否截断、"
+             "是否塌成重复词流、流式与阻塞是否一致、并发下响应是否串包。</div>"]
+
+    a3 = [r for r in rows if r["section"] == "A3"]
+    if a3:
+        parts.append("<h3>并发响应归属（串包）</h3>")
+        parts.append(table(["并发", "判定", "命中自己", "未照做", "串包"],
+                           [[r.get("total"), r.get("verdict"), r.get("matched"),
+                             r.get("missing"),
+                             Raw("<b>%s</b>" % r.get("foreign"))
+                             if (r.get("foreign") or 0) else r.get("foreign")]
+                            for r in a3]))
+        parts.append("<div class='warnbox'>串包（foreign&gt;0）表示响应跑到了别人的请求上——"
+                     "用户会拿到别人的答案，比「未照做」严重得多。</div>")
+
+    a2 = [r for r in rows if r["section"] == "A2" and r.get("verdict")]
+    if a2:
+        parts.append("<h3>流式与非流式的一致性</h3>")
+        parts.append(table(["判定", "阻塞字数", "流式字数", "长度比", "公共前缀"],
+                           [[r["verdict"], r.get("blocking_chars"), r.get("streamed_chars"),
+                             "%.3f" % (r.get("len_ratio") or 0), r.get("common_prefix")]
+                            for r in a2]))
+        parts.append("<div class='note'><code>identical</code> / <code>equivalent</code> 正常；"
+                     "<code>mismatch</code> 表示流式丢字、重复首字或尾块缺失；"
+                     "<code>empty</code> 表示流式没有任何内容。只比 TTFT 看不出这些问题。</div>")
+
+    a5 = [r for r in rows if r["section"] == "A5" and isinstance(r.get("requested"), int)]
+    if a5:
+        parts.append("<h3>输出长度与形态</h3>")
+        body = []
+        for r in a5:
+            fin = r.get("finish") or {}
+            ov = r.get("overrun") or {}
+            sh = r.get("shape") or {}
+            body.append([r["requested"], fin.get("total"),
+                         str(fin.get("counts")), "%.0f%%" % (fin.get("truncated_pct") or 0),
+                         "%.2f" % (ov.get("median") or 0), "%.2f" % (ov.get("max") or 0),
+                         "%.2f" % (sh.get("degen") or 0), sh.get("longest_repeat"),
+                         sh.get("chars")])
+        parts.append(table(["请求 max_tokens", "样本", "finish_reason", "截断率",
+                            "overrun 中位", "overrun 最大", "退化分", "最长复现", "字数"], body))
+        parts.append("<div class='note'><b>overrun</b> = 实际输出 token ÷ 请求 max_tokens，"
+                     "配置项 <code>overrun</code> 按它定：取中位数与 1.5 之间的较大者。"
+                     "<b>退化分</b>（0–1）= 8-gram 重复率 0.7 + 字级熵 0.3：&lt;0.35 正常，"
+                     "0.35–0.55 可疑，&gt;0.55 判为退化。</div>")
+    return parts
 
 
 def build_html(stress, sim, extra, generated):
@@ -294,6 +424,9 @@ footer{color:var(--muted);font-size:12.5px;margin-top:40px;border-top:1px solid 
             parts.append("<div class='warnbox'>长文档场景被拒绝的请求：" + "；".join(
                 "%s 字符 → HTTP %s" % (s, c) for s, c in pf) + "</div>")
 
+    # 内容形态（A2 一致性 / A3 归属 / A5 输出形态）
+    parts += shape_html(stress)
+
     # max_tokens 缺陷
     if extra and extra.get("max_tokens_verification"):
         parts.append("<h2>关键缺陷：max_tokens 参数不被遵守</h2>")
@@ -406,6 +539,7 @@ def build_markdown(stress, sim, extra, generated):
                                 r.get("wall_s") or 0, r.get("qps") or 0, r.get("p50_s") or 0,
                                 r.get("p90_s") or 0, r.get("p99_s") or 0, r.get("agg_tok_s") or 0))
         lines.append("")
+        lines += shape_markdown(stress)
 
     if extra and extra.get("max_tokens_verification"):
         lines += ["## 关键缺陷：max_tokens 参数不被遵守", "",
