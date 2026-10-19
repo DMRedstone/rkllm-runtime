@@ -1,5 +1,72 @@
 rkllm-runtime (@VERSION@) unstable; urgency=medium
 
+  [ API server and CLI ]
+  * Refuse chunked request bodies with 411 instead of reading them as empty.
+    The API speaks HTTP/1.1 keep-alive but only understood Content-Length, so
+    the undecoded chunk frames stayed on the socket and the next request on
+    that connection parsed them as part of its own body.
+  * Keep the function-tools buffers alive for the life of the engine. ctypes
+    does not pin the memory behind the c_char_p arguments and the runtime may
+    hold those pointers for later runs; they are now kept alongside the model
+    path. An empty system prompt is replaced by a neutral placeholder, because
+    the runtime treats an empty value as "reset the chat template" rather than
+    "leave it alone". /health reports "function_tools", and the first request
+    that enables tools logs that every later request on this handle is affected
+    until the service restarts.
+  * Restore the clocks when a run, chat session or serve instance exits. The
+    upstream fix_freq_*.sh helpers only ever lock: cpuidle is disabled, the
+    governors are pinned to userspace and the frequencies to their maximum,
+    and nothing undoes it - a one-shot `rkllm run` left the board at full clocks
+    with deep idle off until the next reboot. The sysfs knobs are now
+    snapshotted before the helper runs and restored on exit. A helper that
+    exits 0 without any governor actually switching to userspace is reported as
+    suspect instead of "ok".
+  * Harden the service unit: NoNewPrivileges, PrivateTmp, ProtectSystem=full,
+    RestrictSUIDSGID and RestrictAddressFamilies. ProtectHome is deliberately
+    left unset because models are commonly kept under /home or /root, and full
+    rather than strict keeps /sys writable for the frequency helper.
+  * postinst warns when /etc/default/rkllm-server carries an API key but is
+    still world readable. The conffile ships 0644 and dpkg never changes the
+    mode, so "typed the key, forgot to chmod" previously had no checkpoint.
+  * Document that RKLLM_EXTRA_ARGS is expanded by /bin/sh, i.e. it is code and
+    not a list of options. Only root can write that file, so it is not a
+    privilege boundary, but the entry should not be able to surprise anyone.
+  * Both manual pages use RKLLM_API_KEY in their first API example instead of
+    --api-key, which the same page warns would be visible in ps.
+  * Self test: two new checks (chunked body refused, health reports
+    function_tools), and the NULL-probe stub learned about the _keep list.
+
+  [ Test toolchain ]
+  * Stress test: the prompt-budget guard now assumes 3 bytes per token, which
+    is what the server enforces (the old x8 value was the revision-9 defect);
+    the concurrency ladder crosses the accept-queue size so 503 shedding is
+    actually reachable; endurance resets the KV cache between rounds so drift
+    is not confounded with context growth; a chunked-body case was added.
+  * Client simulator: bisects the exact rejection boundary for long pastes and
+    polls /health.busy after a stream interrupt to measure how long the NPU
+    keeps working on a request the user already abandoned.
+  * Crash probe: an 8-way concurrency step was added next to the 4-way one.
+  * Real-world run: HTTP 4xx is recorded as "rejected" and not retried, while
+    connection loss is counted as "crashes"; each row keeps its recovery time,
+    so the earlier "crashes=1" rows can no longer mean either condition.
+  * Health check: the error counter is compared as a delta over the run instead
+    of an absolute zero, and the template-pollution check resets the
+    conversation first so history and template cannot be confused.
+  * Orchestrator: exit codes 0 (clean) / 2 (finished with findings) / 1
+    (a step failed), a per-step summary, and a watchdog so a hung child cannot
+    wedge the run. The board client accepts https and reads RKLLM_API_KEY as
+    well as RKLLM_KEY.
+
+  [ Packaging ]
+  * make_deb falls back to the repository layout when neither
+    RKLLM_PACKAGING_DIR nor RKLLM_RELEASE_TARBALL is set; crosscheck_deb drops
+    an import left over from the old package structure; .gitignore covers the
+    build output directories.
+
+ -- @MAINTAINER@  @DATE@
+
+rkllm-runtime (1.3.1-12) unstable; urgency=medium
+
   * Make the service configuration a dpkg conffile. /etc/default/rkllm-server
     was a plain file, so installing a new version silently replaced it and the
     operator's RKLLM_MODEL and RKLLM_API_KEY were gone - the one thing a

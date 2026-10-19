@@ -53,7 +53,7 @@ TARBALL_PREFIX = "rknn-llm-release-v1.3.1"
 
 UPSTREAM_VERSION = "1.3.1"
 DEFAULT_PACKAGE = "rkllm-runtime"
-DEFAULT_REVISION = "12"
+DEFAULT_REVISION = "13"
 DEFAULT_MAINTAINER = "RedStone <DMRedStone@users.noreply.github.com>"
 
 # multiarch triplet -> upstream directory naming inside the release tarball
