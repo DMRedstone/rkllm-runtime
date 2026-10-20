@@ -235,6 +235,19 @@ RKLLM_PLATFORM_ARG=
 #RKLLM_QUIET=1
 
 
+# -- --cors-origin via RKLLM_CORS_ORIGIN             default *
+# EN: Value of Access-Control-Allow-Origin on every response and on the OPTIONS
+#     preflight reply. "*" is fine on a trusted LAN, but it also lets any page
+#     in a browser send the API key cross-origin - pin it to your own UI's
+#     origin when the board is reachable from one.
+# 中文: 每条响应与 OPTIONS 预检响应里的 Access-Control-Allow-Origin 取值。内网
+#     可信环境下 "*" 够用；但它也允许浏览器里任意网页跨域携带 API key 调用，
+#     板子会被前端访问时请改成你自己前端的来源。
+# 可选写法 / optional form:
+#RKLLM_CORS_ORIGIN=https://admin.example.com
+RKLLM_CORS_ORIGIN=
+
+
 # -- free-form extra arguments                       default empty
 # EN: Escape hatch appended to the `rkllm serve` command line, for options
 #     added by a future release. Everything above should be set with its own
