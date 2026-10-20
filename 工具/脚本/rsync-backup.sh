@@ -121,6 +121,10 @@ MOUNT_CHECKS=(
   "/data"
 )
 
+# 归档区 _orphaned.* 的保留天数，超龄删除。0 表示不清理——归档区的本意是
+# 「保留可回溯」，自动删除需显式开启（mtime 取最后一次移入时间）。
+ORPHANED_KEEP_DAYS=0
+
 # 目标目录里出现「孤儿项」时的处置。孤儿项 = 既不是成功快照（20* 且含 .complete），
 # 也不是 .failed.* / .inprogress.* / _orphaned.* 等机制目录——通常是手工放进去的文件、
 # 旧工具残留，或「完全重建 / 首次接管他人备份目录」时留下的东西。
@@ -193,7 +197,7 @@ rotate_logs() {
 }
 
 # 成功快照目录名列表，新的在前。
-# 判定成功：名字像 20* 时间戳、不是 *.failed.* / *.recovered.*、里面有 .complete 标记文件。
+# 判定成功：名字像 20* 时间戳、不是 *.failed.*、里面有 .complete 标记文件。
 list_complete_snapshots() {
   local base="$1"
   find "$base" -maxdepth 1 -mindepth 1 -type d \
@@ -328,14 +332,15 @@ check_free_space() {
 #     判定依据是文件数而不是时间戳：连续崩溃时最新的那份可能才跑了 5%，
 #     更早的一份却已经跑完 90%，按时间戳取最新会把绝大部分已完成的工作白扔掉。
 # 禁止无条件 rm -rf：大目录 90% 时中断，续传比从头跑更重要。
-# 列出目标目录下的孤儿项（  分隔）：非成功快照、非机制目录。
+# 列出目标目录下的孤儿项（NUL 分隔）：非成功快照、非机制目录。
 list_orphans() {
   local base="$1" p name
   find "$base" -maxdepth 1 -mindepth 1 -print0 2>/dev/null | while IFS= read -r -d '' p; do
     name="${p##*/}"
     case "$name" in
       .20*.inprogress.*) continue ;;              # 崩溃残留：handle_leftovers 负责
-      20*.failed.*|20*.recovered.*) continue ;;   # 失败/恢复目录：淘汰逻辑负责
+      .rsync-stats.*) continue ;;                 # stats 临时文件：启动时统一清（机制内部产物，非孤儿）
+      20*.failed.*) continue ;;                   # 失败目录：淘汰逻辑负责
       _orphaned.*) continue ;;                    # 本脚本自己的归档区，不再二次处置
     esac
     if [ -d "$p" ] && [ -f "$p/.complete" ]; then continue; fi   # 成功快照
@@ -462,9 +467,7 @@ handle_leftovers() {
     best=""
     best_n=-1
     for leftover in "${incomplete[@]}"; do
-      n="$(find "$base/$leftover" -xdev -type f -printf '.' 2>/dev/null | wc -c)" || n=0
-      n="${n// /}"
-      [[ "$n" =~ ^[0-9]+$ ]] || n=0
+      n="$(count_files "$base/$leftover")"   # 口径与缩小检查一致（按 ONE_FILE_SYSTEM 决定 -xdev）
       log "未完成目录 $leftover 已含 $n 个文件"
       if (( n > best_n )); then
         best_n="$n"
@@ -485,6 +488,22 @@ handle_leftovers() {
       mv "$path" "$base/${dest_name}.failed.$$" 2>/dev/null || log "移动多余 inprogress 失败: $path"
     fi
   done
+}
+
+# 归档区 _orphaned.* 超龄清理（ORPHANED_KEEP_DAYS=0 关闭）。
+prune_orphaned() {
+  local base="$1"
+  local d
+  (( ORPHANED_KEEP_DAYS > 0 )) || return 0
+  while IFS= read -r -d '' d; do
+    [ -z "$d" ] && continue
+    log "删除超龄归档区 $d"
+    if ! "${RUN[@]}" rm -rf -- "$d"; then
+      log "删除超龄归档区失败: $d"
+      overall_rc=1
+    fi
+  done < <(find "$base" -maxdepth 1 -mindepth 1 -type d -name '_orphaned.*' \
+      -mtime +"$ORPHANED_KEEP_DAYS" -print0 2>/dev/null || true)
 }
 
 # 每个源只留最近 KEEP 份成功快照。
@@ -672,6 +691,8 @@ backup_one() {
 
   BASE="$BACKUP_BASE/$NAME"
   mkdir -p "$BASE"
+  # 清掉上次崩溃来不及删的 rsync stats 临时文件（kill -9 残留，属机制内部产物）
+  rm -f -- "$BASE"/.rsync-stats.* 2>/dev/null || true
   handle_orphans "$BASE"   # 孤儿项检测（完全重建 / 首次接管旧目录时的残留处置）
 
   # 秒级时间戳碰撞时最多再等 3 秒，避免 overall_rc=1 却其实什么都没做错
@@ -865,6 +886,7 @@ backup_one() {
 
   prune_snapshots "$BASE"
   prune_failed "$BASE"
+  prune_orphaned "$BASE"
 }
 
 # =============================================================================
@@ -888,6 +910,7 @@ for _pair in \
   "KEEP:$KEEP" \
   "FAILED_KEEP_DAYS:$FAILED_KEEP_DAYS" \
   "FAILED_KEEP_COUNT:$FAILED_KEEP_COUNT" \
+  "ORPHANED_KEEP_DAYS:$ORPHANED_KEEP_DAYS" \
   "SHRINK_RATIO:$SHRINK_RATIO" \
   "MIN_FREE_PCT:$MIN_FREE_PCT" \
   "MIN_FREE_INODE_PCT:$MIN_FREE_INODE_PCT" \
