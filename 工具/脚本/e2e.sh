@@ -9,7 +9,8 @@ set -uo pipefail
 # PATH 项，脚本启动自检会误报"缺少命令"；/tmp 与 C:/Users/user1/AppData/Local/Temp
 # 是同一目录，文件位置不变。
 SB="/tmp/rsync-test-sb"
-SRC="$SB/rsync-backup.sh"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SRC="$HERE/rsync-backup.sh"   # 被测脚本在脚本目录，不在沙箱
 export PATH="$SB/bin:$PATH"
 LOG="$SB/log/rsync-backup.log"
 OUT="$SB/e2e.out"
@@ -68,7 +69,8 @@ printf '=== 1. 重置沙箱、生成测试副本并自证 ===\n'
 command rm -rf "$SB/back" "$SB/log" "$SB/lock" "$SB/src" "$SB/e2e.out" "$SB/rsync-test.sh" "$SB/rt-"*.sh \
   "$SB/h-back" "$SB/t2" "$SB/t3" "$SB/t4a" "$SB/t4b" "$SB/t4c" "$SB/t4d" "$SB/t5" "$SB/t6a" "$SB/t6b" \
   "$SB/t8" "$SB/t9" "$SB/t10" "$SB/t11" "$SB/zone-orig.txt" "$SB/zone-copy.txt" "$SB/funcs.sh" "$SB/harness.log"
-mkdir -p "$SB/src/data1/sub" "$SB/src/data2" "$SB/log" "$SB/lock"
+mkdir -p "$SB/src/data1/sub" "$SB/src/data2" "$SB/log" "$SB/lock" "$SB/bin"
+for m in rsync flock mountpoint; do ln -sf "$HERE/mock-$m.sh" "$SB/bin/$m"; done   # mock 以命令名注入 PATH 首位
 : > "$OUT"; : > "$ARGV"; : > "$LOG"
 gen_copy "$SB/rsync-test.sh" KEEP=3 LOG_MAX_SIZE=500
 # 原文件末行无换行符，wc -l 会少数一行；awk END{print NR} 不受末行换行影响
