@@ -75,10 +75,13 @@ for m in rsync flock mountpoint; do ln -sf "$HERE/mock-$m.sh" "$SB/bin/$m"; done
 gen_copy "$SB/rsync-test.sh" KEEP=3 LOG_MAX_SIZE=500
 # 原文件末行无换行符，wc -l 会少数一行；awk END{print NR} 不受末行换行影响
 eq "1.1 副本与原件行数一致" "$(awk 'END{print NR}' "$SRC")" "$(awk 'END{print NR}' "$SB/rsync-test.sh")"
-sed -n '144,781p' "$SRC" > "$SB/zone-orig.txt"
-sed -n '144,781p' "$SB/rsync-test.sh" > "$SB/zone-copy.txt"
+# 函数区起点按标记定位（写死行号会随配置区/函数增删而漂移，导致自证误报）
+ZONE_START="$(grep -an '^# 基础工具函数' "$SRC" | head -1 | cut -d: -f1)"
+[ -n "$ZONE_START" ] || { echo "FATAL: 找不到函数区标记"; exit 1; }
+sed -n "${ZONE_START},\$p" "$SRC" > "$SB/zone-orig.txt"
+sed -n "${ZONE_START},\$p" "$SB/rsync-test.sh" > "$SB/zone-copy.txt"
 if diff -q "$SB/zone-orig.txt" "$SB/zone-copy.txt" >/dev/null; then
-  PASS=$((PASS+1)); printf '  PASS  1.2 函数区（144-705 行）逐字节一致，逻辑零改动\n'
+  PASS=$((PASS+1)); printf '  PASS  1.2 函数区（%s 行起）逐字节一致，逻辑零改动\n' "$ZONE_START"
 else
   FAIL=$((FAIL+1)); printf '  FAIL  1.2 函数区被改动\n'
 fi

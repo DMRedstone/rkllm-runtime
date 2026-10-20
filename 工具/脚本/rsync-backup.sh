@@ -121,6 +121,15 @@ MOUNT_CHECKS=(
   "/data"
 )
 
+# 目标目录里出现「孤儿项」时的处置。孤儿项 = 既不是成功快照（20* 且含 .complete），
+# 也不是 .failed.* / .inprogress.* / _orphaned.* 等机制目录——通常是手工放进去的文件、
+# 旧工具残留，或「完全重建 / 首次接管他人备份目录」时留下的东西。
+#   ask     有终端时逐个询问（m=移走 d=删除 s=跳过）；无终端（cron）等同 skip 并告警
+#   move    自动移到 $BACKUP_BASE/<名称>/_orphaned.<时间戳>/（保留可回溯）
+#   delete  自动删除（清单先写日志）
+#   skip    不处理
+ORPHAN_ACTION="ask"
+
 # =============================================================================
 # 内部状态 —— 下面不要改
 # =============================================================================
@@ -319,6 +328,83 @@ check_free_space() {
 #     判定依据是文件数而不是时间戳：连续崩溃时最新的那份可能才跑了 5%，
 #     更早的一份却已经跑完 90%，按时间戳取最新会把绝大部分已完成的工作白扔掉。
 # 禁止无条件 rm -rf：大目录 90% 时中断，续传比从头跑更重要。
+# 列出目标目录下的孤儿项（  分隔）：非成功快照、非机制目录。
+list_orphans() {
+  local base="$1" p name
+  find "$base" -maxdepth 1 -mindepth 1 -print0 2>/dev/null | while IFS= read -r -d '' p; do
+    name="${p##*/}"
+    case "$name" in
+      .20*.inprogress.*) continue ;;              # 崩溃残留：handle_leftovers 负责
+      20*.failed.*|20*.recovered.*) continue ;;   # 失败/恢复目录：淘汰逻辑负责
+      _orphaned.*) continue ;;                    # 本脚本自己的归档区，不再二次处置
+    esac
+    if [ -d "$p" ] && [ -f "$p/.complete" ]; then continue; fi   # 成功快照
+    printf '%s\0' "$p"
+  done
+}
+
+# 处置孤儿项：ask / move / delete / skip。返回 0 表示流程可继续（失败只记日志）。
+handle_orphans() {
+  local base="$1" action="${ORPHAN_ACTION:-ask}"
+  local -a items=()
+  mapfile -d '' -t items < <(list_orphans "$base")
+  ((${#items[@]})) || return 0
+
+  local p n kind
+  log "目标目录存在 ${#items[@]} 项非快照残留（$base）："
+  for p in "${items[@]}"; do
+    n="$(basename "$p")"
+    if [ -d "$p" ]; then kind="目录"; else kind="文件"; fi
+    log "  [$kind] $n"
+  done
+
+  # 非交互（cron / 管道）下 ask 降级为 skip：备份不能因为一个提问而挂住
+  if [ "$action" = ask ] && [ ! -t 0 ]; then
+    log "非交互环境无法询问，按 skip 处理（可设 ORPHAN_ACTION=move 或 delete）"
+    action=skip
+  fi
+  if [ "$action" = ask ]; then
+    local reply=""
+    log "如何处置？m=移到 _orphaned.<时间戳>/  d=删除  s=跳过"
+    read -r -p "输入 m/d/s [s]: " reply || reply=s
+    case "${reply:-s}" in
+      m|M) action=move ;;
+      d|D) action=delete ;;
+      *)   action=skip ;;
+    esac
+  fi
+
+  case "$action" in
+    move)
+      local dest="$base/_orphaned.$(date +%Y-%m-%d_%H%M%S)"
+      if ! mkdir -p "$dest"; then
+        log "创建归档目录失败: $dest（残留项保持不动）"
+        return 0
+      fi
+      for p in "${items[@]}"; do
+        if mv "$p" "$dest/" 2>/dev/null; then
+          log "已移走: $(basename "$p") -> $dest"
+        else
+          log "移走失败: $p"
+        fi
+      done
+      ;;
+    delete)
+      for p in "${items[@]}"; do
+        if rm -rf "$p" 2>/dev/null; then
+          log "已删除: $p"
+        else
+          log "删除失败: $p"
+        fi
+      done
+      ;;
+    skip)
+      log "按配置跳过残留项（未做任何处理，下次运行仍会提示）"
+      ;;
+  esac
+  return 0
+}
+
 handle_leftovers() {
   local base="$1"
   local -n _resume_out="$2"
@@ -586,6 +672,7 @@ backup_one() {
 
   BASE="$BACKUP_BASE/$NAME"
   mkdir -p "$BASE"
+  handle_orphans "$BASE"   # 孤儿项检测（完全重建 / 首次接管旧目录时的残留处置）
 
   # 秒级时间戳碰撞时最多再等 3 秒，避免 overall_rc=1 却其实什么都没做错
   DATE="$(date +%Y-%m-%d_%H%M%S)"
