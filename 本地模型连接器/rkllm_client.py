@@ -763,8 +763,8 @@ def _render_history(turns):
     """
     lines = []
     for role, text in turns:
-        lines.append("%s：%s" % ("用户" if role == "user" else "助手", text))
-    return "以下是此前的对话：\n" + "\n".join(lines)
+        lines.append("%s: %s" % ("User" if role == "user" else "Assistant", text))
+    return "Previous conversation://n" + "\n".join(lines)
 
 
 def reset_session(session=None, target=None, ping_server=True):

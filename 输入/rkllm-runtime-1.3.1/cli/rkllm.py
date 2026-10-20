@@ -28,7 +28,6 @@ import json
 import os
 import queue
 import select
-import shlex
 import socket
 import shutil
 import signal
@@ -54,6 +53,17 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8080
 DEFAULT_CONTEXT = 4096
 DEFAULT_MAX_NEW_TOKENS = 2048
+
+# A client that stops sending mid-body would otherwise pin a worker thread for
+# as long as it likes; request_queue_size lets 256 of them queue up.
+READ_TIMEOUT_S = 30
+# Wildcard by default (LAN tool), but a deployment that serves a browser UI from
+# one known origin should pin it: "*" lets any page send an Authorization header
+# cross-origin.
+ALLOW_ORIGIN = os.environ.get("RKLLM_CORS_ORIGIN", "").strip() or "*"
+# How long to wait for the inference thread after abort() before deciding the
+# runtime is wedged. Blocking forever takes a request thread with it.
+STREAM_JOIN_TIMEOUT_S = 60
 DEFAULT_MAX_QUEUE = 32
 DEFAULT_QUEUE_TIMEOUT = 600.0
 MAX_BODY_BYTES = 8 * 1024 * 1024
@@ -236,9 +246,11 @@ def discover_models(extra_dirs=()):
     return found
 
 
-def _run_quiet(cmd):
+def _run_quiet(cmd, input_text=None):
     try:
-        done = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        done = subprocess.run(cmd,
+                              input=input_text.encode("utf-8") if input_text is not None else None,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         return done.returncode, done.stdout.decode("utf-8", "replace")
     except (OSError, ValueError) as exc:
         return 127, str(exc)
@@ -276,9 +288,9 @@ def _write_sysfs(path, value):
     sudo = shutil.which("sudo")
     if not sudo:
         return False
-    code, _output = _run_quiet([sudo, "-n", "sh", "-c",
-                                "printf '%%s\\n' %s > %s"
-                                % (shlex.quote(value), shlex.quote(path))])
+    # tee takes the value on stdin, so no shell ever parses it - shlex.quote()
+    # already kept the old form safe, this removes the shell entirely.
+    code, _output = _run_quiet([sudo, "-n", "tee", path], input_text=value + "\n")
     return code == 0
 
 
@@ -672,6 +684,12 @@ class EngineBase(object):
 class RealEngine(EngineBase):
     """ctypes wrapper around a live RKLLM model."""
 
+    # Class-level defaults, not just __init__ assignments: selftest builds an
+    # instance with object.__new__ to record the C calls without loading a model,
+    # and set_function_tools() now reads these on its first line.
+    _function_tools_enabled = False
+    _function_tools_signature = None
+
     def __init__(self, model_path, platform, context_len=DEFAULT_CONTEXT,
                  max_new_tokens=DEFAULT_MAX_NEW_TOKENS, keep_history=True,
                  threads=None, system_prompt=None, lib_path=None, verbose=False):
@@ -698,12 +716,17 @@ class RealEngine(EngineBase):
         self._run_keep = []      # per-inference buffers, dropped after each run
         self._sink = None
         self._sink_lock = threading.Lock()
+        # The docstring says "serialised by the caller"; this turns the implicit
+        # contract into an explicit failure. _infer is shared state, so two
+        # concurrent runs corrupt each other's sampling parameters.
+        self._stream_guard = threading.Lock()
         # Real counts from the runtime's own perf stats (RKLLM_RUN_FINISH).
         # A tuple (prefill_tokens, generate_tokens), or None before the first
         # completed run. Preferred over the byte estimator for usage.
         self._last_perf = None
         self._handle = ctypes.c_void_p()
         self._destroyed = False
+        self._function_tools_signature = None
         # Set once rkllm_set_function_tools has been called: the runtime offers
         # no documented way back, so /health reports it and the caller is warned.
         self._function_tools_enabled = False
@@ -731,9 +754,14 @@ class RealEngine(EngineBase):
         param.extend_param.n_batch = 1
         param.extend_param.use_cross_attn = 0
         cpu_count = int(threads) if threads else 4
-        param.extend_param.enabled_cpus_num = cpu_count
-        param.extend_param.enabled_cpus_mask = \
-            CPU_MASK_HIGH if platform in BIG_CORE_PLATFORMS else CPU_MASK_LOW
+        # num and mask have to agree: a four-bit mask with num=2 leaves the
+        # runtime to pick which two of the four cores to use, which is not a
+        # decision anyone can reason about afterwards.
+        base_mask = CPU_MASK_HIGH if platform in BIG_CORE_PLATFORMS else CPU_MASK_LOW
+        candidates = [i for i in range(32) if base_mask & (1 << i)]
+        chosen = candidates[:max(1, min(cpu_count, len(candidates)))]
+        param.extend_param.enabled_cpus_num = len(chosen)
+        param.extend_param.enabled_cpus_mask = sum(1 << i for i in chosen)
 
         self._callback_type = _ResultCallback(self._on_result)
         callback = _Callback()
@@ -840,19 +868,42 @@ class RealEngine(EngineBase):
         may retain these pointers for later runs; they are parked in _keep for
         the lifetime of the engine.
         """
+        # The runtime has no documented way to switch function calling off, so
+        # a second call would only append another set of buffers to _keep - and
+        # _keep lives as long as the engine. An agent client that sends "tools"
+        # with every request would leak its whole tool schema (several KB) per
+        # request, which on an 8 GB board is a real leak rather than a rounding
+        # error. Set it once and report the no-op on later calls.
+        signature = hash((system_prompt or "", tools_json, tool_response_str))
+        if self._function_tools_enabled:
+            if signature != self._function_tools_signature and not getattr(self, "_warned_tools_change", False):
+                self._warned_tools_change = True
+                sys.stderr.write(
+                    "[rkllm] tools changed after function calling was enabled; the "
+                    "runtime keeps the first definition until restart\n")
+                sys.stderr.flush()
+            return 0
         if not (system_prompt or "").strip():
             system_prompt = "You are a helpful assistant."
         buffers = [system_prompt.encode("utf-8"), tools_json.encode("utf-8"),
                    tool_response_str.encode("utf-8")]
         self._keep.extend(buffers)
         self._function_tools_enabled = True
+        self._function_tools_signature = signature
         return self.lib.rkllm_set_function_tools(self._handle, *buffers)
 
     def stream(self, prompt, role="user", enable_thinking=False,
                sampling=None, max_new_tokens=None):
-        """Yield generated text fragments. Serialised by the caller."""
+        """Yield generated text fragments. Serialised by the caller.
+
+        Concurrency is enforced rather than assumed: _infer is engine-wide, so a
+        second concurrent run would read sampling parameters another run is
+        mid-way through tearing down.
+        """
         if self._destroyed:
             raise RKLLMError("engine already destroyed")
+        if not self._stream_guard.acquire(blocking=False):
+            raise RKLLMError("concurrent stream() calls on one engine are not supported")
 
         self._last_perf = None
         sink = queue.Queue()
@@ -900,12 +951,20 @@ class RealEngine(EngineBase):
                     raise item
                 yield item
         finally:
-            thread.join()
+            thread.join(timeout=STREAM_JOIN_TIMEOUT_S)
+            if thread.is_alive():
+                # abort() was not enough; the handle is in an unknown state, so
+                # refuse further work instead of corrupting the next request.
+                sys.stderr.write("[rkllm] inference thread did not exit within %ds of "
+                                 "abort; marking the engine unusable\n" % STREAM_JOIN_TIMEOUT_S)
+                sys.stderr.flush()
+                self._destroyed = True
             with self._sink_lock:
                 self._sink = None
             self._run_keep = []
             self._infer.sampling_params = None
             self._infer.max_new_tokens = 0
+            self._stream_guard.release()
 
     def last_perf(self):
         """(prefill_tokens, generate_tokens) from the last completed run, or None."""
@@ -1337,8 +1396,10 @@ def build_conversation(messages, budget_tokens=None, include_history=True):
     def render(items):
         lines = []
         for role, text in items:
-            label = {"user": "用户", "assistant": "助手", "tool": "工具"}.get(role, role)
-            lines.append("%s：%s" % (label, text))
+            # English labels on purpose: this server also backs non-Chinese
+            # models, and "用户/助手" is noise for them. Qwen parses either.
+            label = {"user": "User", "assistant": "Assistant", "tool": "Tool"}.get(role, role)
+            lines.append("%s: %s" % (label, text))
         return "\n".join(lines)
 
     dropped = 0
@@ -1353,9 +1414,10 @@ def build_conversation(messages, budget_tokens=None, include_history=True):
         role, current = turns[0]
         return ("user" if role == "tool" else role), current, system
 
-    prefix = "以下是此前的对话：\n"
+    prefix = "Previous conversation:\n"
     if dropped:
-        prefix = ("（更早的 %d 轮对话因上下文长度限制已省略）\n" % dropped) + prefix
+        prefix = ("(the earliest %d turn(s) were dropped to fit the context window)\n"
+                  % dropped) + prefix
     role, current = turns[-1]
     prompt = prefix + render(turns[:-1]) + "\n\n" + current
     return ("user" if role == "tool" else role), prompt, system
@@ -1431,34 +1493,6 @@ def _tokens_for(engine, prompt, answer):
     return _estimate_tokens(prompt), _estimate_tokens(answer)
 
 
-def last_message(messages):
-    """Latest user/tool message, plus the system prompt if one was supplied."""
-    system = ""
-    for message in messages:
-        if isinstance(message, dict) and message.get("role") == "system":
-            system = content_text(message.get("content"))
-
-    for message in reversed(messages):
-        if isinstance(message, dict) and message.get("role") in ("user", "tool"):
-            return message.get("role", "user"), content_text(message.get("content")), system
-
-    # No user turn at all. Clients send system-only or assistant-only requests
-    # when they probe a newly configured model, and answering them is far more
-    # useful than a 400 that reads as "the model is broken". Fall back to the
-    # last message that carries any text at all.
-    for message in reversed(messages):
-        if isinstance(message, dict):
-            text = content_text(message.get("content"))
-            if text.strip():
-                # If the only text in the request *is* the system message, do not
-                # hand it over twice: once as the prompt, once as the system text
-                # that gets prepended to that prompt.
-                if message.get("role") == "system":
-                    system = ""
-                return "user", text, system
-    return "user", "", system
-
-
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -1511,7 +1545,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.send_header("Content-Length", str(len(body)))
@@ -1545,6 +1579,12 @@ class Handler(BaseHTTPRequestHandler):
         return hmac.compare_digest(header.encode("utf-8"), ("Bearer " + key).encode("utf-8"))
 
     def _read_body(self):
+        # A client can announce a large Content-Length and then trickle bytes;
+        # without a socket timeout the worker thread stays busy indefinitely.
+        try:
+            self.connection.settimeout(READ_TIMEOUT_S)
+        except OSError:
+            pass
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -1553,7 +1593,11 @@ class Handler(BaseHTTPRequestHandler):
             return None, "empty request body"
         if length > MAX_BODY_BYTES:
             return None, "request body larger than %d bytes" % MAX_BODY_BYTES
-        raw = self.rfile.read(length)
+        try:
+            raw = self.rfile.read(length)
+        except (socket.timeout, TimeoutError):
+            return None, ("timed out after %ds reading a %d-byte body"
+                          % (READ_TIMEOUT_S, length))
         try:
             return json.loads(raw.decode("utf-8")), None
         except (UnicodeDecodeError, ValueError) as exc:
@@ -1606,6 +1650,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send_error_json("missing or wrong API key", 401, "authentication_error")
             return
         if path in ("/v1/reset", "/reset"):
+            # Drain any body before answering. protocol_version is HTTP/1.1, so
+            # an unread Content-Length body stays in the socket and the next
+            # pipelined request parses those bytes as its request line - most
+            # HTTP clients send "{}" here, which makes this a certainty rather
+            # than a corner case.
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            if length > 0:
+                if length > MAX_BODY_BYTES:
+                    self.close_connection = True
+                    self._reject("request body larger than %d bytes" % MAX_BODY_BYTES, 413)
+                    return
+                self.rfile.read(length)
             self.server.engine.clear_history()
             self._send_json({"object": "reset", "status": "ok"})
             return
@@ -1669,6 +1728,9 @@ class Handler(BaseHTTPRequestHandler):
             include_history=not carries)
         response_format = body.get("response_format")
         if isinstance(response_format, dict) and response_format.get("type") == "json_object":
+            # Kept in Chinese: the deployment serves Chinese documents, where a
+            # Chinese instruction lands better than an English one. Move it into
+            # a config knob if this ever serves another locale.
             prompt = prompt + "\n\n只输出一个 JSON 对象，不要任何解释、前后缀或代码块标记。"
         if not prompt.strip():
             # Say which shape arrived: a UI reports this 400 as "the model is
@@ -1753,7 +1815,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         """CORS preflight: browser-based clients cannot POST cross-origin otherwise."""
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
         self.send_header("Access-Control-Max-Age", "86400")
@@ -1763,7 +1825,7 @@ class Handler(BaseHTTPRequestHandler):
     def _begin_stream(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
         self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Accel-Buffering", "no")
         self.send_header("Connection", "close")
@@ -1780,8 +1842,6 @@ class Handler(BaseHTTPRequestHandler):
         call, and a system prompt that cannot fit is dropped rather than failing the
         whole request.
         """
-        self.server.stats["requests"] += 1
-
         # A request-level system message is prepended to the prompt rather than
         # pushed through rkllm_set_chat_template. That call disables the model's
         # built-in template parsing (the runtime warns about it), after which the
@@ -1802,8 +1862,15 @@ class Handler(BaseHTTPRequestHandler):
         # KV cache and segfaulted, killing the service. Three bytes per token is
         # the safe side for both languages.
         context_len = max(engine.context_len, 1)
-        user_tokens = len(user_prompt.encode("utf-8")) // 3
-        estimated_tokens = (len(user_prompt.encode("utf-8")) + system_bytes + 2) // 3
+        # server-side --system / RKLLM_SYSTEM is prepended inside engine.stream(),
+        # after this guard runs. Leaving it out of the estimate let a long startup
+        # preamble sail past a 4096-token window - the exact KV-overrun path that
+        # segfaults the service.
+        engine_system = (getattr(engine, "system_prompt", "") or "").strip()
+        engine_system_bytes = len(engine_system.encode("utf-8"))
+        user_tokens = (len(user_prompt.encode("utf-8")) + engine_system_bytes) // 3
+        estimated_tokens = (len(user_prompt.encode("utf-8")) + system_bytes
+                            + engine_system_bytes + 2) // 3
 
         if estimated_tokens >= context_len:
             # A chat client's own system prompt can be enormous: an agent UI sent
@@ -1850,12 +1917,20 @@ class Handler(BaseHTTPRequestHandler):
         if not self.server.options.quiet:
             # Printed before inference starts, so if the runtime crashes the last
             # line in the log still says how big the request that killed it was.
-            sys.stderr.write("[rkllm] inference: prompt ~%d tokens (%d bytes: system "
-                             "%d, user %d), max_tokens %s, stream=%s, history=%s\n"
-                             % (estimated_tokens, len(prompt.encode("utf-8")), system_bytes,
+            sys.stderr.write("[rkllm] inference: prompt ~%d tokens (%d bytes: request-system "
+                             "%d, server-system %d, user %d), max_tokens %s, stream=%s, "
+                             "history=%s\n"
+                             % (estimated_tokens,
+                                len(prompt.encode("utf-8")) + engine_system_bytes,
+                                system_bytes, engine_system_bytes,
                                 len(user_prompt.encode("utf-8")), max_tokens, stream,
                                 engine.keep_history))
             sys.stderr.flush()
+
+        # Counted only now: every guard above may still reject the request, and
+        # counting a rejected request as served made /health read as "9 requests,
+        # 4 of them rejected" for the same call.
+        self.server.stats["requests"] += 1
 
         if tools:
             try:
@@ -1876,6 +1951,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
         stop_seqs = stop or []
+        # Kept for stream mode too: the stop-sequence scan and the token totals
+        # both need the whole text, and max_out caps it at a few thousand tokens.
         pieces = []
         if stream:
             self._begin_stream()
@@ -1935,23 +2012,33 @@ class Handler(BaseHTTPRequestHandler):
         else:
             # 非流式请求在客户端断开后仍在跑满整段推理，白占 NPU 与 infer_lock
             # （下一次请求要等它跑完）。每 0.5 秒探一次，断开即 abort。
-            last_probe = time.monotonic()
+            # Prefill yields no fragments, so probing inside the loop misses the
+            # whole prefill window - seconds of NPU time on a long prompt after
+            # the client is already gone. A watchdog covers both phases.
+            watch_stop = threading.Event()
+            client_gone = threading.Event()
+
+            def watch_client():
+                while not watch_stop.wait(0.5):
+                    if self._client_gone():
+                        client_gone.set()
+                        engine.abort()
+                        return
+
+            watcher = threading.Thread(target=watch_client, name="client-watch", daemon=True)
+            watcher.start()
             try:
                 for fragment in engine.stream(prompt, role=role, enable_thinking=thinking,
                                               sampling=sampling, max_new_tokens=max_tokens):
+                    if client_gone.is_set():
+                        self.close_connection = True
+                        if not self.server.options.quiet:
+                            sys.stderr.write(
+                                "[rkllm] client disconnected during a non-streaming "
+                                "request; inference aborted\n")
+                            sys.stderr.flush()
+                        return
                     pieces.append(fragment)
-                    now = time.monotonic()
-                    if now - last_probe >= 0.5:
-                        last_probe = now
-                        if self._client_gone():
-                            engine.abort()
-                            self.close_connection = True
-                            if not self.server.options.quiet:
-                                sys.stderr.write(
-                                    "[rkllm] client disconnected during a non-streaming "
-                                    "request; inference aborted\n")
-                                sys.stderr.flush()
-                            return
             except _Failure as exc:
                 self.server.stats["errors"] += 1
                 self._send_error_json(str(exc), 500, "server_error")
@@ -1960,6 +2047,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.stats["errors"] += 1
                 self._send_error_json(str(exc), 500, "server_error")
                 return
+            finally:
+                watch_stop.set()
             raw_answer = "".join(pieces)
             answer, stopped_at_stop = _apply_stop(raw_answer, stop_seqs)
             prompt_tokens, completion_tokens = _tokens_for(engine, prompt, raw_answer)
