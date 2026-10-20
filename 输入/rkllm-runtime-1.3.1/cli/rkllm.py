@@ -1628,6 +1628,12 @@ class Handler(BaseHTTPRequestHandler):
         with a bare rfile.read(length) left that branch with no timeout and no
         size cap, so a client announcing 8 MB and trickling a byte a second pinned
         the worker thread. A missing body is not an error here - callers decide.
+
+        Every failure below sets close_connection: the body is still in the
+        socket, and HTTP/1.1 keeps the connection alive by default, so the next
+        request would be parsed starting at those leftover bytes. Callers used to
+        have to remember this (the reset branch did, the completions branch did
+        not); doing it here makes it impossible to forget.
         """
         try:
             self.connection.settimeout(READ_TIMEOUT_S)
@@ -1636,14 +1642,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
+            self.close_connection = True
             return None, "invalid Content-Length", 400
         if length <= 0:
             return b"", None, 200
         if length > MAX_BODY_BYTES:
+            self.close_connection = True
             return None, "request body larger than %d bytes" % MAX_BODY_BYTES, 413
         try:
             return self.rfile.read(length), None, 200
         except (socket.timeout, TimeoutError):
+            self.close_connection = True
             return None, ("timed out after %ds reading a %d-byte body"
                           % (READ_TIMEOUT_S, length)), 408
 
@@ -1708,8 +1717,22 @@ class Handler(BaseHTTPRequestHandler):
         """Handle POST /v1/chat/completions and /v1/reset."""
         path = urlsplit(self.path).path.rstrip("/") or "/"
         if not self._authorised():
+            # The body is unread, so this connection cannot carry another request.
+            self.close_connection = True
             self._send_error_json("missing or wrong API key", 401, "authentication_error")
             return
+
+        # A chunked body carries no Content-Length, and BaseHTTPRequestHandler
+        # does not decode it: every branch below would read zero bytes and leave
+        # the chunk frames in the socket, where the next keep-alive request
+        # parses them as its own body. Refuse the framing once, here, so no
+        # endpoint can forget it - /v1/reset used to skip this check entirely.
+        if (self.headers.get("Transfer-Encoding") or "").strip().lower() not in ("", "identity"):
+            self.close_connection = True
+            self._reject("chunked request bodies are not supported; send the body with "
+                         "Content-Length and without Transfer-Encoding", 411)
+            return
+
         if path in ("/v1/reset", "/reset"):
             # Drain any body before answering. protocol_version is HTTP/1.1, so
             # an unread Content-Length body stays in the socket and the next
@@ -1720,32 +1743,22 @@ class Handler(BaseHTTPRequestHandler):
             # this worker thread the way a bare rfile.read() allowed.
             _, problem, status = self._read_raw_body()
             if problem:
-                self.close_connection = True
-                self._reject(problem, status)
+                self._reject(problem, status)      # _read_raw_body closed the connection
                 return
             self.server.engine.clear_history()
             self._send_json({"object": "reset", "status": "ok"})
             return
         if path not in ("/v1/chat/completions", "/chat/completions"):
+            # The body is unread, so the connection cannot carry another request.
+            self.close_connection = True
             self._send_error_json(
                 "unknown endpoint %s; the completion endpoint is /v1/chat/completions and the "
                 "base_url for clients is http://<host>:<port>/v1" % path, 404, "not_found")
             return
 
-        # A chunked body carries no Content-Length and BaseHTTPRequestHandler
-        # does not decode it: reading zero bytes would leave the chunk frames in
-        # the socket, where the next request on this keep-alive connection would
-        # parse them as part of its own body. Refuse the framing instead of
-        # smuggling it through.
-        if (self.headers.get("Transfer-Encoding") or "").strip().lower() not in ("", "identity"):
-            self.close_connection = True
-            self._reject("chunked request bodies are not supported; send the body with "
-                         "Content-Length and without Transfer-Encoding", 411)
-            return
-
         body, problem, status = self._read_body()
         if problem:
-            self._reject(problem, status)
+            self._reject(problem, status)          # _read_raw_body closed it when needed
             return
         if not isinstance(body, dict) or "messages" not in body:
             self._reject("missing 'messages' in request body")
@@ -1835,14 +1848,16 @@ class Handler(BaseHTTPRequestHandler):
             if not acquired:
                 self.server.stats["rejected"] += 1
                 # A single explicit response: _send_json would emit a second status line.
-                body = json.dumps({"error": {"message": "timed out waiting for the NPU",
-                                             "type": "server_error"}}).encode("utf-8")
+                # Named error_body, not body: the request dict above is still in scope
+                # and shadowing it with bytes reads like a bug even where it is harmless.
+                error_body = json.dumps({"error": {"message": "timed out waiting for the NPU",
+                                                   "type": "server_error"}}).encode("utf-8")
                 self.send_response(503)
                 self.send_header("Retry-After", "5")
                 self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Length", str(len(error_body)))
                 self.end_headers()
-                self.wfile.write(body)
+                self.wfile.write(error_body)
                 return
             try:
                 self._run_inference(engine, model_name, prompt, role, system_prompt,
@@ -2481,9 +2496,14 @@ def cmd_selftest(args):
         reply = json.loads(body) if status == 200 else {}
         content = reply.get("choices", [{}])[0].get("message", {}).get("content", "")
         counted = reply.get("usage", {}).get("completion_tokens")
+        # Compare the echoed tail, not the whole reply: the stand-in prefixes a
+        # turn counter ("answer 7 to: ..."), and that number depends on how many
+        # requests ran before this one. Asserting on the tail keeps this check
+        # independent of test ordering.
+        echoed = content.split("to: ")[-1]
         results.append(_selftest_result(
             "stop sequence trims the reply and the usage",
-            status == 200 and "<<cut>>" not in content and content.endswith("AAA")
+            status == 200 and "<<cut>>" not in content and echoed == "AAA"
             and counted == _estimate_tokens(content),
             "%s  completion_tokens=%s expect=%s"
             % (repr(content[-24:]), counted, _estimate_tokens(content))))
@@ -2491,18 +2511,18 @@ def cmd_selftest(args):
         # A chunked body carries no Content-Length. It must be refused, not read
         # as an empty body: undecoded chunk frames would stay on the socket and
         # be parsed as the next request on this keep-alive connection.
+        # Headers only, no body: the refusal has to happen on the framing alone,
+        # and sending a chunk afterwards races the server's close (the client
+        # hits RST mid-send, which says nothing about the status code).
         try:
-            conn = http_client.HTTPConnection("127.0.0.1", port, timeout=10)
-            conn.putrequest("POST", "/v1/chat/completions")
-            conn.putheader("Transfer-Encoding", "chunked")
-            conn.putheader("Content-Type", "application/json")
-            conn.endheaders()
-            raw = b'{"messages":[{"role":"user","content":"x"}]}'
-            conn.send(b"%x\r\n%s\r\n0\r\n\r\n" % (len(raw), raw))
-            response = conn.getresponse()
-            chunked_status = response.status
-            response.read()
-            conn.close()
+            sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+            sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+                         b"Transfer-Encoding: chunked\r\n"
+                         b"Content-Type: application/json\r\n\r\n")
+            sock.settimeout(10)
+            head = sock.recv(512).decode("latin-1", "replace")
+            sock.close()
+            chunked_status = int(head.split()[1]) if head.startswith("HTTP/") else head
         except Exception as exc:                              # pragma: no cover
             chunked_status = repr(exc)
         results.append(_selftest_result("chunked body refused", chunked_status == 411,

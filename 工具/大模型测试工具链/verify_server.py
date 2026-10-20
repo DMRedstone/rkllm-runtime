@@ -236,6 +236,44 @@ def test_reset_slow_body(m, port):
     check("reset 慢速 body 被超时拒绝", " 408 " in status_line, status_line)
 
 
+def test_oversize_closes(m, port):
+    """413 之后必须关闭连接。
+
+    body 还留在 socket 里，而 HTTP/1.1 默认 keep-alive：不关的话，下一个请求会
+    从这些未消费的字节开始解析。这个分支曾经只在 /v1/reset 里关了连接，
+    /v1/chat/completions 漏了。
+    """
+    sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+    sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+                 b"Content-Type: application/json\r\n"
+                 b"Content-Length: 10485760\r\n\r\n")
+    sock.settimeout(10)
+    head = sock.recv(4096).decode("latin-1", "replace")
+    status_line = head.split("\r\n")[0] if head else "无响应"
+    closed = False
+    try:
+        sock.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
+        closed = (sock.recv(256) == b"")
+    except OSError:
+        closed = True
+    sock.close()
+    check("413 后关闭连接（不污染 keep-alive）",
+          " 413 " in status_line and closed, "%s | closed=%s" % (status_line, closed))
+
+
+def test_reset_chunked(m, port):
+    """reset 也必须拒绝 chunked，否则 chunk 帧留在 socket 里当成下一个请求。"""
+    sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+    sock.sendall(b"POST /v1/reset HTTP/1.1\r\nHost: x\r\n"
+                 b"Transfer-Encoding: chunked\r\n\r\n"
+                 b"2\r\n{}\r\n0\r\n\r\n")
+    sock.settimeout(10)
+    head = sock.recv(512).decode("latin-1", "replace")
+    sock.close()
+    status_line = head.split("\r\n")[0] if head else "无响应"
+    check("reset 拒绝 chunked body（411）", " 411 " in status_line, status_line)
+
+
 def test_watcher_join(m, port):
     """第一次请求结束后，看门狗不得干扰同一连接上的第二次请求。"""
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
@@ -290,6 +328,8 @@ def main():
         test_watcher_join(m, port)
         test_reset_body(m, port)
         test_reset_slow_body(m, port)
+        test_reset_chunked(m, port)
+        test_oversize_closes(m, port)
     finally:
         server.shutdown()
         server.server_close()
