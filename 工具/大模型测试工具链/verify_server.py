@@ -290,6 +290,29 @@ def test_watcher_join(m, port):
           "%s" % [(s, b[:18]) for s, b in bodies])
 
 
+def test_auth_counted(m, port, server):
+    """401 计入 rejected；GET 的 401 不关连接（GET 没有 body 需要消费）。"""
+    saved_key = server.options.api_key
+    server.options.api_key = "sekret"
+    try:
+        before = server.stats["rejected"]
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        conn.request("GET", "/health")
+        first = conn.getresponse()
+        first.read()
+        after = server.stats["rejected"]
+        # 同一连接再发一次：不关连接的话这里应当还能拿到 401。
+        conn.request("GET", "/health")
+        second = conn.getresponse()
+        second.read()
+        conn.close()
+    finally:
+        server.options.api_key = saved_key
+    check("401 计入 rejected 且 GET 连接可复用",
+          first.status == 401 and after == before + 1 and second.status == 401,
+          "rejected %d->%d, 第二次状态 %s" % (before, after, second.status))
+
+
 def test_health(m, port):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     conn.request("GET", "/health")
@@ -330,6 +353,7 @@ def main():
         test_reset_slow_body(m, port)
         test_reset_chunked(m, port)
         test_oversize_closes(m, port)
+        test_auth_counted(m, port, server)
     finally:
         server.shutdown()
         server.server_close()

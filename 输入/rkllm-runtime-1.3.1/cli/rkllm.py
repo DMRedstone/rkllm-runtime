@@ -1101,7 +1101,13 @@ class _GateEngine(FakeEngine):
                sampling=None, max_new_tokens=None):
         self.started.set()
         self.release.wait(15)
-        for fragment in FakeEngine.stream(self, prompt):
+        # Forward every argument even though FakeEngine ignores them: a subclass
+        # whose signature silently narrows its parent's invites a real bug the
+        # first time one of those parameters starts mattering.
+        for fragment in FakeEngine.stream(self, prompt, role=role,
+                                          enable_thinking=enable_thinking,
+                                          sampling=sampling,
+                                          max_new_tokens=max_new_tokens):
             yield fragment
 
 
@@ -1674,7 +1680,11 @@ class Handler(BaseHTTPRequestHandler):
         """Handle GET /health, /v1/models, / and /v1."""
         path = urlsplit(self.path).path.rstrip("/") or "/"
         if not self._authorised():
-            self._send_error_json("missing or wrong API key", 401, "authentication_error")
+            # Counted as rejected like every other refusal, so /health's counters
+            # answer "how many were turned away" from one place. The connection
+            # stays open: a GET carries no body, so nothing is left in the socket
+            # to pollute the next request on it.
+            self._reject("missing or wrong API key", 401, "authentication_error")
             return
         if path == "/health":
             engine = self.server.engine
@@ -1719,7 +1729,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorised():
             # The body is unread, so this connection cannot carry another request.
             self.close_connection = True
-            self._send_error_json("missing or wrong API key", 401, "authentication_error")
+            self._reject("missing or wrong API key", 401, "authentication_error")
             return
 
         # A chunked body carries no Content-Length, and BaseHTTPRequestHandler
@@ -2222,11 +2232,34 @@ def cmd_serve(args):
     except KeyboardInterrupt:
         pass
     finally:
-        sys.stderr.write("\n[rkllm] shutting down\n")
-        server.shutdown()
-        server.server_close()
-        engine.destroy()
-        restore_frequencies(quiet=args.quiet)
+        # stderr can already be gone by the time we get here (journal closed,
+        # terminal detached). Writing to it must never decide whether the NPU
+        # handle is released and the CPU frequencies are restored: under
+        # `systemctl restart` the next process would inherit a board whose NPU
+        # is still held and whose frequencies are still pinned.
+        try:
+            sys.stderr.write("\n[rkllm] shutting down\n")
+            sys.stderr.flush()
+        except (OSError, ValueError):
+            pass
+        try:
+            if thread.is_alive():
+                # shutdown() waits for the serve_forever loop to set an event on
+                # its way out. If that loop already died (a fatal error in a
+                # handler), waiting for the event would hang this process
+                # forever - so only call it while the loop is still running.
+                server.shutdown()
+                thread.join(timeout=5)
+        finally:
+            try:
+                server.server_close()
+            finally:
+                # Only these last two steps are nested: a failure while closing
+                # the socket must still not skip releasing the engine.
+                try:
+                    engine.destroy()
+                finally:
+                    restore_frequencies(quiet=args.quiet)
     return 0
 
 
