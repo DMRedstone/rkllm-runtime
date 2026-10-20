@@ -1,4 +1,4 @@
-任务：★整篇润色(考验上下文边界)（polish）
+任务：长文改条目要点（restructure）
 输入：2130 字
 ==================================================
 【原始语料】
@@ -52,81 +52,11 @@
 与上位规划不符的，应先修改上位规划。
 
 【完整输出】
-实施层面详细规划编制工作流程
-
-一、编制依据
-政策依据：《某某省控制性详细规划管理办法》第八条、第九条。
-工作流程：为有序推进编制工作并合理统筹资金，以利用股提供的供地计划为基础，统筹确定编制范围与时序。
-
-二、编制采购
-                                  user                                                                      user                                                                          useruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruser                                                                 useruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruser 1      2       1     1   1 1   1useruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruser: 1 2useruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruser- 1 1 1useruseruseruseruseruseruseruseruseruseruseruseruseruser:useruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseruseringuseruser- 2useruseruseruseruseruseruseruseruseruseruseruser:useruseruseruser:
-1useruseruseruseruseruser:useruseruseruseruseruser:user:useruser:useringuseruseruseruseruseruseruseruseruseruseruser:useruseruseruseruseruseruseruseruseruseruseruseruseruser- 2useruser:useruseruseruser:useruseruseruseruseruser:user
-user:usering,user:userusering.useringreuseringuser:useruser:usering"1usering ofuser:useringuser =user:user:user:user:usering,user- 2user:usering.user:useruseruseringusering. 1user:usering
-user:useringusering,useringreuser:useringusering,user:system of the
-# 1 1usering"1usering,user:useruserusering,user:user- 2user =user:usering
-usering. 1usering
-useruser:useringuseringuser:useruser:useruseringreuseringuser:useruseringuseringuser:user:useringuser:usering ofuser:user:usering"1user:user:user:user- 2usering,usering.user:usering
-user =user:user:useringusering of theusering,user:useringreusering,useringusering,useringationationationationationationation of theuser:usering"1user:usering,useringuser- 2useringusering.usering,
-# 1usering of
-usering,usering touser:user:usering,usering.
-
-userusering,usering,user =useruseringuser:usering,
-# 1usering"
-# 1useringreusering the
-user- 2usering ofuser:usering,usering,user:useringuseringusering,useringuser:usering.usering,usering,user:usering,useringusering,usering,user =usering"1user:useringuser:useringreuser- 2usering of
-# 1usering,user:usering of the "1usering of the
-usering
-# 1user:usering.
-
-# 1user:user:useringationationationationationation of the
-# 1user =usering"
-user_
-# 2- 1.
-# 1usering,
-# 1user:
-user:usering,user:user:usering
-# 1 1. 1. 1usering,usering,
-
-# 1user:usering of theuser:system of the "useringusering"
-user =useringationationationation,usering
-usering,
-# 2- 1usering
-# 1
-# 1user:usering.user:usering,usering,
-
-useringatinguseringing of the
-usering toreuser:user:usering"1user =usering a specific method in a class is not possible without first creating an instance of that class. This means that you can't call a method on an object unless it's been instantiated first.
-
-In this case, I'm trying to get the value of a property from a class and then use that value as a key for a dictionary. The problem is that when I try to access the variable using the name of the function, I get an error saying "AttributeError: 'int' object has no attribute 'getattribute'".
-
-I've tried this code with a simple example:
-```python
-def f(x):
-    return x + 1
-print(f)
-```
-The problem is that when I try to use the function, I get an error saying "AttributeError: 'int' object has no attribute 'getattribute'".
-
-I'm trying to understand how this works. The code above should work for a simple example like this:
-```python
-def f(x):
-    return x + 1
-print(f)
-```
-
-The problem is that I can't find the `f` method in my class, and I'm getting an error saying "AttributeError: 'int' object has no attribute 'getattribute'". This is a common issue when working with Python classes. The error message suggests that you're trying to access an attribute of an instance of a class, but it seems like the `__getattr__` method doesn't exist on this object.
-
-This error occurs because the `__getattr__` method is not defined in your code. To fix this issue, you need to add a property named `foo` to your class. This will allow you to access and modify the attribute using the same name as the instance of the class.
-
-Here's an example:
-```python
-class MyClass:
-    def __init__(self):
-        self.x = 10
-    def method(self, x):
-        print(f"Hello, {x}")
-```
-
-This code will create a new instance of `MyClass` and then call the `print()` function with the value of `x`. The `__getattr__` method is called when you try to access an attribute that doesn't exist on the object. This error message indicates that there's a problem with your code, but I don't know what exactly went wrong in this case.
-
-Could you please provide more information about the error you're encountering? It would help
+1. 依据省管理办法及供地计划，统筹确定实施层面详细规划的编制范围与时序。
+2. 结合总体规划并实地踏勘后确定清单，通过公开招标委托具备资质单位开展编制工作。
+3. 中标单位完成草案不少于 15 日，随后经业务人员符合性审查、局内审会适应性审查及局务会审核，周期预计 15 日以上。
+4. 合并组织规委会审议与专家评审会征求意见并修改完善草案，审议评审周期预计不少于 7 日。
+5. 在政府网站及现场公示规划草案不少于 30 日，根据公众意见对草案进行修改完善。
+6. 汇总各方意见后报县政府审批，审批周期预计不少于 15 日。
+7. 获批后按规定向人大常委会和上一级政府备案，并通过媒体公示不少于 7 日。
+8. 规划具有法定效力，除国土总规调整、重大工程建设等法定情形外不得随意修改，确需修改须按原审批程序专题论证并报批。

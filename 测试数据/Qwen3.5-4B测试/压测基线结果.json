@@ -2,8 +2,8 @@
   "target": "http://192.0.2.10:8080",
   "model": "qwen3.5-4b_w8a8_rk3588",
   "mode": "full",
-  "started_at": 1792503049.0082653,
-  "elapsed_s": 717.8,
+  "started_at": 1792509161.0767393,
+  "elapsed_s": 726.0,
   "completed": true,
   "stopped_at_section": null,
   "results": [
@@ -15,12 +15,12 @@
     {
       "section": "0",
       "metric": "uptime_s",
-      "value": 783.4
+      "value": 641.2
     },
     {
       "section": "0",
       "metric": "counters",
-      "value": "requests=12 rejected=1 errors=0"
+      "value": "requests=4 rejected=3 errors=0"
     },
     {
       "section": "A",
@@ -30,37 +30,37 @@
     {
       "section": "A",
       "metric": "medium prompt, 32 tok",
-      "value": "200  3.17s  in=200 out=6  1.9 tok/s"
+      "value": "200  3.18s  in=200 out=6  1.9 tok/s"
     },
     {
       "section": "A",
       "metric": "long prompt, 32 tok",
-      "value": "200  11.86s  in=1200 out=6  0.5 tok/s"
+      "value": "200  11.87s  in=1200 out=6  0.5 tok/s"
     },
     {
       "section": "A",
       "metric": "generate 128 tok",
-      "value": "200  23.06s  in=17 out=127  5.5 tok/s"
+      "value": "200  23.59s  in=17 out=127  5.4 tok/s"
     },
     {
       "section": "A",
       "metric": "generate 256 tok",
-      "value": "200  45.56s  in=17 out=255  5.6 tok/s"
+      "value": "200  46.38s  in=17 out=255  5.5 tok/s"
     },
     {
       "section": "A2",
       "metric": "流式 96 tok",
-      "value": "200  total 10.21s  首字 0.79s  94 chars  alive"
+      "value": "200  total 10.33s  首字 0.80s  94 chars  alive"
     },
     {
       "section": "A2",
       "metric": "阻塞 96 tok",
-      "value": "200  total 10.12s  94 chars"
+      "value": "200  total 10.26s  94 chars"
     },
     {
       "section": "A2",
       "metric": "流式的首字提前量",
-      "value": "阻塞需 10.12s 才有内容，流式 0.79s 即有首字（提前约 92%）"
+      "value": "阻塞需 10.26s 才有内容，流式 0.80s 即有首字（提前约 92%）"
     },
     {
       "section": "A2",
@@ -120,7 +120,7 @@
           "finish_reason": "length",
           "completion_tokens": 31,
           "chars": 40,
-          "elapsed_s": 6.56,
+          "elapsed_s": 6.647,
           "empty": false
         },
         {
@@ -128,7 +128,7 @@
           "finish_reason": "length",
           "completion_tokens": 31,
           "chars": 40,
-          "elapsed_s": 6.428,
+          "elapsed_s": 6.491,
           "empty": false
         },
         {
@@ -136,7 +136,7 @@
           "finish_reason": "length",
           "completion_tokens": 31,
           "chars": 40,
-          "elapsed_s": 6.413,
+          "elapsed_s": 6.484,
           "empty": false
         }
       ]
@@ -178,7 +178,7 @@
           "finish_reason": "length",
           "completion_tokens": 127,
           "chars": 205,
-          "elapsed_s": 23.691,
+          "elapsed_s": 24.567,
           "empty": false
         },
         {
@@ -186,7 +186,7 @@
           "finish_reason": "length",
           "completion_tokens": 127,
           "chars": 205,
-          "elapsed_s": 23.374,
+          "elapsed_s": 23.821,
           "empty": false
         },
         {
@@ -194,7 +194,7 @@
           "finish_reason": "length",
           "completion_tokens": 127,
           "chars": 205,
-          "elapsed_s": 23.392,
+          "elapsed_s": 23.823,
           "empty": false
         }
       ]
@@ -236,7 +236,7 @@
           "finish_reason": "length",
           "completion_tokens": 383,
           "chars": 654,
-          "elapsed_s": 69.832,
+          "elapsed_s": 71.331,
           "empty": false
         },
         {
@@ -244,7 +244,7 @@
           "finish_reason": "length",
           "completion_tokens": 383,
           "chars": 654,
-          "elapsed_s": 68.866,
+          "elapsed_s": 69.831,
           "empty": false
         },
         {
@@ -252,7 +252,7 @@
           "finish_reason": "length",
           "completion_tokens": 383,
           "chars": 654,
-          "elapsed_s": 68.881,
+          "elapsed_s": 69.767,
           "empty": false
         }
       ]
@@ -260,107 +260,107 @@
     {
       "section": "B",
       "metric": "concurrency=1  x24 requests",
-      "value": "wall 25.1s  qps 0.95  p50 1.04s  p90 1.06s  p99 1.07s  agg 1.0 tok/s  err 0",
+      "value": "wall 25.3s  qps 0.95  p50 1.05s  p90 1.07s  p99 1.07s  agg 0.9 tok/s  err 0",
       "requests": 24,
       "concurrency": 1,
       "ok": 24,
       "errors": 0,
-      "wall_s": 25.13,
-      "qps": 0.955,
+      "wall_s": 25.33,
+      "qps": 0.947,
       "completion_tokens": 24,
-      "agg_tok_s": 0.96,
-      "p50_s": 1.042,
-      "p90_s": 1.062,
-      "p99_s": 1.069,
+      "agg_tok_s": 0.95,
+      "p50_s": 1.052,
+      "p90_s": 1.066,
+      "p99_s": 1.068,
       "max_s": 1.069
     },
     {
       "section": "B",
       "metric": "concurrency=2  x24 requests",
-      "value": "wall 24.5s  qps 0.98  p50 1.56s  p90 2.05s  p99 2.09s  agg 1.0 tok/s  err 0",
+      "value": "wall 24.5s  qps 0.98  p50 1.53s  p90 2.05s  p99 2.06s  agg 1.0 tok/s  err 0",
       "requests": 24,
       "concurrency": 2,
       "ok": 24,
       "errors": 0,
-      "wall_s": 24.54,
-      "qps": 0.978,
+      "wall_s": 24.48,
+      "qps": 0.981,
       "completion_tokens": 24,
       "agg_tok_s": 0.98,
-      "p50_s": 1.559,
-      "p90_s": 2.049,
-      "p99_s": 2.088,
-      "max_s": 2.096
+      "p50_s": 1.533,
+      "p90_s": 2.054,
+      "p99_s": 2.058,
+      "max_s": 2.058
     },
     {
       "section": "B",
       "metric": "concurrency=4  x24 requests",
-      "value": "wall 24.0s  qps 1.00  p50 2.51s  p90 4.00s  p99 4.01s  agg 1.0 tok/s  err 0",
+      "value": "wall 24.1s  qps 0.99  p50 2.52s  p90 4.02s  p99 4.03s  agg 1.0 tok/s  err 0",
       "requests": 24,
       "concurrency": 4,
       "ok": 24,
       "errors": 0,
-      "wall_s": 24.0,
-      "qps": 1.0,
+      "wall_s": 24.12,
+      "qps": 0.995,
       "completion_tokens": 24,
-      "agg_tok_s": 1.0,
-      "p50_s": 2.51,
-      "p90_s": 4.001,
-      "p99_s": 4.011,
-      "max_s": 4.013
+      "agg_tok_s": 0.99,
+      "p50_s": 2.521,
+      "p90_s": 4.022,
+      "p99_s": 4.033,
+      "max_s": 4.034
     },
     {
       "section": "B",
       "metric": "concurrency=8  x24 requests",
-      "value": "wall 23.9s  qps 1.00  p50 4.51s  p90 7.67s  p99 8.00s  agg 1.0 tok/s  err 0",
+      "value": "wall 24.1s  qps 1.00  p50 4.54s  p90 7.71s  p99 8.03s  agg 1.0 tok/s  err 0",
       "requests": 24,
       "concurrency": 8,
       "ok": 24,
       "errors": 0,
-      "wall_s": 23.93,
-      "qps": 1.003,
+      "wall_s": 24.06,
+      "qps": 0.997,
       "completion_tokens": 24,
       "agg_tok_s": 1.0,
-      "p50_s": 4.506,
-      "p90_s": 7.669,
-      "p99_s": 7.998,
-      "max_s": 8.007
+      "p50_s": 4.541,
+      "p90_s": 7.714,
+      "p99_s": 8.027,
+      "max_s": 8.029
     },
     {
       "section": "B",
       "metric": "concurrency=16  x32 requests",
-      "value": "wall 31.9s  qps 1.00  p50 8.47s  p90 14.82s  p99 15.94s  agg 1.0 tok/s  err 0",
+      "value": "wall 32.0s  qps 1.00  p50 8.49s  p90 14.87s  p99 15.98s  agg 1.0 tok/s  err 0",
       "requests": 32,
       "concurrency": 16,
       "ok": 32,
       "errors": 0,
-      "wall_s": 31.86,
-      "qps": 1.004,
+      "wall_s": 31.96,
+      "qps": 1.001,
       "completion_tokens": 32,
       "agg_tok_s": 1.0,
-      "p50_s": 8.468,
-      "p90_s": 14.819,
-      "p99_s": 15.935,
-      "max_s": 15.945
+      "p50_s": 8.491,
+      "p90_s": 14.873,
+      "p99_s": 15.978,
+      "max_s": 15.984
     },
     {
       "section": "B",
       "metric": "  server counters",
-      "value": "requests=164 rejected=1 errors=0"
+      "value": "requests=156 rejected=3 errors=0"
     },
     {
       "section": "C",
       "metric": "40 sequential requests",
-      "value": "40 ok  0 failed  median 1.24s  agg 2.4 tok/s"
+      "value": "40 ok  0 failed  median 1.23s  agg 2.4 tok/s"
     },
     {
       "section": "C",
       "metric": "  latency drift",
-      "value": "first quarter 1.23s -> last quarter 1.58s  (delta +0.35s)"
+      "value": "first quarter 1.23s -> last quarter 1.59s  (delta +0.36s)"
     },
     {
       "section": "C",
       "metric": "  server counters",
-      "value": "requests=204 errors=0"
+      "value": "requests=196 errors=0"
     },
     {
       "section": "D",
@@ -370,7 +370,7 @@
     {
       "section": "D",
       "metric": "burst 1: 16 simultaneous",
-      "value": "wall 20.5s  statuses {200: 16}"
+      "value": "wall 20.6s  statuses {200: 16}"
     },
     {
       "section": "D",
@@ -380,7 +380,7 @@
     {
       "section": "D",
       "metric": "burst 2: 64 simultaneous",
-      "value": "wall 42.2s  statuses {503: 31, 200: 33}"
+      "value": "wall 42.4s  statuses {503: 31, 200: 33}"
     },
     {
       "section": "D",
@@ -390,7 +390,7 @@
     {
       "section": "D",
       "metric": "burst 3: 256 simultaneous",
-      "value": "wall 42.1s  statuses {503: 223, 200: 33}"
+      "value": "wall 42.4s  statuses {503: 223, 200: 33}"
     },
     {
       "section": "D",
@@ -405,7 +405,7 @@
     {
       "section": "D",
       "metric": "  server counters",
-      "value": "requests=286 rejected=255 errors=0"
+      "value": "requests=278 rejected=257 errors=0"
     }
   ]
 }

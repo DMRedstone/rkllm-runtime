@@ -1,5 +1,5 @@
 {
-  "release": "1.3.1-14",
+  "release": "1.3.1-15",
   "device": {
     "board": "OrangePi 5 Plus 8G",
     "soc": "RK3588 / 6 TOPS NPU",
@@ -7,12 +7,12 @@
   },
   "board_top": {
     "process": "rkllm",
-    "virt": "10.5g",
-    "res": "5.28g",
+    "virt": "10.3g",
+    "res": "5.25g",
     "cpu_pct": "104",
-    "mem_pct": "70.4",
-    "cpu_time": "00:57:26",
-    "load_avg": "2.60, 2.12, 2.30"
+    "mem_pct": "70.0",
+    "cpu_time": "01:08:10",
+    "load_avg": "3.64, 3.26, 2.62"
   },
   "max_tokens_verification": [
     {"requested": 8, "actual_tokens": 7, "ratio": 0.88},
@@ -20,5 +20,5 @@
     {"requested": 32, "actual_tokens": 19, "ratio": 0.59},
     {"requested": 64, "actual_tokens": 19, "ratio": 0.30}
   ],
-  "note": "board_top 为 8 并发持续负载下的 ps 采样（2026-10-20 22:1x，rkllm-runtime 1.3.1-14）。max_tokens_verification 为同一版本实测：8/16 被 length 截断，32/64 自然结束（stop）。"
+  "note": "board_top 为真实公文场景测试进行中的 ps 采样（2026-10-20 23:5x，rkllm-runtime 1.3.1-15）。max_tokens_verification 为同版本实测：8/16 被 length 截断，32/64 自然结束（stop）。"
 }

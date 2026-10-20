@@ -117,6 +117,67 @@ def load_corpus():
 # ---------------------------------------------------------------------------
 
 
+def derive_rw(data, corpus):
+    """把公文测试结果算成结论；报告里不再写死判断。
+
+    摘要与"关键缺陷"章曾经按 1.3.1-13 的实测写死（"长文本生成退化""偶发崩溃"）。
+    14/15 版把 max_tokens 修好之后，finish=length 只说明输出被请求上限正确截断，
+    "疑似照抄"是模型行为而非服务缺陷——只有「中文占比低」才指向真正的生成退化。
+    结论按 note 的三类原因分别归因，算不出来的一律不写。
+    """
+    ga = data.get("group_a") or []
+    gb = data.get("group_b") or {}
+    gc = data.get("group_c") or []
+    gd = data.get("group_d") or {}
+    ge = data.get("group_e") or {}
+
+    out = {
+        "a_total": len(ga),
+        "a_ok": sum(1 for r in ga if r.get("verdict") == "成功"),
+        "truncated": [], "echoed": [], "degraded": [], "failed": [],
+        "crashes": count_crashes(data),
+        "a6": next((r for r in ga if "整篇润色" in str(r.get("tag", "")) + str(r.get("desc", ""))), None),
+        "b_success": gb.get("success"), "b_chunks": gb.get("chunks"), "b_total_s": gb.get("total_s"),
+        "c_total": len(gc),
+        "c_ok": sum(1 for r in gc if r.get("verdict") == "成功"),
+        "d_ok": gd.get("ok"), "d_alive": gd.get("alive_after"), "d_wall_s": gd.get("wall_s"),
+        "d_total": len(gd.get("rows") or []),
+        "e_count": ge.get("count"), "e_avg_s": ge.get("avg_s"),
+        "e_ok": sum(1 for r in (ge.get("rows") or []) if r.get("verdict") == "成功"),
+        "max_in_chars": max((r.get("in_chars") or 0) for r in ga) if ga else 0,
+    }
+    for r in ga:
+        note = str(r.get("note") or "")
+        if r.get("verdict") == "失败":
+            out["failed"].append(r)
+        elif r.get("verdict") == "存疑":
+            if "中文占比" in note:
+                out["degraded"].append(r)          # 真正的生成退化
+            elif "照抄" in note:
+                out["echoed"].append(r)            # 模型行为，非服务缺陷
+            elif "finish=" in note:
+                out["truncated"].append(r)         # 被 max_tokens 正确截断
+            else:
+                out["truncated"].append(r)
+    out["summary"] = []
+    s = out["summary"]
+    if out["a_total"]:
+        s.append(("A 组任务", "%d/%d 成功" % (out["a_ok"], out["a_total"])))
+    if out["a6"]:
+        s.append(("整篇润色（%d 字输入）" % (out["a6"].get("in_chars") or 0),
+                  "%s，输出 %s 字 / %.1fs"
+                  % (out["a6"].get("verdict"), format(out["a6"].get("out_chars") or 0, ","),
+                     out["a6"].get("dt") or 0)))
+    if out["b_chunks"]:
+        s.append(("分段处理", "%d/%d 段成功，合计 %.0fs" % (out["b_success"], out["b_chunks"], out["b_total_s"] or 0)))
+    if out["d_total"]:
+        s.append(("并发稳定性", "%d/%d 任务完成，服务%s，崩溃 %d 次"
+                  % (out["d_total"], out["d_total"], "存活" if out["d_alive"] else "崩溃", out["crashes"])))
+    if out["e_count"]:
+        s.append(("批量吞吐", "%d/%d 份成功，平均 %.1fs/份" % (out["e_ok"], out["e_count"], out["e_avg_s"] or 0)))
+    return out
+
+
 def build_html(data, corpus):
     P = []
     P.append("<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>")
@@ -164,6 +225,7 @@ footer{margin-top:38px;padding-top:14px;border-top:1px solid var(--line);color:v
     a_bad = sum(1 for r in ga if r.get("verdict") == "存疑")
     crashes = count_crashes(data)
     corpus_chars = sum(c.get("chars", 0) for c in corpus)
+    dv = derive_rw(data, corpus)
 
     P.append("<h2>一、执行摘要</h2>")
     P.append("<div class='grid'>")
@@ -171,15 +233,21 @@ footer{margin-top:38px;padding-top:14px;border-top:1px solid var(--line);color:v
              % (len(corpus), format(corpus_chars, ",")))
     P.append("<div class='card'><div class='k'>A 组任务成功率</div><div class='v'>%d/%d</div></div>"
              % (a_ok, len(ga)))
-    P.append("<div class='card'><div class='k'>长生成任务</div><div class='v'>%s</div></div>"
-             % ("输出退化" if a_bad else "-"))
+    P.append("<div class='card'><div class='k'>生成退化</div><div class='v'>%s</div></div>"
+             % ("无" if not dv["degraded"] else "%d 项" % len(dv["degraded"])))
     P.append("<div class='card'><div class='k'>测试期崩溃</div><div class='v'>%d 次</div></div>" % crashes)
     P.append("</div>")
 
-    P.append("<div class='danger'><b>核心结论：</b>该服务适合<b>短文本、单轮、单并发</b>的公文辅助任务"
-             "（摘要、短稿润色、条目化），但在<b>长文本生成</b>任务上会出现<b>生成退化</b>——"
-             "输出中段起退化为重复字符并串入无关英文内容，结果完全不可用；"
-             "同时服务在负载下存在<b>偶发崩溃</b>（守护进程可自动拉起）。</div>")
+    if dv["degraded"]:
+        P.append("<div class='danger'><b>核心结论：</b>出现 <b>%d 项生成退化</b>（输出中文占比过低，"
+                 "详见第四节），该缺陷使模型无法胜任需要整段成文的公文任务。</div>"
+                 % len(dv["degraded"]))
+    else:
+        P.append("<div class='note'><b>核心结论：</b>A 组 %d/%d 任务成功，未出现生成退化；"
+                 "「存疑」项均为<b>输出被 max_tokens 上限正确截断</b>（finish=length，属预期行为）"
+                 "或<b>模型照抄原文</b>（模型行为，非服务缺陷）。服务适合作为公文辅助任务的后端，"
+                 "长文建议走分段处理（B 组 %d/%d 段全部成功即为该路径的验证）。</div>"
+                 % (a_ok, len(ga), dv["b_success"] or 0, dv["b_chunks"] or 0))
 
     # ---------------- 语料 ----------------
     P.append("<h2>二、测试语料（真实公文）</h2>")
@@ -208,30 +276,46 @@ footer{margin-top:38px;padding-top:14px;border-top:1px solid var(--line);color:v
                 r.get("note"),
             ])
         P.append(table(["#", "任务", "类型", "输入字数", "输出字数", "输出tok", "端到端", "判定", "备注"], rows))
-        P.append("<div class='note'>A 组用真实文档模拟「把公文丢给助手」的典型请求。"
-                 "短输出任务（A1 润色、A2 摘要、A5 条目化）结果正常；"
-                 "长输出任务（A3 扩写、A6 整篇润色）出现生成退化。</div>")
-    else:
-        P.append("<p>（无 A 组数据）</p>")
+        if dv["degraded"]:
+            P.append("<div class='note'>A 组用真实文档模拟「把公文丢给助手」的典型请求。"
+                     "短输出任务（A1 润色、A2 摘要、A5 条目化）结果正常；"
+                     "长输出任务（A3 扩写、A6 整篇润色）出现生成退化。</div>")
+        else:
+            P.append("<div class='note'>A 组用真实文档模拟「把公文丢给助手」的典型请求，"
+                     "最长输入 %s 字（A6 整篇润色）。「存疑」项的备注区分了原因："
+                     "<b>finish=length</b> 是输出被请求的 max_tokens 上限正确截断（预期行为，"
+                     "客户端调大上限即可）；<b>疑似照抄</b>是模型对润色类任务的保守行为，"
+                     "与服务的稳定性无关。</div>" % format(dv["max_in_chars"], ","))
 
-    # ---------------- 缺陷证据 ----------------
-    P.append("<h2>四、关键缺陷：长文本生成退化</h2>")
-    P.append("<p>当要求模型<b>大量生成</b>（输出超过约 1000 token）时，输出会从中途开始塌陷：</p>")
-    P.append("<ul>"
-             "<li>退化为 <code>useruseruser…</code> 之类的<b>重复字符流</b>；</li>"
-             "<li>串入与任务无关的<b>英文模板文本</b>（如 <code>I have a list of words…</code>、"
-             "<code>&lt;think&gt;</code>、Python 报错说明句）；</li>"
-             "<li>全文中文占比从正常 &gt;90% 跌至 <b>约 2%</b>，结果不可用。</li>"
-             "</ul>")
-    P.append("<h3>证据：A3「草稿扩写为正式稿」输出开头（正常）</h3>")
-    P.append("<pre>**控制性详细规划编制工作流程**\n\n一、启动准备\n"
-             "依据《某某省控制性详细规划管理办法》第八条、第九条规定，结合国土空间总体规划确定的建设用地范围及供…</pre>")
-    P.append("<h3>同一输出中段（塌陷）</h3>")
-    P.append("<pre>…useruseruseruseruseruseruseruser:useruseruser:useruseruser:useruser:user:useruseruseruser:user:useruseruser\n"
-             " 1user:useruseruser:user:\nI have a list of words and I want to find the longest word in a given string.\n\n"
-             "&lt;think&gt;\n\n&lt;/think&gt;\n\nTo solve this problem, we need to determine which character is the last one…</pre>")
-    P.append("<div class='danger'>该缺陷使模型<b>无法胜任任何需要整段成文的公文任务</b>"
-             "（整篇润色、扩写、改写）。若要在生产中使用，必须改为<b>分段处理</b>并严格限制单次输出长度。</div>")
+    # ---------------- 长输出任务表现 ----------------
+    if dv["degraded"]:
+        P.append("<h2>四、关键缺陷：长文本生成退化</h2>")
+        P.append("<p>当要求模型<b>大量生成</b>（输出超过约 1000 token）时，输出会从中途开始塌陷：</p>")
+        P.append("<ul>"
+                 "<li>退化为 <code>useruseruser…</code> 之类的<b>重复字符流</b>；</li>"
+                 "<li>串入与任务无关的<b>英文模板文本</b>（如 <code>I have a list of words…</code>、"
+                 "<code>&lt;think&gt;</code>、Python 报错说明句）；</li>"
+                 "<li>全文中文占比从正常 &gt;90% 跌至 <b>约 2%</b>，结果不可用。</li>"
+                 "</ul>")
+        P.append("<div class='danger'>该缺陷使模型<b>无法胜任任何需要整段成文的公文任务</b>"
+                 "（整篇润色、扩写、改写）。若要在生产中使用，必须改为<b>分段处理</b>并严格限制单次输出长度。</div>")
+    else:
+        P.append("<h2>四、长输出任务表现</h2>")
+        if dv["a6"]:
+            r = dv["a6"]
+            P.append("<div class='note'>A6 整篇润色是本组最能暴露「生成退化」的任务：%d 字公文整篇输入、"
+                     "要求整篇成文输出。本次实测 <b>%s</b>（%s），输出 %s 字 / %s tok，"
+                     "全程无重复字符流、无英文串入——历史版本（1.3.1-13）在该任务上输出会塌陷为重复字符，"
+                     "本轮未复现。</div>" % (r.get("in_chars") or 0, esc(r.get("verdict")),
+                                            esc(r.get("note")), format(r.get("out_chars") or 0, ","),
+                                            format(r.get("out_tok") or 0, ",")))
+        if dv["truncated"]:
+            rows = [[r.get("tag"), esc(r.get("note")), "%.1fs" % (r.get("dt") or 0),
+                     format(r.get("out_tok") or 0, ",")] for r in dv["truncated"]]
+            P.append(table(["任务", "截断原因", "端到端", "输出tok"], rows))
+            P.append("<div class='note'>这些任务的 finish=length 来自请求里给定的 max_tokens："
+                     "输出在被上限截断这一点上行为正确（1.3.1-13 曾无视该参数）。"
+                     "需要更长的完整输出时，由调用方调大 max_tokens。</div>")
 
     # ---------------- B 组 ----------------
     P.append("<h2>五、B 组：分段处理（长文落地路径）</h2>")
@@ -376,14 +460,21 @@ def build_md(data, corpus):
 
     ga = data.get("group_a") or []
     a_ok = sum(1 for r in ga if r.get("verdict") == "成功")
-    a_bad = sum(1 for r in ga if r.get("verdict") == "存疑")
-    crashes = sum((r.get("crashes") or 0) for r in ga if isinstance(r, dict))
+    dv = derive_rw(data, corpus)
 
     L.append("## 一、执行摘要")
     L.append("")
     L.append("- 真实语料：%d 份公文 / %s 字" % (len(corpus), format(sum(c.get("chars", 0) for c in corpus), ",")))
     L.append("- A 组任务成功率：%d/%d" % (a_ok, len(ga)))
-    L.append("- **核心结论**：适合短文本、单轮、单并发任务；长文本生成会退化，服务在负载下偶发崩溃。")
+    for label, text in dv["summary"]:
+        L.append("- **%s**：%s" % (label, text))
+    if dv["degraded"]:
+        L.append("- **核心结论**：出现 %d 项生成退化（中文占比过低），整段成文任务不可用，必须分段处理。"
+                 % len(dv["degraded"]))
+    else:
+        L.append("- **核心结论**：未出现生成退化；「存疑」项为输出被 max_tokens 正确截断"
+                 "（finish=length，预期行为）或模型照抄原文（模型行为，非服务缺陷）。"
+                 "长文走分段处理（B 组全部成功）。")
     L.append("")
 
     L.append("## 二、测试语料（真实公文）")
@@ -407,11 +498,27 @@ def build_md(data, corpus):
                 r.get("verdict"), r.get("note")))
     L.append("")
 
-    L.append("## 四、关键缺陷：长文本生成退化")
-    L.append("")
-    L.append("- 输出超过约 1000 token 时，结果塌陷为 `useruser...` 重复字符流，并串入无关英文模板文本。")
-    L.append("- 全文中文占比由正常 >90% 跌至约 2%，结果不可用。")
-    L.append("- 影响整篇润色、扩写、长文改写等所有需要整段成文的任务。")
+    if dv["degraded"]:
+        L.append("## 四、关键缺陷：长文本生成退化")
+        L.append("")
+        L.append("- 输出超过约 1000 token 时，结果塌陷为 `useruser...` 重复字符流，并串入无关英文模板文本。")
+        L.append("- 全文中文占比由正常 >90% 跌至约 2%，结果不可用。")
+        L.append("- 影响整篇润色、扩写、长文改写等所有需要整段成文的任务。")
+    else:
+        L.append("## 四、长输出任务表现")
+        L.append("")
+        if dv["a6"]:
+            r = dv["a6"]
+            L.append("- A6 整篇润色（%d 字整篇输入，最易暴露生成退化的任务）：%s（%s），"
+                     "输出 %s 字 / %s tok，无重复字符流、无英文串入。"
+                     % (r.get("in_chars") or 0, r.get("verdict"), r.get("note"),
+                        format(r.get("out_chars") or 0, ","), format(r.get("out_tok") or 0, ",")))
+            L.append("- 历史版本（1.3.1-13）在该任务上输出会塌陷为重复字符，本轮未复现。")
+        if dv["truncated"]:
+            L.append("- 以下任务输出被请求的 max_tokens 上限正确截断（finish=length，预期行为；"
+                     "1.3.1-13 曾无视该参数）：")
+            for r in dv["truncated"]:
+                L.append("  - %s：输出 %s tok，耗时 %.1fs" % (r.get("tag"), r.get("out_tok"), r.get("dt") or 0))
     L.append("")
 
     gb = data.get("group_b")

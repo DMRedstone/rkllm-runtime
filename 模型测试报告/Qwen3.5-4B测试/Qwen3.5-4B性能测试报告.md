@@ -3,15 +3,15 @@
 - 目标：`http://192.0.2.10:8080`
 - 模型：`qwen3.5-4b_w8a8_rk3588`
 - 开发板：OrangePi 5 Plus 8G（RK3588 / 6 TOPS NPU / 8GB）
-- 被测版本：`rkllm-runtime 1.3.1-14`
-- 生成时间：2026-10-20 22:16:40
+- 被测版本：`rkllm-runtime 1.3.1-15`
+- 生成时间：2026-10-21 00:29:35
 
 ## 执行摘要
 
-- **单流生成速率**：约 5.5 tok/s（128 token 请求实测）；连续 40 次短请求中位延迟 1.24s
-- **并发不带来吞吐增益**：QPS 稳定在 0.95–1.00，并发升高只增加排队延迟（16 并发时 p99 = 15.94s）
+- **单流生成速率**：约 5.4 tok/s（128 token 请求实测）；连续 40 次短请求中位延迟 1.23s
+- **并发不带来吞吐增益**：QPS 稳定在 0.95–1.00，并发升高只增加排队延迟（16 并发时 p99 = 15.98s）
 - **背压已生效**：过载时快速拒绝，254/336 请求收到 503（带 Retry-After），不再无限排队
-- **稳定性**：压测共 286 次请求（拒绝 255），服务端 errors=0
+- **稳定性**：压测共 278 次请求（拒绝 257），服务端 errors=0
 - **max_tokens 生效**：输出不超过请求上限，finish_reason 正确区分 length / stop
 - **崩溃未复现**：18 次针对性并发实验，未触发进程崩溃
 - **仿真场景**：服务最终存活
@@ -20,41 +20,41 @@
 
 | 进程 | VIRT | RES | CPU% | MEM% | 累计CPU时间 | load average |
 |---|---|---|---|---|---|---|
-| rkllm | 10.5g | 5.28g | 104 | 70.4 | 00:57:26 | 2.60, 2.12, 2.30 |
+| rkllm | 10.3g | 5.25g | 104 | 70.0 | 01:08:10 | 3.64, 3.26, 2.62 |
 
-> rkllm 常驻内存 5.28g（占 70.4%），load average 2.60, 2.12, 2.30。内存是此配置下最紧的资源。
+> rkllm 常驻内存 5.25g（占 70.0%），load average 3.64, 3.26, 2.62。内存是此配置下最紧的资源。
 
 ## 压力测试
 
 | 段 | 指标 | 结果 |
 |---|---|---|
 | A | short prompt, 32 tok | 200  2.37s  in=2 out=9  3.8 tok/s |
-| A | medium prompt, 32 tok | 200  3.17s  in=200 out=6  1.9 tok/s |
-| A | long prompt, 32 tok | 200  11.86s  in=1200 out=6  0.5 tok/s |
-| A | generate 128 tok | 200  23.06s  in=17 out=127  5.5 tok/s |
-| A | generate 256 tok | 200  45.56s  in=17 out=255  5.6 tok/s |
-| C | 40 sequential requests | 40 ok  0 failed  median 1.24s  agg 2.4 tok/s |
-| C |   latency drift | first quarter 1.23s -> last quarter 1.58s  (delta +0.35s) |
-| C |   server counters | requests=204 errors=0 |
+| A | medium prompt, 32 tok | 200  3.18s  in=200 out=6  1.9 tok/s |
+| A | long prompt, 32 tok | 200  11.87s  in=1200 out=6  0.5 tok/s |
+| A | generate 128 tok | 200  23.59s  in=17 out=127  5.4 tok/s |
+| A | generate 256 tok | 200  46.38s  in=17 out=255  5.5 tok/s |
+| C | 40 sequential requests | 40 ok  0 failed  median 1.23s  agg 2.4 tok/s |
+| C |   latency drift | first quarter 1.23s -> last quarter 1.59s  (delta +0.36s) |
+| C |   server counters | requests=196 errors=0 |
 | D | burst | flooding with 16 concurrent short requests |
-| D | burst 1: 16 simultaneous | wall 20.5s  statuses {200: 16} |
+| D | burst 1: 16 simultaneous | wall 20.6s  statuses {200: 16} |
 | D | burst | flooding with 64 concurrent short requests |
-| D | burst 2: 64 simultaneous | wall 42.2s  statuses {503: 31, 200: 33} |
+| D | burst 2: 64 simultaneous | wall 42.4s  statuses {503: 31, 200: 33} |
 | D | burst | flooding with 256 concurrent short requests |
-| D | burst 3: 256 simultaneous | wall 42.1s  statuses {503: 223, 200: 33} |
+| D | burst 3: 256 simultaneous | wall 42.4s  statuses {503: 223, 200: 33} |
 | D | totals | statuses {200: 82, 503: 254} |
 | D |   overflow shed with 503 | 254 of 336 refused |
-| D |   server counters | requests=286 rejected=255 errors=0 |
+| D |   server counters | requests=278 rejected=257 errors=0 |
 
 ### 并发 → 吞吐
 
 | 并发 | 请求 | 成功 | 失败 | 耗时(s) | QPS | p50(s) | p90(s) | p99(s) | 聚合tok/s |
 |---|---|---|---|---|---|---|---|---|---|
-| 1 | 24 | 24 | 0 | 25.13 | 0.95 | 1.04 | 1.06 | 1.07 | 1.0 |
-| 2 | 24 | 24 | 0 | 24.54 | 0.98 | 1.56 | 2.05 | 2.09 | 1.0 |
-| 4 | 24 | 24 | 0 | 24.00 | 1.00 | 2.51 | 4.00 | 4.01 | 1.0 |
-| 8 | 24 | 24 | 0 | 23.93 | 1.00 | 4.51 | 7.67 | 8.00 | 1.0 |
-| 16 | 32 | 32 | 0 | 31.86 | 1.00 | 8.47 | 14.82 | 15.94 | 1.0 |
+| 1 | 24 | 24 | 0 | 25.33 | 0.95 | 1.05 | 1.07 | 1.07 | 0.9 |
+| 2 | 24 | 24 | 0 | 24.48 | 0.98 | 1.53 | 2.05 | 2.06 | 1.0 |
+| 4 | 24 | 24 | 0 | 24.12 | 0.99 | 2.52 | 4.02 | 4.03 | 1.0 |
+| 8 | 24 | 24 | 0 | 24.06 | 1.00 | 4.54 | 7.71 | 8.03 | 1.0 |
+| 16 | 32 | 32 | 0 | 31.96 | 1.00 | 8.49 | 14.87 | 15.98 | 1.0 |
 
 ## 内容形态（机器可判的部分）
 
@@ -123,6 +123,6 @@
 | 低 | 18 次针对性并发实验未触发崩溃 | 前序版本观测到的偶发崩溃在本版本未复现 | 保留守护进程自动重启与存活告警，持续观察 |
 | 中 | 长文档粘贴被拒（8000/16000 字符 → 400） | 真实客户端粘贴长文会报错 | 限制粘贴长度或在客户端做分块摘要 |
 | 低 | 并发无吞吐增益（单 NPU 串行，QPS 上限约 1.00） | 扩容需加设备而非调参 | 按 QPS≈1.0 规划容量；多设备横向扩展 |
-| 低 | 常驻内存 5.28g / 8G（70.4%） | 内存余量有限 | 监控内存，避免同机部署其他大内存服务 |
+| 低 | 常驻内存 5.25g / 8G（70.0%） | 内存余量有限 | 监控内存，避免同机部署其他大内存服务 |
 | 中 | 上下文窗口仅 4096 tokens | 多轮长对话很快触顶被拒 | 权衡量化档位；或缩短历史/摘要压缩 |
 | 中 | 参数不校验（max_tokens=0/-1、temperature=-1、top_p=2.0 均返回 200） | 非法参数被静默接受，行为不确定 | 服务端加参数范围校验，非法值返回 400 |

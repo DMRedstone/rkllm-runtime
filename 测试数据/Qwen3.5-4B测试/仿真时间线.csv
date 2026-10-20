@@ -1,48 +1,49 @@
 scenario,label,ok,elapsed_s,detail
 handshake,list_models,True,,['qwen3.5-4b_w8a8_rk3588']
-handshake,alive@handshake,True,,requests=286
+handshake,alive@handshake,True,,requests=278
 handshake,system_only_probe,True,,HTTP 200
-handshake,alive@connectivity probe,True,,requests=287
+handshake,alive@connectivity probe,True,,requests=279
 handshake,empty_send,True,,HTTP 400 (rejected cleanly)
-handshake,alive@empty send,True,,requests=287
-conversation,turn 1,True,14.836,我是 Qwen3.5，阿里巴巴最新推出的通义千问大语言模型。我具备强大的逻辑推理、代码生成及多模态理解能力，支持全球 1
-conversation,alive@conversation turn 1,True,,requests=288
-conversation,turn 2,True,6.081,我是 Qwen3.5，阿里巴巴最新推出的通义千问大语言模型。
-conversation,alive@conversation turn 2,True,,requests=289
-conversation,turn 3,True,4.233,The weather is nice today.
-conversation,alive@conversation turn 3,True,,requests=290
-conversation,turn 4,True,4.238,今日は天気が良いです。
-conversation,alive@conversation turn 4,True,,requests=291
-paste,800 chars,True,17.821,该文档介绍了在搭载 RK3588 芯片的 OrangePi 5 Plus（8GB 内存、三核 NPU
-paste,alive@long paste 800 chars,True,,requests=292
-paste,3000 chars,True,40.125,该文档介绍了在搭载 RK3588 芯片的 OrangePi 5 Plus（8GB 内存、三核 NPU
-paste,alive@long paste 3000 chars,True,,requests=293
-paste,8000 chars,False,0.067,"HTTP 400 {""error"": {""message"": ""prompt too long: about 5959 tokens for a 4096-token context window "
-paste,alive@long paste 8000 chars,True,,requests=294
+handshake,alive@empty send,True,,requests=279
+conversation,turn 1,True,15.133,我是 Qwen3.5，阿里巴巴最新推出的通义千问大语言模型。我具备强大的逻辑推理、代码生成及多模态理解能力，支持全球 1
+conversation,alive@conversation turn 1,True,,requests=280
+conversation,turn 2,True,6.143,我是 Qwen3.5，阿里巴巴最新推出的通义千问大语言模型。
+conversation,alive@conversation turn 2,True,,requests=281
+conversation,turn 3,True,4.263,The weather is nice today.
+conversation,alive@conversation turn 3,True,,requests=282
+conversation,turn 4,True,4.26,今日は天気が良いです。
+conversation,alive@conversation turn 4,True,,requests=283
+paste,800 chars,True,17.854,该文档介绍了在搭载 RK3588 芯片的 OrangePi 5 Plus（8GB 内存、三核 NPU
+paste,alive@long paste 800 chars,True,,requests=284
+paste,3000 chars,True,40.243,该文档介绍了在搭载 RK3588 芯片的 OrangePi 5 Plus（8GB 内存、三核 NPU
+paste,alive@long paste 3000 chars,True,,requests=285
+paste,8000 chars,False,0.07,"HTTP 400 {""error"": {""message"": ""prompt too long: about 5959 tokens for a 4096-token context window "
+paste,alive@long paste 8000 chars,True,,requests=285
 paste,reject_boundary_chars,True,,8000
-paste,16000 chars,False,0.045,"HTTP 400 {""error"": {""message"": ""prompt too long: about 11862 tokens for a 4096-token context window"
-paste,alive@long paste 16000 chars,True,,requests=300
+paste,16000 chars,False,0.059,"HTTP 400 {""error"": {""message"": ""prompt too long: about 11862 tokens for a 4096-token context window"
+paste,alive@long paste 16000 chars,True,,requests=290
 paste,reject_boundary_chars,True,,12343
 interruption,abort_mid_stream,True,,4 chunks
-interruption,server_busy_tail_s,True,,57.6s
-interruption,alive@after interruption,True,,requests=307
+interruption,server_busy_tail_s,True,,57.5s
+interruption,alive@after interruption,True,,requests=295
 session,reset,True,,HTTP 200
 session,fresh_chat,True,,"1. **北京香山**：层林尽染，红枫与银杏交织，是经典的秋日赏景地。  
 2. **云南元阳梯田**：灌水期如镜面倒映"
-session,alive@session switch,True,,requests=308
-background,chat_while_title,True,24.473,1. **可变性**：列表（`list`）是可变的，创建后内容可修改；元组（`tuple`）是不可变的，一旦创建无法更改
+session,alive@session switch,True,,requests=296
+background,chat_while_title,True,23.827,"- **可变性**：列表（`list`）可修改内容（增删改），元组（`tuple`）不可变。  
+- **语法**：列表"
 background,title_request,True,,"{""isNewTopic"": true, ""title"": ""python quicksort implementation guide""}"
-background,alive@concurrent title generation,True,,requests=310
-mixed,vu=3,True,58.155,n=11 ok=11 wall=58.2s
-mixed,short_chat,True,4.225,杭州是一座以西湖闻名、拥有千年历史底蕴且正蓬勃发展的现代化数字之城。
-mixed,short_chat,True,8.213,杭州是一座以西湖闻名、拥有数字经济活力与丰富历史文化的中国南方城市。
-mixed,short_chat,True,12.567,杭州是一座以西湖美景、数字经济和“诗与远方”文化闻名的现代化国际大都市。
-mixed,short_chat,True,11.679,杭州是一座以西湖闻名、拥有千年历史底蕴且正蓬勃发展的现代化数字之城。
-mixed,short_chat,True,12.087,杭州是一座以西湖闻名、拥有数字经济活力与丰富历史文化的中国南方城市。
-mixed,short_chat,True,11.186,杭州是一座以西湖美景、数字经济和“诗与远方”文化闻名的现代化国际大都市。
-mixed,summarise,True,22.327,在嵌入式 NPU（如 Rockchip）上部署大模型面临严峻挑战：首先需**高带
-mixed,short_chat,True,21.425,杭州是一座以西湖闻名、拥有数字经济活力与丰富历史文化的中国南方城市。
-mixed,title,True,22.425,"{""isNewTopic"": true, ""title"": ""user 2 se"
-mixed,title,True,12.916,"{""isNewTopic"": true, ""title"": ""user 1 se"
-mixed,short_chat,True,12.655,杭州是一座以西湖闻名、拥有数字经济活力与丰富历史文化的中国南方城市。
-mixed,alive@after mixed workload,True,,requests=321
+background,alive@concurrent title generation,True,,requests=298
+mixed,vu=3,True,59.22,n=11 ok=11 wall=59.2s
+mixed,short_chat,True,4.249,杭州是一座以西湖闻名、拥有千年历史底蕴且正蓬勃发展的现代化数字之城。
+mixed,short_chat,True,8.632,杭州是一座以西湖美景、数字经济和“诗与远方”文化闻名的现代化国际大都市。
+mixed,short_chat,True,12.66,杭州是一座以西湖闻名、拥有数字经济活力与丰富历史文化的中国南方城市。
+mixed,short_chat,True,11.779,杭州是一座以西湖闻名、拥有千年历史底蕴且正蓬勃发展的现代化数字之城。
+mixed,short_chat,True,12.151,杭州是一座以西湖美景、数字经济和“诗与远方”文化闻名的现代化国际大都市。
+mixed,short_chat,True,11.232,杭州是一座以西湖闻名、拥有数字经济活力与丰富历史文化的中国南方城市。
+mixed,summarise,True,22.438,在嵌入式 NPU（如 Rockchip）上部署大模型面临严峻挑战：首先需**高带
+mixed,short_chat,True,21.581,杭州是一座以西湖美景、数字经济和“诗与远方”文化闻名的现代化国际大都市。
+mixed,title,True,22.934,"{""isNewTopic"": true, ""title"": ""user 3 se"
+mixed,title,True,13.369,"{""isNewTopic"": true, ""title"": ""user 1 se"
+mixed,short_chat,True,13.08,杭州是一座以西湖美景、数字经济和“诗与远方”文化闻名的现代化国际大都市。
+mixed,alive@after mixed workload,True,,requests=309

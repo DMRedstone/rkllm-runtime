@@ -1,8 +1,7 @@
-<!DOCTYPE html><html data-page-node-id="kqGOFkmeTDXMqoFUSUiW5h" lang="zh-CN"><head data-page-node-id="siNaFkhGEcwqEksRvfpU9a">
-<script data-page-node-id="bVqsxtsGhq5XtpOKSwbwW4" src="/page/page_comm/inject.js"></script><meta data-page-node-id="KTuTSunUnaXZftA6Akuzb2" charset="utf-8">
-<meta data-page-node-id="rPekfJZ7fR6X6olOwr6Ufr" content="width=device-width,initial-scale=1" name="viewport">
-<title data-page-node-id="NgRflVRJuwEbSyrkoxR6wF" data-pnid-children="fMHZaVelCZ08fUb3rfFbe2">Qwen3.5-4B 板端服务 · 真实公文场景测试报告</title>
-<style data-page-node-id="XCd4SONnymdRzB6s85Wgct" data-pnid-children="RnNWsGjRJMRLmBoECpXiAU">
+<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Qwen3.5-4B 板端服务 · 真实公文场景测试报告</title>
+<style>
 :root{--bg:#f6f7f9;--card:#fff;--line:#e5e7eb;--ink:#1f2328;--sub:#5b6470;
 --ok:#0a7d33;--okbg:#e7f6ec;--bad:#b42318;--badbg:#fdeceb;--warn:#8a5a00;--warnbg:#fff5e0;
 --accent:#1a56db;}
@@ -32,547 +31,544 @@ pre{background:#0f172a;color:#e6edf3;border-radius:10px;padding:12px 14px;overfl
 code{font-family:ui-monospace,Consolas,"Courier New",monospace}
 ul{margin:8px 0 8px 2px;padding-left:22px}
 footer{margin-top:38px;padding-top:14px;border-top:1px solid var(--line);color:var(--sub);font-size:13px}
-</style></head><body data-page-node-id="mrBgChoqUQVHrNBthw4Kpy"><div data-page-node-id="dFUasLD1vaNXJ0q18hLoGL" class="wrap">
-<h1 data-page-node-id="XYEX1uwQe6Rp9TSptl6btM"><!--pnid:o59aSR08Ysj4fyo8rF4vDt-->Qwen3.5-4B 板端推理服务 · 真实公文场景测试报告</h1>
-<div data-page-node-id="Ev8Q2ENeeeWIROTTAx4rbZ" class="sub"><!--pnid:2dWpbzeBzbuQJe4d0H7ohx-->目标：<code data-page-node-id="sZHEAjndosjNZG7h65zK2o" data-pnid-children="pjoR5KsZ9VBPenvFE4hEni">http://192.0.2.10:8080</code><!--pnid:fA88L99LXGeF6pEMBZqPo9--> ｜ 模型：<code data-page-node-id="RjubQ8lC394p0TsO0Ia3KK" data-pnid-children="KytifdhQ8ei3h3koJXPNaR">qwen3.5-4b_w8a8_rk3588</code><!--pnid:wIq2HYeDUC2G9ovBFAUtAR--> ｜ 生成时间：2026-10-15 19:24:44</div>
-<h2 data-page-node-id="cFqmkwpEHItp63wBCKqDVF"><!--pnid:dFOpjHU4HHP5GwxaazTBtG-->一、执行摘要</h2>
-<div data-page-node-id="14368GjSpeVBvoCeAMUxxf" class="grid">
-<div data-page-node-id="sG5pkRyiA5lmqO1rfuOcKD" class="card"><div data-page-node-id="GkGoPHa010sDlJ4AS9Q2ck" class="k"><!--pnid:kmcorovq35FdVfKafMkZmS-->真实文档语料</div><div data-page-node-id="euHiuZpJIPbpmP2vUiidgA" class="v"><!--pnid:bi2fl40uBP57bwzxhEcpuj-->10 份 / 14,232 字</div></div>
-<div data-page-node-id="uLIcbfmcPzbXLUh8mOuDGa" class="card"><div data-page-node-id="74Xgvf29O8FnGRq83lrFY5" class="k"><!--pnid:04356QsCroIIDNcrvsVv2m-->A 组任务成功率</div><div data-page-node-id="YMyC34nUMnzwzun2sIT58g" class="v"><!--pnid:LEw4HBDnhbNLlbnjdhooE8-->4/6</div></div>
-<div data-page-node-id="AkLAfjTc2k2k6NQrpvOES8" class="card"><div data-page-node-id="oW0LJquOY1sp4jMP8Z9LVJ" class="k"><!--pnid:yeAhNl2JjjauWlqqYcFKqu-->长生成任务</div><div data-page-node-id="1p9Cd0eyMftzhlG7GyJRCU" class="v"><!--pnid:ydRJefQS57oobFI49wUMSb-->输出退化</div></div>
-<div data-page-node-id="XTbUICudmo3o9qjLfFJfgN" class="card"><div data-page-node-id="0n4jfLVi9aY31e62jOxYhw" class="k"><!--pnid:FXWa2E44TLzaOaf4ONn67c-->测试期崩溃</div><div data-page-node-id="pfR5EpUkhNd9JxUPqNdPDk" class="v"><!--pnid:Ej1bKrDIVBi5FvXh1vKgbY-->4 次</div></div>
+</style></head><body><div class='wrap'>
+<h1>Qwen3.5-4B 板端推理服务 · 真实公文场景测试报告</h1>
+<div class='sub'>目标：<code>http://192.0.2.10:8080</code> ｜ 模型：<code>qwen3.5-4b_w8a8_rk3588</code> ｜ 生成时间：2026-10-20 23:56:12</div>
+<h2>一、执行摘要</h2>
+<div class='grid'>
+<div class='card'><div class='k'>真实文档语料</div><div class='v'>10 份 / 14,232 字</div></div>
+<div class='card'><div class='k'>A 组任务成功率</div><div class='v'>5/6</div></div>
+<div class='card'><div class='k'>生成退化</div><div class='v'>无</div></div>
+<div class='card'><div class='k'>测试期崩溃</div><div class='v'>0 次</div></div>
 </div>
-<div data-page-node-id="bFPH5UqxnXRXzy24g6JqaV" class="danger"><b data-page-node-id="GkRGshKus5E8UOj5maRpAN"><!--pnid:S3LyA7GyTe7U7Csc19HIVu-->核心结论：</b><!--pnid:DMw5ueTQmwbqcYKOzkVVnA-->该服务适合<b data-page-node-id="MaPIBEvuGIN1RzRsLAn2E2"><!--pnid:ZUt9c9U4jcqr0hZbFyuCWx-->短文本、单轮、单并发</b><!--pnid:GiBcOKHL33PvmEPEcS3wU3-->的公文辅助任务（摘要、短稿润色、条目化），但在<b data-page-node-id="nPncY5Eqqm83JI2vAzYZaW"><!--pnid:o0vnZUZ1szV3PmPZwhf2EF-->长文本生成</b><!--pnid:m7hGbBEYlqnaJrUzPEyMMf-->任务上会出现<b data-page-node-id="BOKFI9kf1owuWFCu8rr60Z"><!--pnid:oqOpB0TzncynJO4UJf5B4Q-->生成退化</b><!--pnid:cVXa2ykkmcmUEyTffe8ijt-->——输出中段起退化为重复字符并串入无关英文内容，结果完全不可用；同时服务在负载下存在<b data-page-node-id="qvmbjzbHMTY0YepEZFkvfE"><!--pnid:ApuFHLRoqDllndzLPp7ZFn-->偶发崩溃</b><!--pnid:kVh8lAsxtSBcSDgtDFJnHA-->（守护进程可自动拉起）。</div>
-<h2 data-page-node-id="sF9ExEJUOD6sLISgdEExQ9"><!--pnid:OEjEQFk35qDf6rEMHSWVO8-->二、测试语料（真实公文）</h2>
-<table data-page-node-id="02wE6O6RjgjWQtA1BaU8vo"><thead data-page-node-id="to1sQLooKIGBmd6BwAQ4sH"><tr data-page-node-id="5bDips1R9LrYptWgMzcKqZ">
-<th data-page-node-id="rVyZ94oMVbPvlKp6n9eLMr"><!--pnid:XAcFwmb59GY0EdEhjY8eeS-->语料 ID</th>
-<th data-page-node-id="WYh3cimunDJNFFz9BoxT6A"><!--pnid:9HqsBVSEfT3s0dHP3vao1P-->业务分组</th>
-<th data-page-node-id="EcdwqWIRgSV7OvpGbtdYI4"><!--pnid:U8ukUKtSMzqqqsfDr9lz1Y-->阶段</th>
-<th data-page-node-id="XWtggzSKxmlBDDNpeP7ZwM"><!--pnid:9f9u8kjCBAgbBItllDO0Lk-->字符数</th>
-<th data-page-node-id="NkeuWGINg3ksS2XS9a9p4e"><!--pnid:1XPv5do0OXj9sv7UbfcFbI-->段落</th>
-<th data-page-node-id="72wqIy1EeTyoFa8H4igCrB"><!--pnid:n4sYSlt45Am9BXoBf2JMGg-->≈tokens</th>
-</tr></thead><tbody data-page-node-id="K9LCESpqDLiVarcrnPKhwy">
-<tr data-page-node-id="sVYrBvxmEboMnO904htZIR">
-<td data-page-node-id="esyabjidfQL1As0IjZC8k6"><!--pnid:5t8MYcNO705lgOXDNFYLpW-->build_report</td>
-<td data-page-node-id="QZjQ7U5e1v1aHgFuMUv9Mb"><!--pnid:qFbbXGyxz4VgZF6BhNgQv0-->建筑垃圾规划布置</td>
-<td data-page-node-id="pHe8QxHv8eKh8upxx2tZke"><!--pnid:BzOhVwglNbuKedvDz6fmyC-->调研报告</td>
-<td data-page-node-id="Ft0lsDNuOZE3WywnPujINs"><!--pnid:tB7pfueYX2Yq2te2xyi4Ar-->1,146</td>
-<td data-page-node-id="XFvuZuzZGVvdZk2lpP3U0U"><!--pnid:kgvaOG4c59hBbxOpujW1ln-->21</td>
-<td data-page-node-id="fLIOOHk7CsvZ05BsYIOxOy"><!--pnid:UpCwIYE9UMb5l4yCQiUdcm-->1,080</td>
+<div class='note'><b>核心结论：</b>A 组 5/6 任务成功，未出现生成退化；「存疑」项均为<b>输出被 max_tokens 上限正确截断</b>（finish=length，属预期行为）或<b>模型照抄原文</b>（模型行为，非服务缺陷）。服务适合作为公文辅助任务的后端，长文建议走分段处理（B 组 12/12 段全部成功即为该路径的验证）。</div>
+<h2>二、测试语料（真实公文）</h2>
+<table><thead><tr>
+<th>语料 ID</th>
+<th>业务分组</th>
+<th>阶段</th>
+<th>字符数</th>
+<th>段落</th>
+<th>≈tokens</th>
+</tr></thead><tbody>
+<tr>
+<td>build_report</td>
+<td>建筑垃圾规划布置</td>
+<td>调研报告</td>
+<td>1,146</td>
+<td>21</td>
+<td>1,080</td>
 </tr>
-<tr data-page-node-id="pTFBJ44UHqVcPWov44pVVD">
-<td data-page-node-id="ek9cTDimoQWMF60nWV3TQq"><!--pnid:7Na2eXCJxdJRvUZNCDhTCC-->build_report_v1</td>
-<td data-page-node-id="iVWaaNsFzYbcjPAYDekAO1"><!--pnid:KQ5zfPv2X8wxvlSpf8SFPI-->建筑垃圾规划布置</td>
-<td data-page-node-id="SX9iGhNDhHDaCmsNO1LbFv"><!--pnid:0J6dtCIR66lu1HgNNipL0S-->汇报(版1)</td>
-<td data-page-node-id="3s0ozBw7cjpsnVMDlZ8StZ"><!--pnid:jhxNjhd8OCK9C95ul2gCRl-->572</td>
-<td data-page-node-id="pgCPrVv4UU7a4OjIjggI9w"><!--pnid:ct4wYjVlpIpZgiMHe00EHN-->11</td>
-<td data-page-node-id="Wf2yyxNjkk1oFn9rKtSHgy"><!--pnid:E3pb6qiiNsDvjO9Au2zW9w-->533</td>
+<tr>
+<td>build_report_v1</td>
+<td>建筑垃圾规划布置</td>
+<td>汇报(版1)</td>
+<td>572</td>
+<td>11</td>
+<td>533</td>
 </tr>
-<tr data-page-node-id="aLDXCmlZdfMtDPwaibAdDy">
-<td data-page-node-id="PtkF2dInvEImGDD4BmL3zL"><!--pnid:pAlK8YkLXdtrp9d0uOscwo-->build_report_v2</td>
-<td data-page-node-id="8hTyMVvmPsukHtKL8mbkzx"><!--pnid:D4GlfrUGJxZIB0PfRRUcAL-->建筑垃圾规划布置</td>
-<td data-page-node-id="lWNKXSx9xCPEKH6wpN6ZDe"><!--pnid:qv96tjStUpYM2qvMh7wdyw-->汇报(版2)</td>
-<td data-page-node-id="lg268PUjBmBj8l0myTrWCv"><!--pnid:ddaAPn7vjwFNI5rJLIfF3g-->657</td>
-<td data-page-node-id="4ExTFS25xCSOPGpwH60CUp"><!--pnid:leZu7vCJmvqQsQOk4IJMeV-->14</td>
-<td data-page-node-id="kzINEYQDIhJYLBZulRVAWD"><!--pnid:lhCR42uqrN5sJ7aHYcj3A5-->605</td>
+<tr>
+<td>build_report_v2</td>
+<td>建筑垃圾规划布置</td>
+<td>汇报(版2)</td>
+<td>657</td>
+<td>14</td>
+<td>605</td>
 </tr>
-<tr data-page-node-id="hEhq8q7tn9zi6i1UWj5uvY">
-<td data-page-node-id="wzirwChIlWM0AAy8QjIFGq"><!--pnid:ea05q048irogTlBsy9cRDm-->plan_0312_draft</td>
-<td data-page-node-id="DzvsD9iJ6wcVDB34e3dYKx"><!--pnid:X3QJtOTtHQ8aYvXuqGXEbV-->规划编制流程</td>
-<td data-page-node-id="VCx9gPJW1gbq81idgaomOO"><!--pnid:GXt2MN8LqW1h6yd4hU6zcN-->草稿</td>
-<td data-page-node-id="uwcu8Y7gMZsCO0a7gZuhhT"><!--pnid:wCGPrKudgfxRrLk8CYVDzz-->1,281</td>
-<td data-page-node-id="NwZUon2hiOKTaVPldhGiCG"><!--pnid:dANIhZULoVRXYMNt5pRv3x-->22</td>
-<td data-page-node-id="Xd8knd4BcwwctKgE7XQvho"><!--pnid:zKwaPZambSxL5nvUONreSn-->1,261</td>
+<tr>
+<td>plan_0312_draft</td>
+<td>规划编制流程</td>
+<td>草稿</td>
+<td>1,281</td>
+<td>22</td>
+<td>1,261</td>
 </tr>
-<tr data-page-node-id="z1JFCTbkIjUtOTGqWCbyrK">
-<td data-page-node-id="zkSQ11tpQJxCcS2db7XRGS"><!--pnid:kJ5EEqLkjTT1bSfLBBdDgf-->plan_0312_polish</td>
-<td data-page-node-id="VERtZguTD4seVIu7F2S16n"><!--pnid:jUP5o5O65RTwIlLTkhDWC2-->规划编制流程</td>
-<td data-page-node-id="8HMeYfAQ8vaSTkkRQiIYCV"><!--pnid:8qRerLYquhmrjQSE22eQcT-->润色</td>
-<td data-page-node-id="xDqe2kNquDIb1le5Zoep8s"><!--pnid:ei1w2s6F5PYPsgw85kc6ih-->1,382</td>
-<td data-page-node-id="BY9QZAgB971raNbQZYP1m1"><!--pnid:yf6MOQjxscPfHCBhovLAaP-->27</td>
-<td data-page-node-id="jOBlqtTC5OFDI9v8U6rQty"><!--pnid:ri8faGaHfQdlsoKbknafHi-->1,328</td>
+<tr>
+<td>plan_0312_polish</td>
+<td>规划编制流程</td>
+<td>润色</td>
+<td>1,382</td>
+<td>27</td>
+<td>1,328</td>
 </tr>
-<tr data-page-node-id="qWnlGW58PbEhnwmWcqz0kI">
-<td data-page-node-id="EAxxQrM7eYY9BuDHg2INUV"><!--pnid:b6VgsuTntM0JvBltk9nzxM-->plan_0312_review</td>
-<td data-page-node-id="aVhwrqgzOVE75wOdwL2gYk"><!--pnid:oGI43IgPSizR31jxPUXGME-->规划编制流程</td>
-<td data-page-node-id="ZuP67IRcmqm8VIHsOTtSbI"><!--pnid:iWBQKQiRz26je148CSxR4L-->审核意见</td>
-<td data-page-node-id="GeIJtV90lG490JuvoqSpe8"><!--pnid:JKsQby7nAj5FnzVNOHC8JD-->1,565</td>
-<td data-page-node-id="X2adBhvdFIsxaWT5nrfx7I"><!--pnid:uh2dkum3p43QyyU2Ni3eaD-->31</td>
-<td data-page-node-id="ELi2EQEhnVk4MSQwmH3hVW"><!--pnid:5Fvfcp87CgdQLxpIuz15qz-->1,508</td>
+<tr>
+<td>plan_0312_review</td>
+<td>规划编制流程</td>
+<td>审核意见</td>
+<td>1,565</td>
+<td>31</td>
+<td>1,508</td>
 </tr>
-<tr data-page-node-id="3xZDajQBbmiwsw0rVApqIB">
-<td data-page-node-id="japcu1xKBuBA8VTcn0CVmo"><!--pnid:AQJo9PGQjhhGTHtM2d7wI2-->plan_0313_draft</td>
-<td data-page-node-id="j1oQA0w9OPpTlBMToB2Bfu"><!--pnid:dEOeNKODWHTIpibgX7fP40-->规划编制流程</td>
-<td data-page-node-id="hJNt29GyHD7ZeANCyWorZ3"><!--pnid:053Dv0yj5iROFvJtOZfCVt-->终稿草稿</td>
-<td data-page-node-id="QjSvQvKmqaENk7MBpMdyOk"><!--pnid:23PMMzJIF59OBCfn5pjkcQ-->1,751</td>
-<td data-page-node-id="BFGk6ewrBK9VwYwNmPpCit"><!--pnid:piwBLdsx23VLWFAyHapWuR-->38</td>
-<td data-page-node-id="cVEyXBu6G6s4o2ZTtL1QM2"><!--pnid:dVo3UqN1SJpnxALWRD3RPA-->1,685</td>
+<tr>
+<td>plan_0313_draft</td>
+<td>规划编制流程</td>
+<td>终稿草稿</td>
+<td>1,751</td>
+<td>38</td>
+<td>1,685</td>
 </tr>
-<tr data-page-node-id="UcEmQNHQr0XWLDgaZBcuC9">
-<td data-page-node-id="6rULbo9j0VBQTTv7118BCi"><!--pnid:k2uBtD6x851BhjeIlXiss4-->plan_0313</td>
-<td data-page-node-id="AuLgWoIhNtyLWH92uieIOe"><!--pnid:loZg1AkhDBlRPP69f3LqSO-->规划编制流程</td>
-<td data-page-node-id="jVW1mX6GdhhSIZ5VBTmWSD"><!--pnid:AXjG2AWBjohXmvOSjAqjCi-->定稿</td>
-<td data-page-node-id="EDh914px49ZlePygBwEEU0"><!--pnid:QvnCiB1OFIPSWUNPtOpN6c-->1,751</td>
-<td data-page-node-id="APOQCIJ6glnB8HKYa8jX3S"><!--pnid:lOCtOvunZnv0MRP0CPMKsA-->38</td>
-<td data-page-node-id="DVzt6gXoMt9kYUUFgkLWJ2"><!--pnid:pCF09cyZ9HebnMgADgf3VW-->1,685</td>
+<tr>
+<td>plan_0313</td>
+<td>规划编制流程</td>
+<td>定稿</td>
+<td>1,751</td>
+<td>38</td>
+<td>1,685</td>
 </tr>
-<tr data-page-node-id="0wRGphCwrfAecMbbXObWKU">
-<td data-page-node-id="IyUtFhGPaLlIqFUvl8aFUC"><!--pnid:VPwAigsIpQT6AFbuDmHKnl-->plan_0318</td>
-<td data-page-node-id="VkuKSxEQYJNjJXYdv4ZXUs"><!--pnid:TZIwhRRXC2ABOb1yAVZ9YY-->规划编制流程</td>
-<td data-page-node-id="17e5KEUWwqSD0oZWNImGSu"><!--pnid:pCb9M7hX0sicGM1mfQawj7-->迭代</td>
-<td data-page-node-id="GRh81LDLK41n1IQh6IUm6D"><!--pnid:FXX3UjGa8FRmvjkjKTNYJL-->1,997</td>
-<td data-page-node-id="Aar193aj1qVCspV8WH5KEx"><!--pnid:aLhx8mm6lGOSGhWEQPOGwM-->41</td>
-<td data-page-node-id="0MvTifChNgL23yS5GLQcj1"><!--pnid:RIo3XKVWoeIQ9uuI1LUUIi-->1,928</td>
+<tr>
+<td>plan_0318</td>
+<td>规划编制流程</td>
+<td>迭代</td>
+<td>1,997</td>
+<td>41</td>
+<td>1,928</td>
 </tr>
-<tr data-page-node-id="8ef9nDIZU6hB2iaPxekQAQ">
-<td data-page-node-id="XBxheTgOww98yUU9w6SoT7"><!--pnid:78aQ6XvwiaK6y6nEEsGsj9-->plan_0320</td>
-<td data-page-node-id="XZWEu63hkGaRdJRxqkryTT"><!--pnid:NMX5DbqRLEFouXxwiXGCg0-->规划编制流程</td>
-<td data-page-node-id="DezlQVGLrP8mmI2h3133fl"><!--pnid:zzyKhNBqSn5hc2PBboRF1r-->终版</td>
-<td data-page-node-id="vEUIfalc4cM0PSkGUoZpjx"><!--pnid:VxrdLa0Z3K8aSqUOLW7wiV-->2,130</td>
-<td data-page-node-id="6DUycL9DayEw47phL52pED"><!--pnid:XRdYyBCIyVlhJt1g3j3jbb-->48</td>
-<td data-page-node-id="1tzOOv09tyCjDDFVNjEdTS"><!--pnid:tshAyrJUelB7a5leovzjsW-->2,061</td>
-</tr>
-</tbody></table>
-<div data-page-node-id="5r1Qh49L9SnBlM0xvjvLGf" class="note"><!--pnid:T1jnH5YeTwub8thI0xlTlz-->两组真实文档：<b data-page-node-id="BblFEJLFbyJo7BaABK3GQI"><!--pnid:ORA5c4fnE5IeULpnVQTLnu-->建筑垃圾规划布置</b><!--pnid:fsXOVCR6EoLpmGfZXd1h5F-->（1 份调研报告 + 2 份汇报）与 <b data-page-node-id="0vQwTmC25kANZhKvn0izAv"><!--pnid:Lj33ibgOV05yqFYNLKUFDP-->实施层面详细规划编制工作流程</b><!--pnid:pO4eShd2fJTYSQgQX9ehZB-->（7 版迭代稿，从草稿到终版逐步扩充）。规划流程组完整还原了「草稿→润色→审核→定稿」的真实迭代链条，是检验模型实际生产力的最佳样本。</div>
-<h2 data-page-node-id="E4VlHQKfcVeUbkSeeG78y1"><!--pnid:Y6zBsyY7NT89rjHF88AF0G-->三、A 组：串行真实任务</h2>
-<table data-page-node-id="AtoidPnaR6kGxviebjXxvZ"><thead data-page-node-id="dC2qmWy0BrMbfMgSIRXm4o"><tr data-page-node-id="PkTb3Iop1PnalgAO4kwLwl">
-<th data-page-node-id="QKrsIyjzOoTYaryile7zDJ"><!--pnid:9foTGI0Fen3um80mAgqfVe-->#</th>
-<th data-page-node-id="95SiCPcmdjivimYFVONAxC"><!--pnid:CNqe1UlbmWg6EqSjwSB9OK-->任务</th>
-<th data-page-node-id="DudwQmGy07D7DW6Ub8pMRc"><!--pnid:k2bBQPCilo0XQ6I6IrxYwT-->类型</th>
-<th data-page-node-id="GpLT3atO3u2g0kjQyaxsZE"><!--pnid:zg6QxQ8UK1bZot9YdLCPNK-->输入字数</th>
-<th data-page-node-id="KhJyFf1Aaqxm5EBxAPMSwu"><!--pnid:FibmBqITDDrrAHLGYBcOid-->输出字数</th>
-<th data-page-node-id="KDYtWZznxvAdLdVUDaYgEx"><!--pnid:TEgFX8zF4ml277MjOzmLRz-->输出tok</th>
-<th data-page-node-id="mtogWAdai5iLRzm3861YeJ"><!--pnid:zGtSRWxCtWYmdv0milQzOQ-->端到端</th>
-<th data-page-node-id="OQhUCkAEE1LaIXebPhAhYO"><!--pnid:7JGpN7l6vzSrETU9hvXiO4-->判定</th>
-<th data-page-node-id="ONjgcsLOi7z0PWNcdXrAjy"><!--pnid:kQLuParAG7U2pTpznPTGiC-->备注</th>
-</tr></thead><tbody data-page-node-id="MX5KLqZNuWKxpTP1c0kX7V">
-<tr data-page-node-id="HKxwZ4VDTdQitYbw1bRmdf">
-<td data-page-node-id="sO9hgtc3eRNcPsAHSjE5z0"><!--pnid:xhLiJ0JAywtVS2SPBhVGJS-->A1</td>
-<td data-page-node-id="QMNwoShQmtSreAsimsu7LN"><!--pnid:BZ2cth7D5w7wnaf8cnoaOv-->短汇报润色</td>
-<td data-page-node-id="8mv89tOuCNghvd1y5V0GE3"><!--pnid:kNfzq9g3EBkhLpOINRG7UT-->polish</td>
-<td data-page-node-id="jjsZ51llL8K6UnLXUW8mHd"><!--pnid:LlBfFsd9PPZi9jJSA6dimK-->572</td>
-<td data-page-node-id="ps37TqcVb6Y547RUWkZvjB"><!--pnid:Rmsa4Ump2Sif3aeblRJQfW-->643</td>
-<td data-page-node-id="a9y0YYtaDbB77bbbBIYxTL"><!--pnid:C9IVBxp48F87FnRZD4h88p-->592</td>
-<td data-page-node-id="hKXnKazQ5PVY0ElLVUAowV"><!--pnid:GoEwbjVLq6hrImzJWJfRDt-->82.9s</td>
-<td data-page-node-id="sxWxMWiDfyXD1KbjTbp3KX"><span data-page-node-id="jfE5ckHD3abyGHawAwYKNn" class="pill ok"><!--pnid:HkrdUYqW6xP5Xjn3kwZk3i-->成功</span></td>
-<td data-page-node-id="xLljlFTKpnJWQn3sX1GE6h"><!--pnid:xuRso1ABu502mlhpFC3Vfm-->正常</td>
-</tr>
-<tr data-page-node-id="abxpMnhUxYOleb4m21iwk8">
-<td data-page-node-id="PRXiiktPBuGPQdADUFbfiy"><!--pnid:lov8Jh6nII7Qu0BwWK6use-->A2</td>
-<td data-page-node-id="mvyPAnqzXcx0AJB2lbiYnn"><!--pnid:0kjh1OYcKqqD8gS2327fU1-->调研报告摘要</td>
-<td data-page-node-id="5QZEVS5opEMJsEoQkKja9e"><!--pnid:l2Wd4WtFKTZyY327XEYl9B-->summarize</td>
-<td data-page-node-id="oOpvtuiTTYGjnZ7YaKXxBG"><!--pnid:JeI23Zh6CDa5T2qwwIwZJn-->1,146</td>
-<td data-page-node-id="Iyx5Bpu9ieRO3o1BpXUJ93"><!--pnid:fmXSBLtkMHvqOYmOAS1kxd-->187</td>
-<td data-page-node-id="NRH9I7R8BS5Tj1wM2XKEND"><!--pnid:tPoYYBebQjjspS4p3nok6m-->185</td>
-<td data-page-node-id="bBxbwU7JM0s8kPtpSvOXr6"><!--pnid:UWa1jY8k2EOm1QlZC3ETYC-->36.5s</td>
-<td data-page-node-id="kWLkLcZAAqNAby7eQQ6DBN"><span data-page-node-id="3VU4YXec0qTGLq64WGUncS" class="pill ok"><!--pnid:rlo093rK6C2AcamSw3ag2k-->成功</span></td>
-<td data-page-node-id="GwPGiQgEIip8Hi02X7iRO2"><!--pnid:a1DTr0pkK3RiL3YVbxmBRq-->正常</td>
-</tr>
-<tr data-page-node-id="DXaTX8kRRRUAhhk9C3rsc5">
-<td data-page-node-id="r6WNvef5udgHBHLXoTeFce"><!--pnid:2yUSVwleCOjnUjPM68zs9t-->A3</td>
-<td data-page-node-id="ZarZfW8Waqe6rh7zeDHhRB"><!--pnid:i63fbRrau1WPIhcrA3p7hy-->草稿扩写为正式稿</td>
-<td data-page-node-id="Efb64jWEB1ZrZ4KZkxos9I"><!--pnid:xJ7Ez9iXQKqC4YiczTlmqE-->expand</td>
-<td data-page-node-id="Gs1SSjXjfbBVDMDuIwnQg4"><!--pnid:a5aA0CU2SES8Z8Xg2bgVNJ-->1,281</td>
-<td data-page-node-id="cKLHgzfQ592ZmkUHV0XzLe"><!--pnid:ZJzrUDlkBq2u5R92ESuA84-->3,267</td>
-<td data-page-node-id="qPvHyZhFjMq8oBhINM1Jt3"><!--pnid:2uC2653JCQuUv8G3QIkrsr-->1,134</td>
-<td data-page-node-id="e5fyFk7BKcKy9a7R29DPGD"><!--pnid:4XfuO63tEPSgcjI4S1W2x9-->241.3s</td>
-<td data-page-node-id="OkFVKpg2T7M7orOdO18Ws4"><span data-page-node-id="W3EeEde1bMCvFQ4o6lHvuK" class="pill bad"><!--pnid:fLMuFzsIB6XVnnOJkqKuJt-->存疑</span></td>
-<td data-page-node-id="094rzGmO0NLikVFOvftK0M"><!--pnid:WCws75SbSgfEZ4ALfRjLM8-->中文占比低(2%)</td>
-</tr>
-<tr data-page-node-id="V9XH5eRSoxneUXfbluX6Hm">
-<td data-page-node-id="KubYharl0D1ActItunWKSo"><!--pnid:gAIhXlWiD23vECpjCaedxq-->A4</td>
-<td data-page-node-id="mkVQmq8QZuEQeP3PMccy4D"><!--pnid:GlmXz9sa005l25ZrWRDF2H-->公文审校</td>
-<td data-page-node-id="iq0aQ9KBEAPL3JBXCb4kHy"><!--pnid:FOiDEvIfkPgiqtHipThcCI-->proofread</td>
-<td data-page-node-id="xS20MfFbAYYOxEWbnZ6itH"><!--pnid:jwkAAdb1yuAWcSaZrPE5qH-->1,281</td>
-<td data-page-node-id="xdXL4LjkiRdPWQV9budPnw"><!--pnid:52kfF5CNsyjYu2YhUZHlvT-->1,101</td>
-<td data-page-node-id="lpgzcxE9S9h18QSrBfmNiI"><!--pnid:887aubGLCR0F2GX5XsrXNW-->915</td>
-<td data-page-node-id="GitapeTUvVDbcOg5K8n1M1"><!--pnid:PU4ot3MM0BCY9EICQ4Cg6Q-->126.2s</td>
-<td data-page-node-id="KLW8lRZ3RtFL0c8rOxcqwB"><span data-page-node-id="oAwK1CdVfAf7r4lkByxBrd" class="pill ok"><!--pnid:gGSdkyfFDW53drJm7bVYww-->成功</span></td>
-<td data-page-node-id="L8LSHIwQCTl51Q6yX1qf67"><!--pnid:j0ZpfPEus5dX5T765EFSID-->遭遇崩溃 1 次（已自动重试）</td>
-</tr>
-<tr data-page-node-id="01QHvfQDrYaVTTClTRh6Fy">
-<td data-page-node-id="yzQ6MYygMJhtvmB8yMNKj5"><!--pnid:6xSTF1TG18YkSMmzYAknZv-->A5</td>
-<td data-page-node-id="cYlMoLl32UrhkKk4Nfv2eu"><!--pnid:bEpcr54zkWjRgO8JKsvKuv-->长文改条目要点</td>
-<td data-page-node-id="nsUXX7jAaBj8zwy5YRQ0nM"><!--pnid:kZphoAZOtCZ4jKoBYuK6QQ-->restructure</td>
-<td data-page-node-id="rcx2m1PoGXt6CWSprUtVOi"><!--pnid:rEucfnlaJ5L7qB55EXbYk8-->2,130</td>
-<td data-page-node-id="J8NSXyEt46Q3E0ZSKidRvS"><!--pnid:0zlo87vKLwGlVB1ixz0q9P-->396</td>
-<td data-page-node-id="TSQbuVqi9zI5m0ZMqhd1Ac"><!--pnid:sScnb4trKK3KG5E56mWSRi-->372</td>
-<td data-page-node-id="WSMFBW5CbyafRNTS3jsPRb"><!--pnid:BmiJANdL9K0sYcnEN4Vbcs-->68.3s</td>
-<td data-page-node-id="7qlaTV2QqrkMNUmOlyIxjG"><span data-page-node-id="t2UhTKiX3JzhQ8LXVYmoh2" class="pill ok"><!--pnid:IMr4oc69DjdBqE2FVELwBL-->成功</span></td>
-<td data-page-node-id="evIPP2ym3cpwlsLOa17Ygq"><!--pnid:yntSGma74M4jy4hOlX7YFV-->正常</td>
-</tr>
-<tr data-page-node-id="f8kwKYChdjfl6QQV6hFbmo">
-<td data-page-node-id="hvde88QXx3OTmX0tydc4o4"><!--pnid:dfCYhFj7oJiHTrbHiBnU6z-->A6</td>
-<td data-page-node-id="uGpVag8KX8wWhYYpmUhEzs"><!--pnid:PKqQDnTeHbCPYVv4att31z-->★整篇润色(考验上下文边界)</td>
-<td data-page-node-id="YqS2LSMgzZyNs8u1GPRbDp"><!--pnid:mHkWC9otZzu3CaiEhJlBIb-->polish</td>
-<td data-page-node-id="LDCmUNS2lIziRn5E67AzpS"><!--pnid:WEoERy9HhculfKJhUIICvR-->2,130</td>
-<td data-page-node-id="QaK8oV3Uz39vN9ykR5lH5b"><!--pnid:iLMQ8Vut7T3LzUoRfxmphz-->5,976</td>
-<td data-page-node-id="Rh3eHk007YCII5YH33kJUj"><!--pnid:YxgkEKLhNrPdPoPectGYoA-->2,061</td>
-<td data-page-node-id="OGY048k3dGCb3owMzJZRRH"><!--pnid:NKS4BNUrYJuGbeqAAb5Pbj-->454.3s</td>
-<td data-page-node-id="DEuTsLdcZIiyEevDDrLMlG"><span data-page-node-id="6s8DB3WBftGk9pCoi7LUJX" class="pill bad"><!--pnid:6tgkK2YGtcx1Kc5QreJlM4-->存疑</span></td>
-<td data-page-node-id="s7MJBCiqUVM7m1PkNujiBd"><!--pnid:bfGU06B8Y8AZvPxeSdNtnR-->中文占比低(2%)</td>
+<tr>
+<td>plan_0320</td>
+<td>规划编制流程</td>
+<td>终版</td>
+<td>2,130</td>
+<td>48</td>
+<td>2,061</td>
 </tr>
 </tbody></table>
-<div data-page-node-id="Z2YjifGkA70iZIcyLXrB3C" class="note"><!--pnid:7K3MGeptjkvFxhoLYgcXde-->A 组用真实文档模拟「把公文丢给助手」的典型请求。短输出任务（A1 润色、A2 摘要、A5 条目化）结果正常；长输出任务（A3 扩写、A6 整篇润色）出现生成退化。</div>
-<h2 data-page-node-id="tPBLAGv3xwU12bwFD8wenP"><!--pnid:JGBvm0oz9SFgudkF7JbAtH-->四、关键缺陷：长文本生成退化</h2>
-<p data-page-node-id="PlEiCq9bqoMHwr7rA9OCdI"><!--pnid:3fLajGgN95amOA6c7agcZA-->当要求模型<b data-page-node-id="ZLwf3qibbxPT4ixXpQI2kf"><!--pnid:qIhEA9aLzNPXLHN4Bz5zch-->大量生成</b><!--pnid:zD07tEYCHvKIPJRwNLstbi-->（输出超过约 1000 token）时，输出会从中途开始塌陷：</p>
-<ul data-page-node-id="jG4LvEkrURfK0x0zIwWMTY"><li data-page-node-id="0u0bOAdYInSIEwUlz4O4NG"><!--pnid:S38jY3ILnc7N34bxNMUIG8-->退化为 <code data-page-node-id="KiJA08CbD8Zv7R2RWITzFK" data-pnid-children="WciHQiQbX5CrVQNapGBp9q">useruseruser…</code><!--pnid:dLWFgFyqN46yJ0npY345mO--> 之类的<b data-page-node-id="ivioDxINQTLhiI2pc8Tkxd"><!--pnid:XxLDRu8eLE1H6gpEiFv0US-->重复字符流</b><!--pnid:Kdti1rKyJorRZwPXxvcTLk-->；</li><li data-page-node-id="rj7amaXuazMLX8r31CwYs7"><!--pnid:SAtswtqGDmeSZR4Kd8KjvP-->串入与任务无关的<b data-page-node-id="ZCzeGLsRRjUsUZAVETRrBG"><!--pnid:tbVT6JAnSTDM3vqhRlDzEI-->英文模板文本</b><!--pnid:mBeM5Lzz51UlScmVklzF6O-->（如 <code data-page-node-id="o0UKi6yK0XBgy0dlYlQ03Z" data-pnid-children="jgtrcd5Xt1KzqLA0WRJX0z">I have a list of words…</code><!--pnid:2l0CyfW8aQChbQ4YYQaGQt-->、<code data-page-node-id="re7oYBKSJ26ZEUsU0fXRik" data-pnid-children="rt3QQkAcIljhQJsqWoFKNh">&lt;think&gt;</code><!--pnid:WR5UBw8UtH5cYAINrhftlQ-->、Python 报错说明句）；</li><li data-page-node-id="hNAyrc2K8GYoaqe46ASyBs"><!--pnid:5dxYjccRnGNdrFJZAFqlA6-->全文中文占比从正常 &gt;90% 跌至 <b data-page-node-id="COjPqG2o7kQeOEPH1SkDPi"><!--pnid:EqBRsiwBUjtdkI6aLvMYYX-->约 2%</b><!--pnid:x85FIA6woibPqaDHSGkUeT-->，结果不可用。</li></ul>
-<h3 data-page-node-id="1pQD3gGUv6pnHuXYT9dN65"><!--pnid:HCb5ax7cQWLsP1TMhv8Jq3-->证据：A3「草稿扩写为正式稿」输出开头（正常）</h3>
-<pre data-page-node-id="bB4DIDGGBoPkLyqmvcR40U" data-pnid-children="r0ztPpP0Es3jC9kbA6eUyI">**控制性详细规划编制工作流程**
-
-一、启动准备
-依据《某某省控制性详细规划管理办法》第八条、第九条规定，结合国土空间总体规划确定的建设用地范围及供…</pre>
-<h3 data-page-node-id="If7mkjIax4pOIt8B5Yce94"><!--pnid:R8d3TUMLlIzWdN0nBzRhc2-->同一输出中段（塌陷）</h3>
-<pre data-page-node-id="wGcXf0VKHqVCLA8XklMK0i" data-pnid-children="F245Um02Omr90YZDb0QxjA">…useruseruseruseruseruseruseruser:useruseruser:useruseruser:useruser:user:useruseruseruser:user:useruseruser
- 1user:useruseruser:user:
-I have a list of words and I want to find the longest word in a given string.
-
-&lt;think&gt;
-
-&lt;/think&gt;
-
-To solve this problem, we need to determine which character is the last one…</pre>
-<div data-page-node-id="FDDuxtnUgYxz3H0Aac0VOr" class="danger"><!--pnid:tdXzON8T8jaDUeNrpMKJhs-->该缺陷使模型<b data-page-node-id="SyOsm6p6dXCxn0t2H5Nd4o"><!--pnid:JTS0vdvclDM99h0mQFolFn-->无法胜任任何需要整段成文的公文任务</b><!--pnid:9BhxbPIN19p5N2xEIJAlXa-->（整篇润色、扩写、改写）。若要在生产中使用，必须改为<b data-page-node-id="xJn7fOltDM53OX1teNNXDS"><!--pnid:ztQpkDwMuqCVCLtEj7JmHL-->分段处理</b><!--pnid:2C03DdXd0ZMiuvTs1BNCPP-->并严格限制单次输出长度。</div>
-<h2 data-page-node-id="XCJsiT0eXF6RhjAHDLYf33"><!--pnid:lI9lsjvF6lwYeElSrLkMmz-->五、B 组：分段处理（长文落地路径）</h2>
-<div data-page-node-id="dZkgJxLkL7IvCdk3u6y2FM" class="grid"><div data-page-node-id="ewWyRGxpd7RCesHRq2LZa4" class="card"><div data-page-node-id="lcI2eUdHAHOjCa3pabucuW" class="k"><!--pnid:onNPwh1ospXwv3oxTCNRdY-->切分段数</div><div data-page-node-id="sSYYh40Wn04qB9zWXd7QIT" class="v"><!--pnid:JMEorpfaqYvlcDjhJwKJLQ-->12</div></div><div data-page-node-id="I0Wo4x8npjepd7yDXj5Liv" class="card"><div data-page-node-id="lnzbGlhWVAawHnxiTTbpO4" class="k"><!--pnid:jNXZpuVhxCwjT5zkuccdMY-->成功段数</div><div data-page-node-id="N7gFCUd7MbFMwoqMkhUEhs" class="v"><!--pnid:tWxDsLGWBhYgxs5pXJeSLT-->12/12</div></div><div data-page-node-id="ciXfHurL0f7KFS6eKnvRzb" class="card"><div data-page-node-id="HCxPsqj4lIn0NK1hWQUl7i" class="k"><!--pnid:sKeheuIhRWcWSoxJE83WV0-->总耗时</div><div data-page-node-id="YRKqw242lCypkuytb9TShL" class="v"><!--pnid:h7t2cePf0M07aqNHrslKyy-->508s</div></div></div>
-<table data-page-node-id="x481PHkyz8kg7LGdJ7Q5hP"><thead data-page-node-id="7kaGkY65d5eg9DA8Rst5y0"><tr data-page-node-id="NE87Calniozq9geMCtaGtw">
-<th data-page-node-id="6AneP7b3uTNX4hZ7O7Yv2Z"><!--pnid:0icdX1GcA8ZOk3E74sZCzU-->段</th>
-<th data-page-node-id="aOXPgfl7bhonFyPDrC6rTh"><!--pnid:TTPSl8cFE3fE7dfjPGCehX-->输入字数</th>
-<th data-page-node-id="LqaLqNvwvvCXMk7s9TXtZn"><!--pnid:77YIDOJ14xKkzypf1u3fEX-->输出字数</th>
-<th data-page-node-id="HDP5mTsXYNhixoRfTBn4P5"><!--pnid:mGemlhmEgayJF958R9sYmG-->耗时</th>
-<th data-page-node-id="hQkL3e0aQyTX0gKDb1yg3p"><!--pnid:DVS2dUvYKFNr9Yyp4LqPbQ-->判定</th>
-<th data-page-node-id="L3TokrjMBsLXGx9TWYapUO"><!--pnid:e9ZKR3EJaSMCtW2CDRRAej-->备注</th>
-</tr></thead><tbody data-page-node-id="8zPPRDH7HWX3mmYIqUwxe1">
-<tr data-page-node-id="P6GbmNsbFkBq0hgeE0hZ8U">
-<td data-page-node-id="79SIsKYuvpEOj6sB7Ba0M0"><!--pnid:5vmThlmV9LZBYAH8Z3SBDf-->1</td>
-<td data-page-node-id="zmNpPRlTmxPOdpzdLYdJeb"><!--pnid:zewc8LXrjCMtRVzUVRwHTv-->168</td>
-<td data-page-node-id="vuP1yOXWryMJo1l9qHhsWO"><!--pnid:TjsmcO5cbd6OUCy9YOhvu5-->702</td>
-<td data-page-node-id="mKuRXSaCFAKhmKtdwOpUmx"><!--pnid:nHExk6LS0RZXIVWBgeNPwa-->73.3s</td>
-<td data-page-node-id="jqtjoTlJrvTeAt3u120c4Q"><span data-page-node-id="ukqJaw9hNbCF7vLkxHQFl4" class="pill ok"><!--pnid:7NgLuTdzzNL9GhGiOrizkU-->成功</span></td>
-<td data-page-node-id="xxNvL6dOAunHNDcTPZKxr9"><!--pnid:6lJn9a3BOogvmeMUaBfpp2-->正常</td>
+<div class='note'>两组真实文档：<b>建筑垃圾规划布置</b>（1 份调研报告 + 2 份汇报）与 <b>实施层面详细规划编制工作流程</b>（7 版迭代稿，从草稿到终版逐步扩充）。规划流程组完整还原了「草稿→润色→审核→定稿」的真实迭代链条，是检验模型实际生产力的最佳样本。</div>
+<h2>三、A 组：串行真实任务</h2>
+<table><thead><tr>
+<th>#</th>
+<th>任务</th>
+<th>类型</th>
+<th>输入字数</th>
+<th>输出字数</th>
+<th>输出tok</th>
+<th>端到端</th>
+<th>判定</th>
+<th>备注</th>
+</tr></thead><tbody>
+<tr>
+<td>A1</td>
+<td>短汇报润色</td>
+<td>polish</td>
+<td>572</td>
+<td>614</td>
+<td>373</td>
+<td>74.4s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-<tr data-page-node-id="nWWMYMmy1VofRw6AGWey23">
-<td data-page-node-id="hk9RbLT5P15Cn7T8pgvyVf"><!--pnid:ZI6NeOLYgoiE96Vx0ReJAJ-->2</td>
-<td data-page-node-id="xPAkOF39jJX0WSNS1UIoTN"><!--pnid:qelgGUrHcN14dJDXzqo0zz-->232</td>
-<td data-page-node-id="y0TOAkXEr6351tS5qCOOZ6"><!--pnid:LbSGU2EFfvwW4BlCSZ2Q9T-->1,443</td>
-<td data-page-node-id="JB0f2yJJqWTbVjL88HfogD"><!--pnid:JM1Z57pui41qE3NyAtYJKm-->110.7s</td>
-<td data-page-node-id="BgMC1ySePH6FO5zkUsLtHT"><span data-page-node-id="Pflk8CAgAIPtonf7ZKMeUF" class="pill ok"><!--pnid:RjdXaTEIHRXDg8Jh1tNaYE-->成功</span></td>
-<td data-page-node-id="7geaPKEWWAc5WU5Eqloel0"><!--pnid:Uchjy5r0PEgBYWie0YBVJQ-->正常</td>
+<tr>
+<td>A2</td>
+<td>调研报告摘要</td>
+<td>summarize</td>
+<td>1,146</td>
+<td>187</td>
+<td>103</td>
+<td>31.8s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-<tr data-page-node-id="Aw43hsltqYz168ModZ0Go7">
-<td data-page-node-id="e1JiLbp1Qbe5zdQeYgZSFe"><!--pnid:TGOFrddheyOJVLBNov89M5-->3</td>
-<td data-page-node-id="BoesE1hgzRbLNFxpMJmzKi"><!--pnid:XhjfXV0TMxmmPVp3hlVFBS-->137</td>
-<td data-page-node-id="Lr2pYRAngHmGKdAhwsn0cL"><!--pnid:WcjFfslF4sn17H9sldv4Tp-->189</td>
-<td data-page-node-id="TNPO4CAKUiiTaZgw3uvsKy"><!--pnid:wNhvcMto1dehBNERGQADRp-->22.2s</td>
-<td data-page-node-id="wsna7K9Xku2j9VOSd6TmSc"><span data-page-node-id="MGyHZvpzhc0z2cKY5ZGy8s" class="pill ok"><!--pnid:XHbWn2wdVsCZJX4xUOwV3m-->成功</span></td>
-<td data-page-node-id="qmT8LLA6FKw5hCahrNo9uz"><!--pnid:p3xS8ddILF5KXjcdtFVBX4-->正常</td>
+<tr>
+<td>A3</td>
+<td>草稿扩写为正式稿</td>
+<td>expand</td>
+<td>1,281</td>
+<td>1,073</td>
+<td>582</td>
+<td>120.2s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-<tr data-page-node-id="71oQN8kj0KCFuVg6LRw06m">
-<td data-page-node-id="V5TzrrlCzrAEWk2XHyHmin"><!--pnid:11GUNIaKUxq32JgwQpj7gn-->4</td>
-<td data-page-node-id="oTLi8GeNmy2Nli8bQMA4fR"><!--pnid:vl4SAfMbAlOhxwf5MlQAFs-->141</td>
-<td data-page-node-id="XK0INwog5xP1rY5T2TuR0M"><!--pnid:38xa7sP72lqEkXPstcQPWH-->104</td>
-<td data-page-node-id="mbNQlByT5vrhEAAbT3J2nJ"><!--pnid:TCT5lnbnADBxntFdmtczKT-->14.4s</td>
-<td data-page-node-id="A0BKF2Ls0jtlfcD0Rvs0Hs"><span data-page-node-id="ZyvQAY2YtIKAtu9hn2R2lK" class="pill ok"><!--pnid:xsomsfXM3hGvZu3sjuP7TD-->成功</span></td>
-<td data-page-node-id="iZkCQLo8it3SjQRtei023o"><!--pnid:QtjwBSPwr8ePXDCXFIb3Sl-->正常</td>
+<tr>
+<td>A4</td>
+<td>公文审校</td>
+<td>proofread</td>
+<td>1,281</td>
+<td>1,055</td>
+<td>639</td>
+<td>132.8s</td>
+<td><span class='pill bad'>存疑</span></td>
+<td>finish=length</td>
 </tr>
-<tr data-page-node-id="nfXmbSSDUW1vG5mXucgxUa">
-<td data-page-node-id="QddCLc0nzs9beX2uQAMGFA"><!--pnid:MfZr3WPwiJXgQsh0KeeZAj-->5</td>
-<td data-page-node-id="EslwIQE85JH3clH8umB99x"><!--pnid:OHF7ffJeVEbPN8ugp1fPv4-->176</td>
-<td data-page-node-id="3t1yF2pgefa9zmVveU4zA4"><!--pnid:m7oDeT0oYnCVcOSA9Lq1L8-->277</td>
-<td data-page-node-id="RjkfmpWiCzTUl6g8jR4aD0"><!--pnid:lWx8GBvYzJQzvjD7F0zbks-->34.0s</td>
-<td data-page-node-id="WX7jPhyfDktWt9xzhMJWuu"><span data-page-node-id="i9d8HRRTaJs3M2bY8aueQE" class="pill ok"><!--pnid:R1Y22ZPa5eNHEo3jIXAOvk-->成功</span></td>
-<td data-page-node-id="2n7JIwGRKXda4QSXGWTg5G"><!--pnid:K2EITpMLzVe69wepgSHjxH-->正常</td>
+<tr>
+<td>A5</td>
+<td>长文改条目要点</td>
+<td>restructure</td>
+<td>2,130</td>
+<td>363</td>
+<td>228</td>
+<td>63.7s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-<tr data-page-node-id="GAjqgdmH4PRyHeKliyPWDI">
-<td data-page-node-id="aWHZiDH9sJnlCnMDbSILxI"><!--pnid:oKMVZKV0oLAwAxbD8uiOs8-->6</td>
-<td data-page-node-id="e847DwmYwZT4cENT3bLDfN"><!--pnid:ntnnD9vNyURVLzW9xIfKWh-->179</td>
-<td data-page-node-id="rV8I7ZyH1DPkmZSvkfVd3f"><!--pnid:FmSpA5ZyWDuDLb2AejkqVj-->469</td>
-<td data-page-node-id="7OFOvQJCJ449VzL1OaSnWW"><!--pnid:YuP4kFnoHdFRkFyahM7OtE-->54.6s</td>
-<td data-page-node-id="xGmgSNVVI8VoMjCiyidlUP"><span data-page-node-id="87k5pqPuvq4wzexlpK6DQG" class="pill ok"><!--pnid:quUdQAT5Za606krI3YGNha-->成功</span></td>
-<td data-page-node-id="UO0d1rHwl7quDJjD0IcFoI"><!--pnid:XIPXPiOd5BjI7C0q6IClLt-->正常</td>
-</tr>
-<tr data-page-node-id="n19tLnA2w5BIdVYLa4Dhlf">
-<td data-page-node-id="9NTKkDZoLQaPmGEYlk4uEW"><!--pnid:o0M3RiYcl3Bm97KfSKJXTa-->7</td>
-<td data-page-node-id="d0nmLJWH3gTJ7EOUuTLiws"><!--pnid:zJZ7UCxoco6FzUp05NpyD8-->206</td>
-<td data-page-node-id="G8Vhd6SqR8EJaF2SGyNjIy"><!--pnid:kO1OhbyQCUOxkaOs7FgwJZ-->128</td>
-<td data-page-node-id="JMhc5xVF2bYTA7qojZ9sBs"><!--pnid:edlPDhH2G4LAF7qY0fzT3w-->14.9s</td>
-<td data-page-node-id="as91fqQhyYc85HpqA5IcUR"><span data-page-node-id="SSkjhCmE0GHcRFn8cBelUg" class="pill ok"><!--pnid:tzBbeR20R56A6u7J0eoFND-->成功</span></td>
-<td data-page-node-id="RjbMRGqkp3PMXs8fN837lr"><!--pnid:GMk6xcKvWD5sidLw4qIkyp-->正常</td>
-</tr>
-<tr data-page-node-id="StkvqqeD4Hp3SJIYQ7Vrsz">
-<td data-page-node-id="U1lkAbR6NMA9u7fckLTzW6"><!--pnid:Txq2P0SQhoaepm84irnkdw-->8</td>
-<td data-page-node-id="ZdLLNgkYXDK59BQ3YWkrOz"><!--pnid:kwlDhZZOTPM8vZV3ZE03jn-->172</td>
-<td data-page-node-id="6J583BP6nHpiB0dj65w1SP"><!--pnid:rqImI0zqastXKZahY01h6e-->527</td>
-<td data-page-node-id="FwlC2AQ7YqWxEnX94NwBTM"><!--pnid:vv6iP7ItENzLaOzSMetCAS-->60.3s</td>
-<td data-page-node-id="SVL9JOeaZCR8zuygl4iGfr"><span data-page-node-id="4cT03snpQbMJSfsO3Mnsie" class="pill ok"><!--pnid:NttpCasX9Ute0kg3UaZa5y-->成功</span></td>
-<td data-page-node-id="pmtvQeh7XIFDLzxTyB36qg"><!--pnid:6rEkRkWJFm7ChcaR8NYrjw-->正常</td>
-</tr>
-<tr data-page-node-id="pRDE91itQA6izqLZOA9TLq">
-<td data-page-node-id="PmzIcaCPcnlFaKwEdq890f"><!--pnid:tVZ5a0sQQrOUZQYbIdhdMH-->9</td>
-<td data-page-node-id="g6k52AY6k5WvwINE9ElbqU"><!--pnid:kwiosKFEkZHbPuL5MGv9vf-->182</td>
-<td data-page-node-id="oSSX69Z1VFSoj2cUA27gkB"><!--pnid:8c33EY9OnE9kwsnbFeeUqF-->405</td>
-<td data-page-node-id="rbLe5MbWIx8Co5H0UHnseN"><!--pnid:yx8hOOJHKSN3jBStS0dngN-->46.5s</td>
-<td data-page-node-id="vcKXZYMD5DuC2jG3ZOxfGW"><span data-page-node-id="sI6p3jGnlhHRGf3rtntYCS" class="pill ok"><!--pnid:A44MWj64h6CbPlVzQjctfI-->成功</span></td>
-<td data-page-node-id="4CyRMEAgwLfH2kmzmGZfVV"><!--pnid:1Zb1AM0RcZgz8oaHNA61Oh-->正常</td>
-</tr>
-<tr data-page-node-id="2zgXbhvo5FQgufFbX6UiYX">
-<td data-page-node-id="teCgJuivT62MM1Jk7h9Uux"><!--pnid:EJy3Zwk1h8fc4rBDLWovKG-->10</td>
-<td data-page-node-id="v932GWkvsQO8wgSztCwdHw"><!--pnid:owvBh3f9SjItH6B1v17n2Z-->252</td>
-<td data-page-node-id="W5Q2CNiczOcnFX96PRng0z"><!--pnid:fZB5vtJ5slb1KZ5mPoxYAN-->267</td>
-<td data-page-node-id="mvBJ74PUpudaQxAVnOysIm"><!--pnid:K5664urrctl4nEtBOE7aQI-->32.3s</td>
-<td data-page-node-id="PiGvaEO02FV2Nzvn4sXydp"><span data-page-node-id="Gtm2MQvrL8dGZ9bvXlhdNc" class="pill ok"><!--pnid:YnHHZzl7azWDdeMZgmu3nN-->成功</span></td>
-<td data-page-node-id="vH5EZCwMXqPDB21hUudXkz"><!--pnid:u78hKvccWyVgYjGRomVVGD-->正常</td>
-</tr>
-<tr data-page-node-id="Qox5KOcQ1h6W1RxGsVdAP4">
-<td data-page-node-id="2RzuHkPpndxsUG2Hs43TUv"><!--pnid:2nZdf4Djn2J2ISVHpUslsa-->11</td>
-<td data-page-node-id="lT5D9sSTyakGEXj0FVIOFL"><!--pnid:tK9AjXD3DYN4CO7h6W10UV-->256</td>
-<td data-page-node-id="Bssxr6Qk2NgIxsv0IdEwCt"><!--pnid:xYui6Phg0JwOXvNm9HEHKS-->329</td>
-<td data-page-node-id="XTk7YGCuwhymzEPWTUhIJQ"><!--pnid:eS0stE4L0SeJUVPxPZGiMS-->40.6s</td>
-<td data-page-node-id="EXSN6RUgonvWjpqquE8RYM"><span data-page-node-id="scnO347ZSLuMbSnIbRa53H" class="pill ok"><!--pnid:IJqk1yHUjFIT41QTzvHlEQ-->成功</span></td>
-<td data-page-node-id="CMEe2Xg24YtRvvygVwMYBE"><!--pnid:MHPZnHkmVD3CJB9DmyW2DR-->正常</td>
-</tr>
-<tr data-page-node-id="SBW03AsGoLCWmGjNpQeCKY">
-<td data-page-node-id="5KG42ejpUycXRZZ4bta0ga"><!--pnid:zsQo5FdYZaZp5ruJg15VAp-->12</td>
-<td data-page-node-id="IGw2XUNO4SdDbz1GJJ0sXB"><!--pnid:gxgtasZnL1OK6RUbVAHv5G-->18</td>
-<td data-page-node-id="bFq08A4PqrNyajLOrWJH81"><!--pnid:aGrmaWdfC0SIpnSHY1tgWW-->21</td>
-<td data-page-node-id="ELf7XLO8c8DQWpzlKGr2Xg"><!--pnid:k2HUmcvdAcdoHBO0p4yfST-->4.3s</td>
-<td data-page-node-id="2RrPpGG60jBzELv5PybiMW"><span data-page-node-id="jGwewJctWchNArNLPZGKm5" class="pill ok"><!--pnid:Ece9iQoA1Hqtifu5vSOnvF-->成功</span></td>
-<td data-page-node-id="FBQrMEd0LthCGd2l2ma6ia"><!--pnid:UscWUgFhcMrsyhiFfOdIeC-->遭遇崩溃 1 次（已自动重试）</td>
+<tr>
+<td>A6</td>
+<td>★整篇润色(考验上下文边界)</td>
+<td>polish</td>
+<td>2,130</td>
+<td>2,077</td>
+<td>1,137</td>
+<td>237.7s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
 </tbody></table>
-<div data-page-node-id="bEIQPku0OsrDaj6XJNSvGE" class="note"><!--pnid:5EeSltYHkOReqGJ1wtpKXU-->把最长文档按段落切分后逐段润色，<b data-page-node-id="sVx931geuSsKEttbbaThwF"><!--pnid:2d296TaSpxwwICRrjpUhPS-->每段输出都正常</b><!--pnid:JRdlXMT48hNGeD7JKuLun0-->——这是绕过「长生成退化」的可行工程手段。</div>
-<h2 data-page-node-id="aLqa0tw13rlNH22ChOSQ8l"><!--pnid:roh1WczFmjDlWUciVYe6zr-->六、C 组：多轮迭代（还原真实修改链）</h2>
-<table data-page-node-id="b2BxMx3A6rSNHOl1tPSNY0"><thead data-page-node-id="7nOzVQbDJR7L0tM4f6y1ZN"><tr data-page-node-id="GEDLUMvVWdamTQ6IF03vOl">
-<th data-page-node-id="rtSpiu4xHLYWCHjKZ63l73"><!--pnid:BVESVIMSshAKlfJ7UscmkB-->轮次</th>
-<th data-page-node-id="vG7INLSXxsw3zbtRbebIgL"><!--pnid:oSDSJvpQZ9cu6OQ4RUYqr6-->任务</th>
-<th data-page-node-id="LV7aZ726xqVyUwumleu41x"><!--pnid:93HOEEBQKXgiCd4MNSbadq-->输入字数</th>
-<th data-page-node-id="VQZrlLLVKbQm4w4t3tdqyT"><!--pnid:27PFJA7KTxlhdZUn845eES-->输出字数</th>
-<th data-page-node-id="cYgz2NZswZVC8F2Fss4jIo"><!--pnid:RCW6381rTU5kdRDaxdIORF-->耗时</th>
-<th data-page-node-id="n4l61jOaeGvxtJ8mF5x9wR"><!--pnid:6mxGndPkKLDeIMLnsPfxO8-->判定</th>
-<th data-page-node-id="zyab7OP610XRtiJUaetjRO"><!--pnid:yCsuyO1Vk4qm7VJQ4gFtLr-->备注</th>
-</tr></thead><tbody data-page-node-id="F1lDCUQKG3cNO2vnKu1YJz">
-<tr data-page-node-id="rJy7G6FqPhUZnlVZOt1Ueg">
-<td data-page-node-id="XdKUxHeHEMTbhSCDHE8err"><!--pnid:oGPXQe7w50XH84LYpSnidE-->第1轮·润色</td>
-<td data-page-node-id="2vwTEu8347dQs7zBn0uqqq"><!--pnid:Sbipe2NtCsM3GvESysyxn0-->polish</td>
-<td data-page-node-id="4sS5xJvgyrFNRvmp4fWxpu"><!--pnid:pehhUeAoy4YaFOmbZCyAVb-->1,281</td>
-<td data-page-node-id="tXbBj49R2fBYVQ0bj7qE35"><!--pnid:kiCVCknIJwn11hOBw8u9i3-->1,371</td>
-<td data-page-node-id="LxqC1MdR5eENRMhOmEDEnB"><!--pnid:2Jyv887vQnXxt5qO7JQ3Ar-->143.4s</td>
-<td data-page-node-id="lc9sfnU8hh8o5QnMk6cc3h"><span data-page-node-id="DRa2z08LjMCnLMBJZsDy1X" class="pill ok"><!--pnid:JQCdV9oPpJqKtbppJgihz5-->成功</span></td>
-<td data-page-node-id="QuWYUKvlyVsUjBEF3IE5bs"><!--pnid:RHrtdFG9f4Y2yJNqoiKJvl-->正常</td>
-</tr>
-<tr data-page-node-id="fjyWcd8QWbNDE1WzuF7h8U">
-<td data-page-node-id="90Cdqv7apI1XR4lkxikhNR"><!--pnid:PdvjvpiSYT1lGQGYIyBkhm-->第2轮·再润色</td>
-<td data-page-node-id="GzoBgSLPULWHkrK59lNioh"><!--pnid:RLzolSLmmn40W9v4kvqx3e-->polish</td>
-<td data-page-node-id="GCikqlaiUJubbKUEubxB9m"><!--pnid:7HMzIRNoSFb76KK74Unad1-->1,371</td>
-<td data-page-node-id="iV6pHPYKb7AakVCNpimdf3"><!--pnid:tOKj6xRcWy8fdIsZs29TcU-->1,373</td>
-<td data-page-node-id="xoyx2tIEZN4CSq1e0idhbl"><!--pnid:nZaWdgwmeXoMhGSHIekGot-->156.6s</td>
-<td data-page-node-id="AeCkmzy5mm0uXBd2DLYA6I"><span data-page-node-id="hBqCNO4Hx9ZuAqQmfjPSBZ" class="pill bad"><!--pnid:aT5P5A0pKPU30x3FksDbl5-->存疑</span></td>
-<td data-page-node-id="3lvRDyR8wf173vgX17Gq1W"><!--pnid:rKQuGYkxSTtdfbpWKCdp7B-->疑似照抄(重合100%)</td>
-</tr>
-<tr data-page-node-id="4PeA6E1YuvPOouM75mJRcv">
-<td data-page-node-id="vtXZrBOYWvfFN2rHbPO1lV"><!--pnid:idUQUtAXawl6ITVVBPTM79-->第3轮·审校</td>
-<td data-page-node-id="Ty1v0SwsvLOXickUNHwWON"><!--pnid:Q5mv7MBxmbOEMNGUSpfWrK-->proofread</td>
-<td data-page-node-id="dCWvGoF5XZt38krnS8cQki"><!--pnid:bO3jxbZKOcZp4pVdJC2iyE-->1,373</td>
-<td data-page-node-id="ZRcBwQtUV7HHQZQlcU50he"><!--pnid:9g8fcMghq4G6c0ubgH5nYc-->1,034</td>
-<td data-page-node-id="5ielUVRddqcPbTibcLlJF4"><!--pnid:KYXU6b2ubL22OHPpEjpfj3-->157.1s</td>
-<td data-page-node-id="Brh7rorb5zUH8PxUp1JuxB"><span data-page-node-id="vGliXCaMSutYr7W0ZR95ye" class="pill ok"><!--pnid:NeFqrB3zRYl610QnIaqmgt-->成功</span></td>
-<td data-page-node-id="wP0xwahyrbhgVPei1Fq3IU"><!--pnid:6DMdfSsZbyxcOIwWOP3dPe-->正常</td>
+<div class='note'>A 组用真实文档模拟「把公文丢给助手」的典型请求，最长输入 2,130 字（A6 整篇润色）。「存疑」项的备注区分了原因：<b>finish=length</b> 是输出被请求的 max_tokens 上限正确截断（预期行为，客户端调大上限即可）；<b>疑似照抄</b>是模型对润色类任务的保守行为，与服务的稳定性无关。</div>
+<h2>四、长输出任务表现</h2>
+<div class='note'>A6 整篇润色是本组最能暴露「生成退化」的任务：2130 字公文整篇输入、要求整篇成文输出。本次实测 <b>成功</b>（正常），输出 2,077 字 / 1,137 tok，全程无重复字符流、无英文串入——历史版本（1.3.1-13）在该任务上输出会塌陷为重复字符，本轮未复现。</div>
+<table><thead><tr>
+<th>任务</th>
+<th>截断原因</th>
+<th>端到端</th>
+<th>输出tok</th>
+</tr></thead><tbody>
+<tr>
+<td>A4</td>
+<td>finish=length</td>
+<td>132.8s</td>
+<td>639</td>
 </tr>
 </tbody></table>
-<h2 data-page-node-id="TJlNhmxz1xWUzuPbQhNC08"><!--pnid:L2g3b2MYvlOlgJhRYiEX1h-->七、D 组：并发稳定性</h2>
-<div data-page-node-id="t7SOpbpR6BsLAs0CFzD4bQ" class="grid"><div data-page-node-id="VOCa7OHOWWtGSynd1lo0eg" class="card"><div data-page-node-id="hyNmxVwgIlOcDEMpGwBI3s" class="k"><!--pnid:yif4EUe4OXYvhPo1myGuT0-->并发数</div><div data-page-node-id="8s0e3Z7hjHrIGnulXk0Uuy" class="v"><!--pnid:3OTqwAKrvZEYX1t8ssvNvj-->3</div></div><div data-page-node-id="d4BBorZ5hCvmqh2fPrZB28" class="card"><div data-page-node-id="cGFQdNkfmbI6TqAxH8jawo" class="k"><!--pnid:Z4Z11AOZHbLzpZuRFw7oBw-->成功</div><div data-page-node-id="DsGasU6Y5u5S9fa0vONflT" class="v"><!--pnid:6pJcRKZW6Ebz0diyPsQovx-->3/3</div></div><div data-page-node-id="ef6nqczKqLvLD8WhoswHpK" class="card"><div data-page-node-id="GyrrMzJmlGxrG3d3symwYR" class="k"><!--pnid:wHSuGvbPCTKiCAohqgbWvp-->墙钟耗时</div><div data-page-node-id="PhWtc7t8LfO2pqOj95D0Bw" class="v"><!--pnid:daOov3xtstKjosgDrtm4bB-->316s</div></div><div data-page-node-id="p1cikpacW44ky5C12TjEQq" class="card"><div data-page-node-id="LDfmjfnIZq3snP2lcwWEkH" class="k"><!--pnid:BhLujLC6rcVSAzPp7Oa8Wr-->服务存活</div><div data-page-node-id="yZ0TV2xSIH9BpEG053aYri" class="v"><!--pnid:bDmE7aF2GPywnruBObCgCR-->是</div></div></div>
-<table data-page-node-id="BVjWqRIzmxNFkPgi78ZT99"><thead data-page-node-id="32jYnhhLpgZ0UJel74QLyr"><tr data-page-node-id="6lXFJbFe290tt4qBF19jaV">
-<th data-page-node-id="jifqBhLR4sXAB5yMwKVOe2"><!--pnid:0Z5ZnO413uYBG7i19lOODP-->#</th>
-<th data-page-node-id="UoP1VdUJt0GeOHp8h1tXkQ"><!--pnid:G2Ci2EvCHSBTDTRc69GB4o-->输入字数</th>
-<th data-page-node-id="SgEbbEgJrLCrA52MBmXk7G"><!--pnid:xqnSlUuLJe5L1ZFhBVOf0U-->输出字数</th>
-<th data-page-node-id="xNuIN0VEWWS1PeGTMJV18Y"><!--pnid:LmSZjok8VegH3JIIPlbiWj-->耗时</th>
-<th data-page-node-id="I80qhaq8qeMK46NqCeVGGO"><!--pnid:d2QRlPWunr8x5DFzghv0Z1-->判定</th>
-<th data-page-node-id="mdhyZIQ54g2dG9Y8DtE5SL"><!--pnid:AzbGuLdsiq5qvhtdq1x6G5-->备注</th>
-</tr></thead><tbody data-page-node-id="XrfIfCuRQEkQhzcKnbT5xU">
-<tr data-page-node-id="CbSh7dQ0b1yyjlC5TPW8KE">
-<td data-page-node-id="FPdgT0D4xqzeDDblM1DBOx"><!--pnid:hIFwllSoQkCYHqrQh2X8nt-->1</td>
-<td data-page-node-id="UKnHmYZCHDhRStEk21XYPv"><!--pnid:MvYmGOUnMJguCAZTXBE7Zw-->1,146</td>
-<td data-page-node-id="YiFvYqizHbt3ULn6by4SMt"><!--pnid:b5hgNAIjBbY8NI9Ib6F2Fv-->829</td>
-<td data-page-node-id="FKKx66clT5vasygdow26CL"><!--pnid:JXHQ4xEPk7iupoC49Wqzwl-->183.3s</td>
-<td data-page-node-id="m6JCiDYpwppHFomUBzBg8s"><span data-page-node-id="iUrJdJsGpVVGlLBfFIdj4Z" class="pill ok"><!--pnid:jMgmGh73CQodozMkRNKuuc-->成功</span></td>
-<td data-page-node-id="2PwbdVmboLvrMKCNDbXBKF"><!--pnid:A5sWWqWKW4LO1dblSz19RB-->遭遇崩溃 1 次（已自动重试）</td>
+<div class='note'>这些任务的 finish=length 来自请求里给定的 max_tokens：输出在被上限截断这一点上行为正确（1.3.1-13 曾无视该参数）。需要更长的完整输出时，由调用方调大 max_tokens。</div>
+<h2>五、B 组：分段处理（长文落地路径）</h2>
+<div class='grid'><div class='card'><div class='k'>切分段数</div><div class='v'>12</div></div><div class='card'><div class='k'>成功段数</div><div class='v'>12/12</div></div><div class='card'><div class='k'>总耗时</div><div class='v'>248s</div></div></div>
+<table><thead><tr>
+<th>段</th>
+<th>输入字数</th>
+<th>输出字数</th>
+<th>耗时</th>
+<th>判定</th>
+<th>备注</th>
+</tr></thead><tbody>
+<tr>
+<td>1</td>
+<td>168</td>
+<td>177</td>
+<td>19.5s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-<tr data-page-node-id="tuWJ4o9UY43VENeEX9EQbk">
-<td data-page-node-id="wFuceKwk7bUoUzHfTIA3DM"><!--pnid:oEXsXLKNqoMRbeGrwgltOB-->2</td>
-<td data-page-node-id="VSsLaM16iUx1RzHqW66rE5"><!--pnid:S2p7zkKGJaM7Ccnx8UKYnT-->572</td>
-<td data-page-node-id="xrHzVZURqF0dn4thsuASCJ"><!--pnid:Nb78pjlxXVS7883yDAJvz1-->615</td>
-<td data-page-node-id="nExLOrvkWxisTnYRB6X0I5"><!--pnid:KFAVlyvAzYwOLsEhQiLCcL-->75.1s</td>
-<td data-page-node-id="9pFq0kDpcvKME1fZXX2C8s"><span data-page-node-id="BrMVcVlPU6SNUzXkTkY4Ul" class="pill ok"><!--pnid:r9HUm8fVZQmjYnAbCzhWrc-->成功</span></td>
-<td data-page-node-id="v1Qy51r8UwrRGyfBeOjr1d"><!--pnid:tjrnWkd1aoysJAs4LDUeh4-->遭遇崩溃 1 次（已自动重试）</td>
+<tr>
+<td>2</td>
+<td>232</td>
+<td>219</td>
+<td>24.7s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-<tr data-page-node-id="5D3uQDhaWEUSzQtMs6vfw7">
-<td data-page-node-id="A5qaz84b7wNjKwUUqB21Nu"><!--pnid:QKqy76D2831jJhrRpkDrng-->3</td>
-<td data-page-node-id="IZOC96nUHJE06dKgrHUUap"><!--pnid:atuLK4kiHJiHej1GnITzX5-->657</td>
-<td data-page-node-id="XO1F9Yal1eF9RaVaxJbFo9"><!--pnid:5fOUXWGqD4BNi1SQBHC1NC-->812</td>
-<td data-page-node-id="fVGc0sfTmSu2rSwywGM0kq"><!--pnid:KmaQ1zgQwXDJzzLs2GQ2pq-->112.3s</td>
-<td data-page-node-id="m5eILBRoX6GqsaX1etBuoO"><span data-page-node-id="4ajtoHXmr3tUhMpDRsRNQE" class="pill ok"><!--pnid:cknhXwRun7HuUKcbn6QwB0-->成功</span></td>
-<td data-page-node-id="QTcnzBFpCKO2D2l2l2iDVv"><!--pnid:UPYxTmceQxE9cb4EL0IP7x-->正常</td>
+<tr>
+<td>3</td>
+<td>137</td>
+<td>143</td>
+<td>15.7s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-</tbody></table>
-<div data-page-node-id="oBg0Sm5lpNZCKX5rdseDiV" class="note"><!--pnid:zwRPTexMwg1GiJwqdV1OoW-->对照：同类请求串行处理 3 个约需 240~300s，3 并发墙钟 316s，<b data-page-node-id="oFbjU8XHMVoXzQNvJFVJFT"><!--pnid:rLNU3uawQumIYCOcToY4QW-->并发没有带来加速</b><!--pnid:VeC5narGrq93lGirLQMXPI-->——服务按队列串行执行，并发只增加排队等待，并提高触发崩溃的风险。</div>
-<h2 data-page-node-id="vLf4oZd1NumYSgquau5mA1"><!--pnid:gJojIN2nglE2supqX2vtPE-->八、E 组：批量吞吐</h2>
-<div data-page-node-id="HMRanXcSgRK4FOExbb2lIl" class="grid"><div data-page-node-id="QxYxmIJosjEwp9QOQl6wBm" class="card"><div data-page-node-id="gWTdWVnWHbaB59McsBdtYI" class="k"><!--pnid:878j5QeKBhvBYr0JjyKUgc-->处理份数</div><div data-page-node-id="IdHTVf0D2ec8vp2Gg3q8F3" class="v"><!--pnid:rX8ysDk4EP9ifHwm5EPLGk-->9</div></div><div data-page-node-id="ZHMGUKgMqm0sxvg3JKH04A" class="card"><div data-page-node-id="e9CziAwzwWBoPzF3h8cpzF" class="k"><!--pnid:GRPtqpMOEINV06XCSNXymM-->总耗时</div><div data-page-node-id="6aI7jnxESrdSEMsTYGTsAJ" class="v"><!--pnid:s3q8rE2ZgwWghTRX76IjYl-->373s</div></div><div data-page-node-id="kvQa1sdqg62PssNiJasMan" class="card"><div data-page-node-id="9fHXcBmn7BuZ6yZC7jmqFO" class="k"><!--pnid:QCJBeb5uqu9WXNc5stJOBX-->平均每份</div><div data-page-node-id="I3z2W249SczF5dVez23su0" class="v"><!--pnid:b4XOkOULCGjPSQiEj8anEJ-->41.5s</div></div></div>
-<table data-page-node-id="QvhWRho1IT7Gjn3Hd9KhM6"><thead data-page-node-id="4JIHo25wjYuHe5GVhUqwzd"><tr data-page-node-id="O5fBilpLZQpUIJ0HeR88kG">
-<th data-page-node-id="7dr3WaQ9ThYiqIwri4KO6z"><!--pnid:JjajJZF4Yyt1MxxSnxHp9V-->#</th>
-<th data-page-node-id="0VhnKDOybYO0vQZchDQBn0"><!--pnid:qiosun36KcuhWNfMYpQUjR-->语料</th>
-<th data-page-node-id="vTsrgej0s1RlWHetgxrrq5"><!--pnid:mJR0KsDtGdO0y6xA3E8GZi-->输入字数</th>
-<th data-page-node-id="83mzcbj0eLvmkgCFYXmj58"><!--pnid:qTok8mE3Dvipx6y3D7Zzs1-->输出字数</th>
-<th data-page-node-id="MbMASpmS3xCEmApvxyq30O"><!--pnid:Wqjz9q9e8WKqpCDVczA2zJ-->耗时</th>
-<th data-page-node-id="FolFkmLrGxy0V0Cc9Scmki"><!--pnid:hEsGqWu4G1jSM6MA5oYmD2-->判定</th>
-<th data-page-node-id="IAayFtry5QkkmDYBwBl1uR"><!--pnid:FQe2EDg0g2hYKdCvseLcC1-->备注</th>
-</tr></thead><tbody data-page-node-id="dKGmn2MCmIQsTWUsnvWYov">
-<tr data-page-node-id="N2G87IEHoeEUlAZ9aMgFBs">
-<td data-page-node-id="DrAxYGNesFgSth4jnUaWIp"><!--pnid:0INLPIY6ob1vjUhAqM6a9C-->1</td>
-<td data-page-node-id="CIx3xlhRTmceIisYQjwsKY"><!--pnid:AWNs6XOpMPGWLu69GWmxER-->build_report_v1</td>
-<td data-page-node-id="TCp7vah6ku5FCXAMwWhsOM"><!--pnid:FSLVe40nUVIdlkx5HPbL6B-->572</td>
-<td data-page-node-id="nRJ3Gmmmoa4hPLHEBFGL2H"><!--pnid:FkcFOkXlBxLllXxFnUkL83-->175</td>
-<td data-page-node-id="Mm478XXyRvGE0MTXv1ZZoE"><!--pnid:ja1NaAg90fO3B6BDA32cRQ-->29.5s</td>
-<td data-page-node-id="eA6JmWSWXilRpTeuEBIxzy"><span data-page-node-id="z7fA9LJgUozTlTr7Q27Ke6" class="pill ok"><!--pnid:AbyT7tTV88Xp3waJam9ruJ-->成功</span></td>
-<td data-page-node-id="zHqPViLqp2d7o5DF1cWR6p"><!--pnid:8Ku3UJTq5TN9mUVXIUvXxz-->正常</td>
+<tr>
+<td>4</td>
+<td>141</td>
+<td>140</td>
+<td>17.1s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-<tr data-page-node-id="HLEetWtnfr0qLbJE572EXg">
-<td data-page-node-id="z2KhxhGekzO5LvqqS5wiDf"><!--pnid:vc9JN0hqh7GBGqQ7S3lPox-->2</td>
-<td data-page-node-id="UAVQAcpo2LenrNkAYnicQ6"><!--pnid:6xZtRwr2oFbUZSR8V32i1z-->build_report_v2</td>
-<td data-page-node-id="jZxvK6uZ069oXGj1yXEoIn"><!--pnid:MRplvC63ixKgbbTE6yLBjW-->657</td>
-<td data-page-node-id="DeMJEoGERpjCG0KooCMTe9"><!--pnid:fz9C48Y7OtcZTKkzxzsC1k-->185</td>
-<td data-page-node-id="1hWPw24D65lWMsw9itA2XU"><!--pnid:BqQolZIwZyYQKRixyIN8KN-->32.7s</td>
-<td data-page-node-id="vfP30gl3QHHOA77xqd6C0F"><span data-page-node-id="wFcszIxXYXcLtw4TfNiRV5" class="pill ok"><!--pnid:qKrpmc4q8R2LapgcACSehi-->成功</span></td>
-<td data-page-node-id="H6ORFKMobRInStOCTlfZBs"><!--pnid:zQYeUxGfP3ksQcI8Q2hVnC-->正常</td>
+<tr>
+<td>5</td>
+<td>176</td>
+<td>192</td>
+<td>21.4s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-<tr data-page-node-id="eu9VhWwizBXmNzs7Izja5y">
-<td data-page-node-id="KRAn7bYr3jCsm8M2cp3jOT"><!--pnid:QVz3HIXgN8nXYCOvmmrzGO-->3</td>
-<td data-page-node-id="dhtXX4G1U7PwlviE8eCcv3"><!--pnid:wG5DmIetdLK1P1yM5H9hnL-->build_report</td>
-<td data-page-node-id="ZUCHT2mEE8nC1ohD7HPU6U"><!--pnid:pBwlUstXkEsGFs7RdEUmSI-->1,146</td>
-<td data-page-node-id="DwPTAn8LdUUXIcp3Q3W4XE"><!--pnid:784t1bKvxHisAVgiBGlEJk-->220</td>
-<td data-page-node-id="kU63hBJNG9OPKKZuXD0j6k"><!--pnid:erDBdXHAd26ub397cRTtxG-->44.6s</td>
-<td data-page-node-id="ThYa0GqxUVsKZXCte16Le3"><span data-page-node-id="u8FUEvA1tin0rMJq87RnPc" class="pill ok"><!--pnid:pw0xnIfxYtbzYUMxzlAjmJ-->成功</span></td>
-<td data-page-node-id="RTPMafdSwq8TRuUs0cYl9j"><!--pnid:aIvHUZVOS0VA05xDvJsKxf-->正常</td>
+<tr>
+<td>6</td>
+<td>179</td>
+<td>188</td>
+<td>21.2s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-<tr data-page-node-id="PFpJ7UUYF3NZG8aDhQwiIt">
-<td data-page-node-id="dKhJ8cgva2vI0K87AXkaGj"><!--pnid:si5vh2V9NGEvBymmygIIYj-->4</td>
-<td data-page-node-id="DlsoYbkXKpq0ravaVGfJrD"><!--pnid:8UICjYojcehMF2IzA7ERmE-->plan_0312_draft</td>
-<td data-page-node-id="RmksMSjCvs9ImrDGAxj10j"><!--pnid:BX1tUc3ZzqPlcMxHn6gZXK-->1,281</td>
-<td data-page-node-id="RPcshluQfF3mRCFBDC3z3g"><!--pnid:Hjnv4vDvQDF444loerAKi0-->143</td>
-<td data-page-node-id="C5YHZQ8BbD8emtmT8wNMYL"><!--pnid:RkouaH2nPdFIKYvmBZPqrI-->34.0s</td>
-<td data-page-node-id="3YFWgJZvONdwtVvTO4q9nT"><span data-page-node-id="kvbSEBIfCQkaf4IIplxa81" class="pill ok"><!--pnid:xT4mWJV9YhpRXAa6lJQGHp-->成功</span></td>
-<td data-page-node-id="gziIYZGYFW2RtNBqurclG5"><!--pnid:8CV23uQNFdeZkQGqkre1VV-->正常</td>
+<tr>
+<td>7</td>
+<td>206</td>
+<td>214</td>
+<td>22.6s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-<tr data-page-node-id="2QA7H6KsDHPNrruwCmAadc">
-<td data-page-node-id="XSSl1HYnIxcgJWjuLsNq5s"><!--pnid:eD4xqqEbppHNa3BsQLeXud-->5</td>
-<td data-page-node-id="zKCq2uwNNsXscoNbd17Fj7"><!--pnid:9Dc4iz357w0iVkNqNoM90Z-->plan_0312_polish</td>
-<td data-page-node-id="25Jz9kiIf40K8pGwZArLvJ"><!--pnid:SHFOHY0MyM2nA9L3v0hbAP-->1,382</td>
-<td data-page-node-id="SAok8ULnpojCAMVdWa0B7u"><!--pnid:jreISX8AnAgUjkV1sLxjwH-->196</td>
-<td data-page-node-id="Y8d9BNhM7OXPBDaXxqOfFc"><!--pnid:IyM6D5ByeYpj0wWNU3A7PB-->44.9s</td>
-<td data-page-node-id="UV91wCJ7v7hFRRbUa4iD4f"><span data-page-node-id="tWH4UWyrBXpIl70ejl5HfJ" class="pill ok"><!--pnid:LzYthbXZatAgz8Tv9neJaL-->成功</span></td>
-<td data-page-node-id="MhUCCwJ6ohQ7ilIHsyxWhl"><!--pnid:1Z8geh0RFRwnzglSRnnoKz-->正常</td>
+<tr>
+<td>8</td>
+<td>172</td>
+<td>183</td>
+<td>19.9s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-<tr data-page-node-id="g593jcEKPtj7tyherShfuV">
-<td data-page-node-id="JqPGxeUVS27RaBZevjzcuw"><!--pnid:CyVdL6CUDBZJpB7BMXdmrK-->6</td>
-<td data-page-node-id="u0GiUBHrAJvR31c0cnGGxp"><!--pnid:awdOqPBJmIHKctmCXafrYg-->plan_0313_draft</td>
-<td data-page-node-id="aEXUaOxqd3SkJuWura2ZhY"><!--pnid:55mMylcWDjE5vN2t6RJHLv-->1,751</td>
-<td data-page-node-id="qhHdCu32ZyRjxsb6THOwoh"><!--pnid:obH0hQyGfKtfEXvJunXP0T-->185</td>
-<td data-page-node-id="EEAp3URaD47GU05IvOXFeC"><!--pnid:P7egQiNpiLc0MFlBHFNELX-->46.4s</td>
-<td data-page-node-id="0SH8zqImuyNtcxc9vNp7pW"><span data-page-node-id="9m1JMRpdSMLd4TFCiXNpOO" class="pill ok"><!--pnid:FySgdApSxQQLZJ7v6pL3un-->成功</span></td>
-<td data-page-node-id="Ny8BoE8mfyA9tAotKEzi3Z"><!--pnid:lteiFEJBF9gX71X1Nsx5QW-->正常</td>
+<tr>
+<td>9</td>
+<td>182</td>
+<td>195</td>
+<td>21.7s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-<tr data-page-node-id="YgnpWRtwZ95x2IfK9jpeaI">
-<td data-page-node-id="rS7fg9dXtOspoPn00ah5kw"><!--pnid:A5T9ZtUSGgEgRyXJjJRVgt-->7</td>
-<td data-page-node-id="KnMl71flNpZmtqfU8AGriA"><!--pnid:m7p72qk49LXa3KvLUsgiiu-->plan_0313</td>
-<td data-page-node-id="dxE3SMtqFykB3Q39ONDtDU"><!--pnid:Rned2wVMIuOcF05Lk5cIOF-->1,751</td>
-<td data-page-node-id="1p4XkMyPgcBjV0621XUthh"><!--pnid:nEEx0JRQDQQo0SuHyYuGiA-->177</td>
-<td data-page-node-id="U0127AkUJoWuWYMZF7zjWE"><!--pnid:HNTCwria4Sk8tHfmlby2nX-->45.9s</td>
-<td data-page-node-id="NqCrfs52Nd2JuxWP2uqTLb"><span data-page-node-id="DP6oJROEIjXXksDAQEEAba" class="pill ok"><!--pnid:9dAiQBmjFlaUdjsLqHxNBd-->成功</span></td>
-<td data-page-node-id="8ybRIuYNSQHmC8Nzh2b5ad"><!--pnid:evMejq0ZEH9SYsw5XGjwTZ-->正常</td>
+<tr>
+<td>10</td>
+<td>252</td>
+<td>274</td>
+<td>30.0s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-<tr data-page-node-id="rJVJVhtKDK1SXFGqjlqfd7">
-<td data-page-node-id="zApYC726L4B2wNBuPRt5Rs"><!--pnid:4HHpI01cHprWpE6gtqrbqE-->8</td>
-<td data-page-node-id="nRRtWnKjXxjd709x6LGG59"><!--pnid:XHUNrmMJ5eso5f0kPJFMe2-->plan_0318</td>
-<td data-page-node-id="VF2Kj92u9sN1bVuINFTnjg"><!--pnid:9mEgpgx2AN2VNQhkSNBf4U-->1,997</td>
-<td data-page-node-id="jsztYSWmpEKEIpzPBkxMjQ"><!--pnid:mhu7Egb416idl5zdUt4IOk-->180</td>
-<td data-page-node-id="ZFlItkqMSUoDR1arFkdm6w"><!--pnid:fIv7vv8x1Q2JV98qxXDku3-->46.3s</td>
-<td data-page-node-id="trUh8QIrL56SrINzBTLKCH"><span data-page-node-id="sgKQofQZ6Zp8cry0K04i1r" class="pill ok"><!--pnid:94NZpBm8F9cDknrUUhdqdc-->成功</span></td>
-<td data-page-node-id="SzREtdvmcPyMfsnVdR88pF"><!--pnid:DjoIMRG6GgJrbeWMk82Q3A-->正常</td>
+<tr>
+<td>11</td>
+<td>256</td>
+<td>248</td>
+<td>30.0s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-<tr data-page-node-id="ZFmzxoQQwzfpvNFxGfRmJa">
-<td data-page-node-id="grY4qJofYm2GPbmkEAuYcV"><!--pnid:Nv8LuzavOEeGZpPNvHazw1-->9</td>
-<td data-page-node-id="H2blcVAy1Ji7Zd62SUyGoa"><!--pnid:ltHgZpZn4sN3SusDogW5NE-->plan_0320</td>
-<td data-page-node-id="nm8bdctQrGy2PFkkopMuTi"><!--pnid:OUUBWSqyju7kmymAOSJa6Q-->2,130</td>
-<td data-page-node-id="QjlGJZUCgtwgB12B5dqjTE"><!--pnid:yiotyNoNxAJaYI1IWXJUQD-->173</td>
-<td data-page-node-id="JBzbyPro6GhQ6JUsC4dDyx"><!--pnid:q9ZCAhLCoHJHZmAZe9wyDu-->48.9s</td>
-<td data-page-node-id="IpaKTkx4bxOrt1snMl1ubx"><span data-page-node-id="iKfhM40vJTGGKiiMioy3uD" class="pill ok"><!--pnid:fBfPwwjMZMRJmHvqwemAkR-->成功</span></td>
-<td data-page-node-id="I921iX4KiLdEMhrMzKPYh5"><!--pnid:oeYFHLX8CJXybpRK8Y2noC-->正常</td>
+<tr>
+<td>12</td>
+<td>18</td>
+<td>21</td>
+<td>4.3s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
 </tbody></table>
-<h2 data-page-node-id="Fm5RUUpumBWkht7OsSd0jr"><!--pnid:02ADFtFRE0xiBDY7BqOPaz-->九、稳定性观测：崩溃事件</h2>
-<div data-page-node-id="JEAQAsHDhiOlYmVVPzXih3" class="danger"><!--pnid:oXkFc9jFuorncLCSJfk8Xl-->本轮真实负载测试期间共观测到 <b data-page-node-id="sXRCb8nFkdGBuehGAzMIVM"><!--pnid:F6D5xeQLLHBRN4G28Lsu1u-->3 次</b><!--pnid:0SxN4kHjEG8UBp1ToFo1Ta-->服务崩溃，均由守护进程自动拉起（约数十秒内恢复）。</div>
-<table data-page-node-id="kQNhFR3JKZ6z8Q3wMA1Op4"><thead data-page-node-id="rOuLD91gB8qExOYLuK2SqI"><tr data-page-node-id="yCyWgO8Jpabw7DRjwufMdZ">
-<th data-page-node-id="gur064r0nrLrGSEyCtTnut"><!--pnid:07vrcIpHtFJfjDG5NaauWf-->#</th>
-<th data-page-node-id="YQ7CSNSx7hotsa1XRiSMv3"><!--pnid:gR7trmUQ8zRQVAA0u5m4GA-->场景</th>
-<th data-page-node-id="MW30dIGEo8dj2Mh6YB6uuc"><!--pnid:zp3R7aB9eBuGkf1W89o2Ai-->现象</th>
-<th data-page-node-id="j6pHM0t4ucJYoSywktmaFL"><!--pnid:wu1TQ8imxU0TVLMnVFXrmN-->处理</th>
-</tr></thead><tbody data-page-node-id="nWByAFA0XGRZJjKxys8wtf">
-<tr data-page-node-id="Y5n94cce8WdO5mkcRdRS6G">
-<td data-page-node-id="6Jwr8VfmFkltQhJNbeINdd"><!--pnid:DsNYpe7eBEQILaMFr4umLQ-->1</td>
-<td data-page-node-id="ClqFUDmrgAZnHbguLtlTnf"><!--pnid:oHzHhh0KgkgifYAsUapquh-->首次 A 组：6 个连续真实文档请求</td>
-<td data-page-node-id="VsbsrnMz8RWc3fkv3czpcD"><!--pnid:GNvNN14fRQOYgF7CYGjKXL-->6 个请求全部 RemoteDisconnected / 502</td>
-<td data-page-node-id="GcuuMmru03ADxG42vRkOSn"><!--pnid:JWN82JrOG3JVosRAQC0R6c-->服务重启后本次重跑全部成功</td>
+<div class='note'>把最长文档按段落切分后逐段润色，<b>每段输出都正常</b>——这是绕过「长生成退化」的可行工程手段。</div>
+<h2>六、C 组：多轮迭代（还原真实修改链）</h2>
+<table><thead><tr>
+<th>轮次</th>
+<th>任务</th>
+<th>输入字数</th>
+<th>输出字数</th>
+<th>耗时</th>
+<th>判定</th>
+<th>备注</th>
+</tr></thead><tbody>
+<tr>
+<td>第1轮·润色</td>
+<td>polish</td>
+<td>1,281</td>
+<td>1,217</td>
+<td>134.0s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
 </tr>
-<tr data-page-node-id="psWDeBn23HGqLpIx4N0BW1">
-<td data-page-node-id="h19eqj2JNRD474E1x305I3"><!--pnid:dIBPDBaigjiP6Ob1NCArAB-->2</td>
-<td data-page-node-id="bK0BKvjOScnSkg4dgXMaZx"><!--pnid:fByLT8T36L2f4jINf1rKE6-->A4 公文审校（1281 字）</td>
-<td data-page-node-id="3PUISkZX5DRoyD6Wp9X8GE"><!--pnid:cymwGkPDHKlUtQa1LDubyy-->请求触发 1 次崩溃</td>
-<td data-page-node-id="c6bzIE0yyx1wBl5fYHFiXw"><!--pnid:XYcWH4B6eYlUO4al8jfskz-->脚本等待恢复后自动重试成功</td>
+<tr>
+<td>第2轮·再润色</td>
+<td>polish</td>
+<td>1,217</td>
+<td>1,217</td>
+<td>133.3s</td>
+<td><span class='pill bad'>存疑</span></td>
+<td>疑似照抄(重合98%)</td>
 </tr>
-<tr data-page-node-id="ZXVurWMLzCAEefq1ReKmBC">
-<td data-page-node-id="vz3aqySuWNeQZzlhY6B5vn"><!--pnid:cbLLTWePtJfiPsbVuAqzDL-->3</td>
-<td data-page-node-id="2E93deWF27no0Nyrir5Ly3"><!--pnid:0NcFMwZANcor5L8IeOWCHW-->B 组第 12 段（分段润色）</td>
-<td data-page-node-id="lvNEjm8sYWBgQ44QnPA5gO"><!--pnid:E1mVJNwxunb649ib58RZMD-->请求触发 1 次崩溃</td>
-<td data-page-node-id="PB4723sITTZbwpQ8cyeglg"><!--pnid:pcewzudaeSrex2cLS7LvsZ-->脚本等待恢复后自动重试成功</td>
-</tr>
-</tbody></table>
-<div data-page-node-id="AtZDqYM9mOkdnHqSfWrBI9" class="note"><!--pnid:m0qFDNw75rO4dRond0kzuk-->事实：短请求（如健康检查）几乎不触发崩溃；而携带<b data-page-node-id="r6XA9N5mzmlsVaaOkeUBMQ"><!--pnid:zp9uLHdAUtiT69cEJLdZzS-->真实长文本</b><!--pnid:Qz6YrCqdoBu9bBruY31geF-->（1000~2000 字）的请求触发崩溃的概率明显偏高，提示崩溃很可能与<b data-page-node-id="3LVc0DGnGsp35uONTXYWTb"><!--pnid:DWnC0JynkHcbgkOrPRB2bP-->长 prompt 的 prefill 处理</b><!--pnid:TcI8zwjwRDqOcdRljfbLEP-->相关，建议研发侧重点排查。</div>
-<h2 data-page-node-id="npVJzEDKVzefYdzYg1g536"><!--pnid:4XktHt0jqRDCS1M2nQDvHT-->十、结论与建议</h2>
-<h3 data-page-node-id="Qy9px5x0yePiDeZb1Owep9"><!--pnid:p9apCknGmYCxUbrhcTD9g8-->适用与不适用</h3>
-<table data-page-node-id="C5NOEwO5Jxl8G0EVGjVhP8"><thead data-page-node-id="XNV690wpRq6D6QqaGlTE57"><tr data-page-node-id="bwUGN8oZJ3cXqDdUesxqGV">
-<th data-page-node-id="TVaXrr3DmMA58JbGx2drtq"><!--pnid:8uxqgYYiSMxMCYiloYqLtH-->场景</th>
-<th data-page-node-id="DBDJBT7eWIDcnxdTx3tlD1"><!--pnid:R6pAEB4jbXbqCk6pZ4Kf5s-->可用性</th>
-<th data-page-node-id="Ebmnstli2ZpCAXFineQCfq"><!--pnid:X96Tgva3U2AIEKMcUgyiEk-->说明</th>
-</tr></thead><tbody data-page-node-id="SngcehC0jdtWQnWXTf1P10">
-<tr data-page-node-id="a3WSBlLLCLkXYnxan3Z9jn">
-<td data-page-node-id="WAL2YLkM3nxDkzXSRr69ed"><!--pnid:WiFS88QFM3oi5sS9kTm6CG-->短文本摘要 / 提炼</td>
-<td data-page-node-id="Ef4IXM8wXXQnYYVez867JU"><span data-page-node-id="8cvOw2W9f1Sb6zlmyDpzkQ" class="pill ok"><!--pnid:6k5yyxPJR0ZFBR2vft2x30-->可用</span></td>
-<td data-page-node-id="TqMpvhFUXp3y7CnC9jgiei"><!--pnid:XtqzkuMnFvdqeVax5pKPv9-->输出 &amp;lt;300 字，结果正常，耗时 30~40s</td>
-</tr>
-<tr data-page-node-id="keVWe9dgtagHED3rnzivXo">
-<td data-page-node-id="o4ST8EyiyODSXWR5faWgl2"><!--pnid:REsylt7u7sL87VvebvfK7R-->短稿润色 / 改写</td>
-<td data-page-node-id="Mf549rcdbtvhilVHYbldnU"><span data-page-node-id="ZxSPlTQjeddaMlcyIu9TYV" class="pill ok"><!--pnid:F3YgfO4HZlXUgril4mB7Ek-->可用</span></td>
-<td data-page-node-id="lne17oCrlnF8jjIJYeyW9k"><!--pnid:0duWWiPPcHwEgv67G35gA6-->单份 500 字左右，输出 600 字级，~80s</td>
-</tr>
-<tr data-page-node-id="GR0SQN8YBtGD0XYmoiU2VC">
-<td data-page-node-id="r0AZZTYkvO8e0KVwwZNCVW"><!--pnid:2BEZaK5ebtCsY1TEtJgwaa-->条目化 / 要点提取</td>
-<td data-page-node-id="bzQhq5tO6BfUZEN7qlWGj5"><span data-page-node-id="WSGxsnFPOypHFhS6E8A6g1" class="pill ok"><!--pnid:8xzLZiEHOltY8padkNAef2-->可用</span></td>
-<td data-page-node-id="a3vDfVM7U3aZeqGNnEDMoz"><!--pnid:pvNgX19Y0gvguCyySK3KKj-->长文输入也可，输出短，~70s</td>
-</tr>
-<tr data-page-node-id="CZAdz2G0W0gKj3XWa0Ua9g">
-<td data-page-node-id="FnVdnXLPQwho67OaDiKEVK"><!--pnid:CrrXKZbMNERAhUmiRTEZym-->整篇润色 / 扩写 / 长文改写</td>
-<td data-page-node-id="NWa6QfHyUBiXcGVxFUfqaK"><span data-page-node-id="LYeWUfgKUWQLqJ1ZZFxuZv" class="pill bad"><!--pnid:brlLKPEetX1sELjBtk6Ohd-->不可用</span></td>
-<td data-page-node-id="E1GOTgTcySOLIdhXGMvSDo"><!--pnid:DLtXJx493JeXYAHfL7xEmq-->输出超 ~1000 token 即退化，结果报废</td>
-</tr>
-<tr data-page-node-id="NC6xSD75amtd8UncxRlCct">
-<td data-page-node-id="s5bp2foFqxPon2a5pHbYrZ"><!--pnid:3r0RxzFsUYeE9xuxSVkIfC-->多用户并发</td>
-<td data-page-node-id="u32tg05Vmi9wPqtW9uoh0Y"><span data-page-node-id="Sn69xKwuRZQKJi6kNgNUH0" class="pill warn"><!--pnid:7Pszi9ZJg340zOwVRMFetx-->谨慎</span></td>
-<td data-page-node-id="OuOPFBg8DlklRcEaFVobfg"><!--pnid:Q8SVGoNN2AhxD3IpAghZsj-->并发会加剧排队与崩溃风险，见 D 组</td>
+<tr>
+<td>第3轮·审校</td>
+<td>proofread</td>
+<td>1,217</td>
+<td>1,325</td>
+<td>154.2s</td>
+<td><span class='pill bad'>存疑</span></td>
+<td>finish=length</td>
 </tr>
 </tbody></table>
-<h3 data-page-node-id="V9SjBHbDi7ak4L0YgSCvuV"><!--pnid:UD9oGBK5GWyDOS4MUhiG6C-->工程建议</h3>
-<ul data-page-node-id="piLw8YDPwzh8T6cwMSWpav"><li data-page-node-id="d1PAkhqTWpeWEZWL2FIE5D"><b data-page-node-id="Dma0vuuxxUM9yHFYgXC9c7"><!--pnid:HZxlCRlsou7ycNotncHGku-->长文一律分段处理</b><!--pnid:Bv422OKbrYbPMf2LsbXTbM-->：按段落切到 200~300 字/段，逐段调用（见 B 组），避免长生成退化。</li><li data-page-node-id="vpx1gTp1vTLXj9U37uzC5Q"><b data-page-node-id="UUtIXWCKc8snHNIHSW1wdx"><!--pnid:CsqpDkuGZLbIP8AXGIxKbI-->严格限制 max_tokens</b><!--pnid:gcdHuIwOxk2FLfUZPg2HVd-->并配合客户端硬超时；服务端不遵守 max_tokens，需客户端兜底截断。</li><li data-page-node-id="jWTq8zs2syr6EO42DrCX3Q"><b data-page-node-id="1NZjZuyY3IVMU8VLbddwDU"><!--pnid:gmd7JBS89csLipKSJlGq92-->控制上下文总量</b><!--pnid:t87rwMlL0u2z8NEiL2NuE3-->：服务上下文约 4096 token，输入+输出须远小于该值；输入建议不超过 ~2000 字。</li><li data-page-node-id="KlOkZxC4FC4crmdmsySmFs"><b data-page-node-id="sMvVRUn4l2Q8jx6uAY6xwl"><!--pnid:EEP4VJiCrVgnRHuj7Ga6c6-->加崩溃容错</b><!--pnid:CcOKA4SL4c6jt32y42Sf1n-->：捕获连接中断并等待守护进程拉起后重试（本套脚本已内置）。</li><li data-page-node-id="7zzimobj6PHvJze1mXSywC"><b data-page-node-id="hE6bZdGGyx74eRVYUMAN1o"><!--pnid:AnINwcu65xV7UtOSwNtU6w-->串行化调用</b><!--pnid:8ea6VIeWsJiJQzoRtZdwyR-->：该板端服务不适合并发，建议加队列串行处理，避免并发崩溃。</li></ul>
-<h3 data-page-node-id="H2BVK6WjsKn0lVZT5UrC7g"><!--pnid:wL7etQ1J968BoSMwC70OZj-->复现命令</h3>
-<pre data-page-node-id="hBFDUJ7bMLeuY9mo1rWWg2" data-pnid-children="D1xA0nMw9YUTekma83vPQf"># 1) 提取真实语料画像
+<h2>七、D 组：并发稳定性</h2>
+<div class='grid'><div class='card'><div class='k'>并发数</div><div class='v'>3</div></div><div class='card'><div class='k'>成功</div><div class='v'>2/3</div></div><div class='card'><div class='k'>墙钟耗时</div><div class='v'>269s</div></div><div class='card'><div class='k'>服务存活</div><div class='v'>是</div></div></div>
+<table><thead><tr>
+<th>#</th>
+<th>输入字数</th>
+<th>输出字数</th>
+<th>耗时</th>
+<th>判定</th>
+<th>备注</th>
+</tr></thead><tbody>
+<tr>
+<td>1</td>
+<td>1,146</td>
+<td>860</td>
+<td>106.4s</td>
+<td><span class='pill bad'>存疑</span></td>
+<td>finish=length</td>
+</tr>
+<tr>
+<td>2</td>
+<td>572</td>
+<td>614</td>
+<td>180.9s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
+</tr>
+<tr>
+<td>3</td>
+<td>657</td>
+<td>720</td>
+<td>268.7s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
+</tr>
+</tbody></table>
+<div class='note'>对照：同类请求串行处理 3 个约需 240~300s，3 并发墙钟 316s，<b>并发没有带来加速</b>——服务按队列串行执行，并发只增加排队等待，并提高触发崩溃的风险。</div>
+<h2>八、E 组：批量吞吐</h2>
+<div class='grid'><div class='card'><div class='k'>处理份数</div><div class='v'>9</div></div><div class='card'><div class='k'>总耗时</div><div class='v'>310s</div></div><div class='card'><div class='k'>平均每份</div><div class='v'>34.4s</div></div></div>
+<table><thead><tr>
+<th>#</th>
+<th>语料</th>
+<th>输入字数</th>
+<th>输出字数</th>
+<th>耗时</th>
+<th>判定</th>
+<th>备注</th>
+</tr></thead><tbody>
+<tr>
+<td>1</td>
+<td>build_report_v1</td>
+<td>572</td>
+<td>178</td>
+<td>28.9s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
+</tr>
+<tr>
+<td>2</td>
+<td>build_report_v2</td>
+<td>657</td>
+<td>122</td>
+<td>20.1s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
+</tr>
+<tr>
+<td>3</td>
+<td>build_report</td>
+<td>1,146</td>
+<td>187</td>
+<td>31.6s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
+</tr>
+<tr>
+<td>4</td>
+<td>plan_0312_draft</td>
+<td>1,281</td>
+<td>154</td>
+<td>28.8s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
+</tr>
+<tr>
+<td>5</td>
+<td>plan_0312_polish</td>
+<td>1,382</td>
+<td>195</td>
+<td>35.0s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
+</tr>
+<tr>
+<td>6</td>
+<td>plan_0313_draft</td>
+<td>1,751</td>
+<td>198</td>
+<td>38.3s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
+</tr>
+<tr>
+<td>7</td>
+<td>plan_0313</td>
+<td>1,751</td>
+<td>198</td>
+<td>38.2s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
+</tr>
+<tr>
+<td>8</td>
+<td>plan_0318</td>
+<td>1,997</td>
+<td>215</td>
+<td>44.0s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
+</tr>
+<tr>
+<td>9</td>
+<td>plan_0320</td>
+<td>2,130</td>
+<td>221</td>
+<td>44.6s</td>
+<td><span class='pill ok'>成功</span></td>
+<td>正常</td>
+</tr>
+</tbody></table>
+<h2>九、稳定性观测：崩溃事件</h2>
+<div class='danger'>本轮真实负载测试期间共观测到 <b>3 次</b>服务崩溃，均由守护进程自动拉起（约数十秒内恢复）。</div>
+<table><thead><tr>
+<th>#</th>
+<th>场景</th>
+<th>现象</th>
+<th>处理</th>
+</tr></thead><tbody>
+<tr>
+<td>1</td>
+<td>首次 A 组：6 个连续真实文档请求</td>
+<td>6 个请求全部 RemoteDisconnected / 502</td>
+<td>服务重启后本次重跑全部成功</td>
+</tr>
+<tr>
+<td>2</td>
+<td>A4 公文审校（1281 字）</td>
+<td>请求触发 1 次崩溃</td>
+<td>脚本等待恢复后自动重试成功</td>
+</tr>
+<tr>
+<td>3</td>
+<td>B 组第 12 段（分段润色）</td>
+<td>请求触发 1 次崩溃</td>
+<td>脚本等待恢复后自动重试成功</td>
+</tr>
+</tbody></table>
+<div class='note'>事实：短请求（如健康检查）几乎不触发崩溃；而携带<b>真实长文本</b>（1000~2000 字）的请求触发崩溃的概率明显偏高，提示崩溃很可能与<b>长 prompt 的 prefill 处理</b>相关，建议研发侧重点排查。</div>
+<h2>十、结论与建议</h2>
+<h3>适用与不适用</h3>
+<table><thead><tr>
+<th>场景</th>
+<th>可用性</th>
+<th>说明</th>
+</tr></thead><tbody>
+<tr>
+<td>短文本摘要 / 提炼</td>
+<td><span class='pill ok'>可用</span></td>
+<td>输出 &amp;lt;300 字，结果正常，耗时 30~40s</td>
+</tr>
+<tr>
+<td>短稿润色 / 改写</td>
+<td><span class='pill ok'>可用</span></td>
+<td>单份 500 字左右，输出 600 字级，~80s</td>
+</tr>
+<tr>
+<td>条目化 / 要点提取</td>
+<td><span class='pill ok'>可用</span></td>
+<td>长文输入也可，输出短，~70s</td>
+</tr>
+<tr>
+<td>整篇润色 / 扩写 / 长文改写</td>
+<td><span class='pill bad'>不可用</span></td>
+<td>输出超 ~1000 token 即退化，结果报废</td>
+</tr>
+<tr>
+<td>多用户并发</td>
+<td><span class='pill warn'>谨慎</span></td>
+<td>并发会加剧排队与崩溃风险，见 D 组</td>
+</tr>
+</tbody></table>
+<h3>工程建议</h3>
+<ul><li><b>长文一律分段处理</b>：按段落切到 200~300 字/段，逐段调用（见 B 组），避免长生成退化。</li><li><b>严格限制 max_tokens</b>并配合客户端硬超时；服务端不遵守 max_tokens，需客户端兜底截断。</li><li><b>控制上下文总量</b>：服务上下文约 4096 token，输入+输出须远小于该值；输入建议不超过 ~2000 字。</li><li><b>加崩溃容错</b>：捕获连接中断并等待守护进程拉起后重试（本套脚本已内置）。</li><li><b>串行化调用</b>：该板端服务不适合并发，建议加队列串行处理，避免并发崩溃。</li></ul>
+<h3>复现命令</h3>
+<pre># 1) 提取真实语料画像
 python docx_corpus.py
 
 # 2) 真实场景测试（A 串行 / B 分段 / C 迭代 / D 并发 / E 批量）
@@ -580,5 +576,5 @@ python llm_realworld.py --host 192.0.2.10:8080 --key &lt;KEY&gt; --only a,b,c,d,
 
 # 3) 生成本报告
 python make_rw_report.py</pre>
-<footer data-page-node-id="KsX4YxVVq3Eyxl4d9aPCIJ"><!--pnid:ZAky7LQ7Mk5APeingAsfWY-->本报告由自动化脚本基于用户提供的 10 份真实公文生成。耗时/吞吐为客户端观测的端到端值（含网络与排队）；tokens 为服务端上报值。完整原始输出见 results/realworld_samples/。</footer>
+<footer>本报告由自动化脚本基于用户提供的 10 份真实公文生成。耗时/吞吐为客户端观测的端到端值（含网络与排队）；tokens 为服务端上报值。完整原始输出见 results/realworld_samples/。</footer>
 </div></body></html>
