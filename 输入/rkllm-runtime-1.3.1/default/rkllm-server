@@ -248,6 +248,21 @@ RKLLM_PLATFORM_ARG=
 RKLLM_CORS_ORIGIN=
 
 
+# -- JSON mode hint via RKLLM_JSON_HINT      default the built-in Chinese text
+# EN: Text appended to the prompt when a client sends
+#     response_format={"type":"json_object"}. The default is a Chinese
+#     instruction ("reply with one JSON object only") because this package
+#     targets Chinese-language deployments; an English-only deployment should
+#     override it here. Leave empty to keep the default; set it to the single
+#     word "none" to append no instruction at all.
+# 中文: 客户端发出 response_format={"type":"json_object"} 时追加到 prompt 末尾的
+#     提示语。默认为中文（"只输出一个 JSON 对象…"），因为本包面向中文场景；纯
+#     英文部署请在此覆盖。留空表示沿用默认；填 "none" 表示完全不追加。
+# 可选写法 / optional form:
+#RKLLM_JSON_HINT=Reply with one JSON object only, no prose or code fences.
+RKLLM_JSON_HINT=
+
+
 # -- free-form extra arguments                       default empty
 # EN: Escape hatch appended to the `rkllm serve` command line, for options
 #     added by a future release. Everything above should be set with its own

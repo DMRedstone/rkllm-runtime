@@ -56,7 +56,17 @@ DEFAULT_MAX_NEW_TOKENS = 2048
 
 # A client that stops sending mid-body would otherwise pin a worker thread for
 # as long as it likes; request_queue_size lets 256 of them queue up.
+# Note this is a connection-level SO_RCVTIMEO, not a read-body-only limit: it
+# also caps how long BaseHTTPRequestHandler waits for the next request line on a
+# keep-alive connection. A client that idles longer than this gets its socket
+# closed and has to reconnect, which is the intended behaviour - just not what
+# the name alone suggests.
 READ_TIMEOUT_S = 30
+# How long the disconnect watchdog may take to notice it was told to stop. It
+# polls every 0.5 s, so this is generous; the point is to bound the window in
+# which a stale watchdog could still probe a connection reused by the next
+# request.
+WATCH_JOIN_TIMEOUT_S = 2.0
 # Wildcard by default (LAN tool), but a deployment that serves a browser UI from
 # one known origin should pin it: "*" lets any page send an Authorization header
 # cross-origin.
@@ -67,6 +77,18 @@ STREAM_JOIN_TIMEOUT_S = 60
 DEFAULT_MAX_QUEUE = 32
 DEFAULT_QUEUE_TIMEOUT = 600.0
 MAX_BODY_BYTES = 8 * 1024 * 1024
+# Instruction appended when response_format is json_object. Configurable because
+# the wording that steers a Chinese-tuned model is not the wording that steers an
+# English one. Unset or empty keeps the Chinese default (the conffile ships with
+# an empty value, so the default has to survive that); "none" appends nothing.
+DEFAULT_JSON_HINT = "\n\n只输出一个 JSON 对象，不要任何解释、前后缀或代码块标记。"
+JSON_HINT = (os.environ.get("RKLLM_JSON_HINT") or "").strip()
+if not JSON_HINT:
+    JSON_HINT = DEFAULT_JSON_HINT
+elif JSON_HINT.lower() == "none":
+    JSON_HINT = ""
+elif not JSON_HINT.startswith("\n"):
+    JSON_HINT = "\n\n" + JSON_HINT
 
 # Frequency-lock helpers installed by this package, per detected SoC.
 FREQ_HELPERS = {
@@ -689,6 +711,7 @@ class RealEngine(EngineBase):
     # and set_function_tools() now reads these on its first line.
     _function_tools_enabled = False
     _function_tools_signature = None
+    _warned_tools_change = False
 
     def __init__(self, model_path, platform, context_len=DEFAULT_CONTEXT,
                  max_new_tokens=DEFAULT_MAX_NEW_TOKENS, keep_history=True,
@@ -876,7 +899,7 @@ class RealEngine(EngineBase):
         # error. Set it once and report the no-op on later calls.
         signature = hash((system_prompt or "", tools_json, tool_response_str))
         if self._function_tools_enabled:
-            if signature != self._function_tools_signature and not getattr(self, "_warned_tools_change", False):
+            if signature != self._function_tools_signature and not self._warned_tools_change:
                 self._warned_tools_change = True
                 sys.stderr.write(
                     "[rkllm] tools changed after function calling was enabled; the "
@@ -951,20 +974,40 @@ class RealEngine(EngineBase):
                     raise item
                 yield item
         finally:
-            thread.join(timeout=STREAM_JOIN_TIMEOUT_S)
-            if thread.is_alive():
-                # abort() was not enough; the handle is in an unknown state, so
-                # refuse further work instead of corrupting the next request.
-                sys.stderr.write("[rkllm] inference thread did not exit within %ds of "
-                                 "abort; marking the engine unusable\n" % STREAM_JOIN_TIMEOUT_S)
-                sys.stderr.flush()
-                self._destroyed = True
-            with self._sink_lock:
-                self._sink = None
-            self._run_keep = []
-            self._infer.sampling_params = None
-            self._infer.max_new_tokens = 0
-            self._stream_guard.release()
+            # _stream_guard is the only thing stopping two runs from sharing
+            # _infer, so it has to come back under every failure mode - including
+            # a failure inside this very block. The warning below writes to
+            # stderr, which raises BrokenPipeError once a systemd journal or a
+            # closed terminal owns it; that used to skip release() and leave the
+            # engine refusing every later request for the life of the process.
+            try:
+                try:
+                    thread.join(timeout=STREAM_JOIN_TIMEOUT_S)
+                    if thread.is_alive():
+                        # abort() was not enough; the handle is in an unknown
+                        # state, so refuse further work instead of corrupting the
+                        # next request. Mark it before logging: the log itself may
+                        # be what fails.
+                        self._destroyed = True
+                        try:
+                            sys.stderr.write(
+                                "[rkllm] inference thread did not exit within %ds of "
+                                "abort; marking the engine unusable\n"
+                                % STREAM_JOIN_TIMEOUT_S)
+                            sys.stderr.flush()
+                        except (OSError, ValueError):
+                            pass
+                except Exception:                         # pragma: no cover
+                    self._destroyed = True
+            finally:
+                try:
+                    with self._sink_lock:
+                        self._sink = None
+                    self._run_keep = []
+                    self._infer.sampling_params = None
+                    self._infer.max_new_tokens = 0
+                finally:
+                    self._stream_guard.release()
 
     def last_perf(self):
         """(prefill_tokens, generate_tokens) from the last completed run, or None."""
@@ -1578,9 +1621,14 @@ class Handler(BaseHTTPRequestHandler):
         # constant-time compare: a plain == would leak the key length by timing
         return hmac.compare_digest(header.encode("utf-8"), ("Bearer " + key).encode("utf-8"))
 
-    def _read_body(self):
-        # A client can announce a large Content-Length and then trickle bytes;
-        # without a socket timeout the worker thread stays busy indefinitely.
+    def _read_raw_body(self):
+        """Read the request body with a socket timeout. (raw, problem, status).
+
+        Shared with /v1/reset, which only has to drain its body: reading it there
+        with a bare rfile.read(length) left that branch with no timeout and no
+        size cap, so a client announcing 8 MB and trickling a byte a second pinned
+        the worker thread. A missing body is not an error here - callers decide.
+        """
         try:
             self.connection.settimeout(READ_TIMEOUT_S)
         except OSError:
@@ -1588,20 +1636,28 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
-            return None, "invalid Content-Length"
+            return None, "invalid Content-Length", 400
         if length <= 0:
-            return None, "empty request body"
+            return b"", None, 200
         if length > MAX_BODY_BYTES:
-            return None, "request body larger than %d bytes" % MAX_BODY_BYTES
+            return None, "request body larger than %d bytes" % MAX_BODY_BYTES, 413
         try:
-            raw = self.rfile.read(length)
+            return self.rfile.read(length), None, 200
         except (socket.timeout, TimeoutError):
             return None, ("timed out after %ds reading a %d-byte body"
-                          % (READ_TIMEOUT_S, length))
+                          % (READ_TIMEOUT_S, length)), 408
+
+    def _read_body(self):
+        """(payload, problem, status) for an endpoint that needs the body."""
+        raw, problem, status = self._read_raw_body()
+        if problem:
+            return None, problem, status
+        if not raw:
+            return None, "empty request body", 400
         try:
-            return json.loads(raw.decode("utf-8")), None
+            return json.loads(raw.decode("utf-8")), None, 200
         except (UnicodeDecodeError, ValueError) as exc:
-            return None, "invalid JSON body: %s" % exc
+            return None, "invalid JSON body: %s" % exc, 400
 
     # -- routes -----------------------------------------------------------
 
@@ -1618,6 +1674,11 @@ class Handler(BaseHTTPRequestHandler):
                 "model": engine.model_name,
                 "busy": engine.is_running(),
                 "function_tools": bool(getattr(engine, "_function_tools_enabled", False)),
+                # A startup --system prompt and a request-level system message are
+                # both prepended, so the model can receive two preambles. Say
+                # whether a startup one is in force, so that is diagnosable from
+                # /health instead of only from the request log.
+                "startup_system_prompt": bool((getattr(engine, "system_prompt", "") or "").strip()),
                 "queue_length": self.server.waiting,
                 "uptime_s": round(time.time() - self.server.stats["started"], 1),
                 "stats": dict(self.server.stats),
@@ -1654,17 +1715,14 @@ class Handler(BaseHTTPRequestHandler):
             # an unread Content-Length body stays in the socket and the next
             # pipelined request parses those bytes as its request line - most
             # HTTP clients send "{}" here, which makes this a certainty rather
-            # than a corner case.
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-            except ValueError:
-                length = 0
-            if length > 0:
-                if length > MAX_BODY_BYTES:
-                    self.close_connection = True
-                    self._reject("request body larger than %d bytes" % MAX_BODY_BYTES, 413)
-                    return
-                self.rfile.read(length)
+            # than a corner case. Going through _read_raw_body() also applies
+            # READ_TIMEOUT_S and the size cap, so a trickling client cannot pin
+            # this worker thread the way a bare rfile.read() allowed.
+            _, problem, status = self._read_raw_body()
+            if problem:
+                self.close_connection = True
+                self._reject(problem, status)
+                return
             self.server.engine.clear_history()
             self._send_json({"object": "reset", "status": "ok"})
             return
@@ -1685,9 +1743,9 @@ class Handler(BaseHTTPRequestHandler):
                          "Content-Length and without Transfer-Encoding", 411)
             return
 
-        body, problem = self._read_body()
+        body, problem, status = self._read_body()
         if problem:
-            self._reject(problem)
+            self._reject(problem, status)
             return
         if not isinstance(body, dict) or "messages" not in body:
             self._reject("missing 'messages' in request body")
@@ -1728,10 +1786,10 @@ class Handler(BaseHTTPRequestHandler):
             include_history=not carries)
         response_format = body.get("response_format")
         if isinstance(response_format, dict) and response_format.get("type") == "json_object":
-            # Kept in Chinese: the deployment serves Chinese documents, where a
-            # Chinese instruction lands better than an English one. Move it into
-            # a config knob if this ever serves another locale.
-            prompt = prompt + "\n\n只输出一个 JSON 对象，不要任何解释、前后缀或代码块标记。"
+            # The default wording is Chinese because the deployment serves Chinese
+            # documents, where a Chinese instruction lands better. RKLLM_JSON_HINT
+            # overrides it, and an empty value appends nothing at all.
+            prompt = prompt + JSON_HINT
         if not prompt.strip():
             # Say which shape arrived: a UI reports this 400 as "the model is
             # unavailable", so the journal has to carry the real cause.
@@ -1872,6 +1930,20 @@ class Handler(BaseHTTPRequestHandler):
         estimated_tokens = (len(user_prompt.encode("utf-8")) + system_bytes
                             + engine_system_bytes + 2) // 3
 
+        if system_prompt and engine_system:
+            # Two different code paths prepend: engine.stream() adds the startup
+            # preamble, this method adds the request's own. The budget above
+            # counts both, so the KV cache is safe, but the model reads two
+            # preambles and that is worth saying once instead of leaving an
+            # operator to discover it in the transcript.
+            if not getattr(self.server, "_warned_double_system", False):
+                self.server._warned_double_system = True
+                if not self.server.options.quiet:
+                    sys.stderr.write(
+                        "[rkllm] both a startup system prompt and a request-level system "
+                        "message are in effect; the model receives both preambles\n")
+                    sys.stderr.flush()
+
         if estimated_tokens >= context_len:
             # A chat client's own system prompt can be enormous: an agent UI sent
             # 57 KB of preamble alongside a two-character "hello", which no 4096
@@ -1954,6 +2026,10 @@ class Handler(BaseHTTPRequestHandler):
         # Kept for stream mode too: the stop-sequence scan and the token totals
         # both need the whole text, and max_out caps it at a few thousand tokens.
         pieces = []
+        # Both branches below assign answer; initialising it here keeps the
+        # accounting line at the end of the method safe if a branch ever returns
+        # early without assigning.
+        answer = ""
         if stream:
             self._begin_stream()
             try:
@@ -1998,7 +2074,10 @@ class Handler(BaseHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError):
                     pass
                 return
-            prompt_tokens, completion_tokens = _tokens_for(engine, prompt, "".join(pieces))
+            # Count what was actually returned. A stop sequence truncates the
+            # reply, and OpenAI's usage does not include the text past it.
+            answer, _ = _apply_stop("".join(pieces), stop_seqs)
+            prompt_tokens, completion_tokens = _tokens_for(engine, prompt, answer)
             finish = _finish_reason(stopped_at_stop, completion_tokens, max_tokens)
             try:
                 self.wfile.write(_openai_chunk(model_name, "", finish_reason=finish).encode("utf-8"))
@@ -2049,16 +2128,25 @@ class Handler(BaseHTTPRequestHandler):
                 return
             finally:
                 watch_stop.set()
+                # join, not just set(). The watchdog closes over self and probes
+                # self.connection; a probe landing after this request returns -
+                # while the next request already runs on the same keep-alive
+                # connection - would abort that next request instead of this one.
+                watcher.join(timeout=WATCH_JOIN_TIMEOUT_S)
+                if watcher.is_alive():
+                    # It did not stop in time, so this connection cannot be
+                    # trusted to serve another request.
+                    self.close_connection = True
             raw_answer = "".join(pieces)
             answer, stopped_at_stop = _apply_stop(raw_answer, stop_seqs)
-            prompt_tokens, completion_tokens = _tokens_for(engine, prompt, raw_answer)
+            prompt_tokens, completion_tokens = _tokens_for(engine, prompt, answer)
             self._send_json(_openai_response(
                 model_name, answer,
                 finish_reason=_finish_reason(stopped_at_stop, completion_tokens, max_tokens),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens))
 
-        prompt_tokens, completion_tokens = _tokens_for(engine, prompt, "".join(pieces))
+        prompt_tokens, completion_tokens = _tokens_for(engine, prompt, answer)
         self.server.stats["prompt_tokens"] += prompt_tokens
         self.server.stats["completion_tokens"] += completion_tokens
 
@@ -2383,6 +2471,23 @@ def cmd_selftest(args):
         results.append(_selftest_result("invalid request rejected", status == 400,
                                         "status %s" % status))
 
+        # A stop sequence truncates the reply, and usage must count only what
+        # was returned: charging for the text past the cut made every agent
+        # client's token totals read high. The stand-in echoes the prompt, so a
+        # marker in the prompt puts the stop sequence inside the answer.
+        status, body = http("POST", "/v1/chat/completions",
+                            {"messages": [{"role": "user", "content": "AAA<<cut>>BBB"}],
+                             "stop": ["<<cut>>"]})
+        reply = json.loads(body) if status == 200 else {}
+        content = reply.get("choices", [{}])[0].get("message", {}).get("content", "")
+        counted = reply.get("usage", {}).get("completion_tokens")
+        results.append(_selftest_result(
+            "stop sequence trims the reply and the usage",
+            status == 200 and "<<cut>>" not in content and content.endswith("AAA")
+            and counted == _estimate_tokens(content),
+            "%s  completion_tokens=%s expect=%s"
+            % (repr(content[-24:]), counted, _estimate_tokens(content))))
+
         # A chunked body carries no Content-Length. It must be refused, not read
         # as an empty body: undecoded chunk frames would stay on the socket and
         # be parsed as the next request on this keep-alive connection.
@@ -2508,7 +2613,10 @@ def cmd_selftest(args):
             "%s  %r  (preamble was %d bytes, window %d tokens)"
             % (status, echo[:40], engine.context_len * 6, engine.context_len)))
 
-        status, body = http("POST", "/v1/reset")
+        # Send a body, not a bare POST: that is what real clients do, and an
+        # unread body would be parsed as the next request line on this
+        # keep-alive connection.
+        status, body = http("POST", "/v1/reset", {"why": "selftest"})
         results.append(_selftest_result("POST /v1/reset", status == 200, "status %s" % status))
 
         status, body = http("GET", "/health")
@@ -2518,7 +2626,14 @@ def cmd_selftest(args):
                                                                     stats["rejected"])))
 
         # 5. queue behaviour: one request runs, one may wait, the rest get 503
+        # The engine swap is scoped: the API-key checks below expect the ordinary
+        # stand-in, and the run's final cleanup destroys server.engine - leaving
+        # the gate installed there would destroy the wrong object and leak the
+        # real one.
         gate = _GateEngine()
+        saved_engine = server.engine
+        saved_max_queue = server.options.max_queue
+        saved_slots = server.queue_slots
         server.engine = gate
         server.options.max_queue = 1
         server.queue_slots = threading.BoundedSemaphore(2)   # 1 running + 1 waiting
@@ -2532,18 +2647,25 @@ def cmd_selftest(args):
             except Exception as exc:                              # pragma: no cover
                 statuses[tag] = repr(exc)
 
-        running = threading.Thread(target=call, args=("running",))
-        running.start()
-        gate.started.wait(10)               # the first request is inside the NPU call
-        waiting = threading.Thread(target=call, args=("waiting",))
-        waiting.start()
-        time.sleep(0.5)                     # let it take the single queue slot
-        overflow = threading.Thread(target=call, args=("overflow",))
-        overflow.start()
-        overflow.join(20)
-        gate.release.set()                  # let the parked inference finish
-        running.join(20)
-        waiting.join(20)
+        try:
+            running = threading.Thread(target=call, args=("running",))
+            running.start()
+            gate.started.wait(10)               # the first request is inside the NPU call
+            waiting = threading.Thread(target=call, args=("waiting",))
+            waiting.start()
+            time.sleep(0.5)                     # let it take the single queue slot
+            overflow = threading.Thread(target=call, args=("overflow",))
+            overflow.start()
+            overflow.join(20)
+            gate.release.set()                  # let the parked inference finish
+            running.join(20)
+            waiting.join(20)
+        finally:
+            gate.release.set()                  # a failed start must not park a thread
+            server.engine = saved_engine
+            server.options.max_queue = saved_max_queue
+            server.queue_slots = saved_slots
+            gate.destroy()
         results.append(_selftest_result(
             "queue: 1 runs, 1 waits, extra 503",
             statuses.get("running") == 200 and statuses.get("waiting") == 200
