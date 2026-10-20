@@ -70,7 +70,7 @@ REJECT_SRC_ON_ROOTFS=1
 CHECK_SRC_EMPTY=1
 
 # 源文件数 < 上次成功快照文件数 / N 则拒绝，防止挂错盘、源被清空后 --delete 做出空快照再把旧快照淘汰掉。
-# 会在 rsync 前对源和上一份快照各 walk 一遍；超大目录觉得慢就设 0 关闭。
+# 源侧仍要在 rsync 前 walk 一遍；上一份快照的文件数读 .filecount 缓存，不再重走。
 SHRINK_RATIO=10
 
 # 备份盘可用空间 / 可用 inode 低于该百分比则拒绝开跑。0 表示不检查。
@@ -158,7 +158,7 @@ die() {
 # 按大小切分主日志，再按天数清掉过旧的轮转文件。必须在 flock 之后调用，避免并发 mv。
 rotate_logs() {
   local current_size=0
-  local log_dir log_base
+  local log_dir log_base log_target
 
   log_dir="$(dirname "$LOG")"
   log_base="$(basename "$LOG")"
@@ -167,7 +167,11 @@ rotate_logs() {
     # GNU stat；失败当 0，避免把非数字喂给 (( ))。
     current_size="$(stat -c%s "$LOG" 2>/dev/null || echo 0)"
     if [[ "$current_size" =~ ^[0-9]+$ ]] && (( current_size > LOG_MAX_SIZE )); then
-      mv "$LOG" "$LOG.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+      # 时间戳只到秒：同一秒内轮转两次会得到同名目标，mv 直接覆盖前一份
+      # （日志静默丢失）。先试纯时间戳保持常见命名不变，撞名再加 pid。
+      log_target="$LOG.$(date +%Y%m%d%H%M%S)"
+      [ -e "$log_target" ] && log_target="$log_target.$$"
+      mv "$LOG" "$log_target" 2>/dev/null || true
     fi
   fi
 
@@ -186,8 +190,8 @@ list_complete_snapshots() {
   find "$base" -maxdepth 1 -mindepth 1 -type d \
     -name '20*' ! -name '*.failed.*' \
     -exec test -f '{}/.complete' \; \
-    -printf '%f\n' 2>/dev/null \
-    | LC_ALL=C sort -r || true
+    -printf '%f\0' 2>/dev/null \
+    | LC_ALL=C sort -z -r || true
 }
 
 # 统计文件数。-printf '.' | wc -c 避免 wc -l 按行、大树时少造很多换行。
@@ -202,6 +206,23 @@ count_files() {
   fi
   # GNU wc 可能在数字前补空格
   printf '%s\n' "${n// /}"
+}
+
+# 上一份快照的文件数：优先读快照完成时写入的 .filecount。
+# 该值取自本次 rsync --stats 的 "Number of files (reg: N)"，与 find -type f
+# 口径一致（都已应用 exclude 与 -x），所以无需再对旧快照走一遍全树。
+# 老快照（本机制上线前生成的）没有该文件，回退到遍历；不补写——它们已是只读。
+count_snapshot_files() {
+  local dir="$1"
+  local n
+  if [ -r "$dir/.filecount" ]; then
+    n="$(< "$dir/.filecount")"
+    if [[ "$n" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$n"
+      return 0
+    fi
+  fi
+  count_files "$dir"
 }
 
 # 整数是否在数组里。用于 rsync 退出码分类。
@@ -260,7 +281,10 @@ check_free_space() {
     ) || true
     if [[ "${total:-0}" =~ ^[0-9]+$ ]] && [[ "${avail:-0}" =~ ^[0-9]+$ ]] \
        && (( total > 0 )); then
-      if (( avail * 100 < total * MIN_FREE_PCT )); then
+      # df -B1 给的是字节，avail*100 在 9.2e18 处整数溢出：92PB 以上的盘
+      # 会把「空间不足」静默算成永假（等于关掉检查）。awk 用 double，不回绕。
+      if awk -v a="$avail" -v t="$total" -v p="$MIN_FREE_PCT" \
+           'BEGIN { exit !(a * 100 < t * p) }'; then
         space_shortage "备份盘空间不足: $path 可用 $avail / 总共 $total （阈值 ${MIN_FREE_PCT}%）" "$soft" || return 1
       fi
     else
@@ -276,7 +300,9 @@ check_free_space() {
     # 部分网络盘没有 inode，itotal 会是 0 或 -
     if [[ "${itotal:-0}" =~ ^[0-9]+$ ]] && [[ "${ifree:-0}" =~ ^[0-9]+$ ]] \
        && (( itotal > 0 )); then
-      if (( ifree * 100 < itotal * MIN_FREE_INODE_PCT )); then
+      # 同上：inode 数在超大文件系统上同样会溢出
+      if awk -v a="$ifree" -v t="$itotal" -v p="$MIN_FREE_INODE_PCT" \
+           'BEGIN { exit !(a * 100 < t * p) }'; then
         space_shortage "备份盘 inode 不足: $path 可用 $ifree / 总共 $itotal （阈值 ${MIN_FREE_INODE_PCT}%）" "$soft" || return 1
       fi
     else
@@ -303,9 +329,9 @@ handle_leftovers() {
 
   _resume_out=""
 
-  mapfile -t leftovers < <(
+  mapfile -d '' -t leftovers < <(
     find "$base" -maxdepth 1 -mindepth 1 -type d -name '.20*.inprogress.*' \
-      -printf '%f\n' 2>/dev/null | LC_ALL=C sort -r || true
+      -printf '%f\0' 2>/dev/null | LC_ALL=C sort -z -r || true
   )
 
   # 第一遍：清掉已完成的残留，把未完成的收集起来
@@ -381,7 +407,7 @@ prune_snapshots() {
   local -a snapshots=()
   local count i old
 
-  mapfile -t snapshots < <(list_complete_snapshots "$base")
+  mapfile -d '' -t snapshots < <(list_complete_snapshots "$base")
   count="${#snapshots[@]}"
 
   if (( count > KEEP )); then
@@ -407,9 +433,9 @@ prune_failed() {
   local f
   local -a old_failed=() leftover_failed=()
 
-  mapfile -t old_failed < <(
+  mapfile -d '' -t old_failed < <(
     find "$base" -maxdepth 1 -mindepth 1 -type d -name '*.failed.*' \
-      -mtime +"$FAILED_KEEP_DAYS" -printf '%p\n' 2>/dev/null || true
+      -mtime +"$FAILED_KEEP_DAYS" -print0 2>/dev/null || true
   )
   for f in "${old_failed[@]}"; do
     [ -z "$f" ] && continue
@@ -422,9 +448,9 @@ prune_failed() {
   done
 
   if (( FAILED_KEEP_COUNT > 0 )); then
-    mapfile -t leftover_failed < <(
+    mapfile -d '' -t leftover_failed < <(
       find "$base" -maxdepth 1 -mindepth 1 -type d -name '*.failed.*' \
-        -printf '%f\n' 2>/dev/null | LC_ALL=C sort -r || true
+        -printf '%f\0' 2>/dev/null | LC_ALL=C sort -z -r || true
     )
     local n="${#leftover_failed[@]}"
     local i
@@ -481,7 +507,7 @@ backup_one() {
   local SRC NAME EXTRA
   local BASE DATE DEST WORK LATEST
   local -a LINK_OPT=() RSYNC_OPTS=()
-  local rc class t0 src_count prev_count src_dev root_dev entries
+  local rc class t0 src_count prev_count src_dev root_dev entries _reg stats_file
   local RESUME_WORK=""
 
   # IFS 只作用于这条 read，不会改掉整个脚本的 IFS
@@ -534,6 +560,30 @@ backup_one() {
     fi
   fi
 
+  # 源与备份根互为包含时必须拒绝：任一方向成立，每份快照都会把上一份完整
+  # 吞进去（--link-dest 只硬链接 identical 文件，路径层级不同照样复制），
+  # KEEP 轮之内盘就被指数级吃光。pwd -P 先解掉符号链接再比，否则
+  # /data -> /back/data 这类配置能绕过字符串比较。
+  if [ -d "$BACKUP_BASE" ]; then
+    local src_real base_real
+    src_real="$(cd "$SRC" && pwd -P)"
+    base_real="$(cd "$BACKUP_BASE" && pwd -P)"
+    case "$src_real/" in
+      "$base_real"/*)
+        log "源 $SRC 位于备份根 $BACKUP_BASE 之内，拒绝备份（快照会自我吞并）"
+        overall_rc=1
+        return 0
+        ;;
+    esac
+    case "$base_real/" in
+      "$src_real"/*)
+        log "备份根 $BACKUP_BASE 位于源 $SRC 之内，拒绝备份（备份盘会被当数据备份）"
+        overall_rc=1
+        return 0
+        ;;
+    esac
+  fi
+
   BASE="$BACKUP_BASE/$NAME"
   mkdir -p "$BASE"
 
@@ -571,13 +621,13 @@ backup_one() {
 
   # 上一份成功快照作为硬链接参考。必须用绝对路径（相对路径是相对 dest 解释的）。
   local -a all_snaps=()
-  mapfile -t all_snaps < <(list_complete_snapshots "$BASE")
+  mapfile -d '' -t all_snaps < <(list_complete_snapshots "$BASE")
   LATEST="${all_snaps[0]:-}"
 
   if (( SHRINK_RATIO > 0 )) && [ -n "$LATEST" ] && [ -d "$BASE/$LATEST" ]; then
     log "检查源是否异常缩小（SHRINK_RATIO=$SHRINK_RATIO）..."
     src_count="$(count_files "$SRC")"
-    prev_count="$(count_files "$BASE/$LATEST")"
+    prev_count="$(count_snapshot_files "$BASE/$LATEST")"
     if [[ "$src_count" =~ ^[0-9]+$ ]] && [[ "$prev_count" =~ ^[0-9]+$ ]] && (( prev_count > 0 )); then
       # 源文件数 * SHRINK_RATIO < 上次快照文件数，视为异常骤降（例如源只剩 lost+found 以外的几个文件）
       if (( src_count * SHRINK_RATIO < prev_count )); then
@@ -644,15 +694,21 @@ backup_one() {
 
   t0=$SECONDS
   rc=0
+  # rsync 输出要留一份原始副本：--stats 的 "Number of files" 会在快照完成时
+  # 写进 .filecount，下次缩小检查直接读它，省掉对旧快照的一遍全树遍历。
+  # 日志仍按原顺序整段追加，观察到的输出不变。
+  stats_file="$BASE/.rsync-stats.$$"
   # if 测试中的失败不会触发 set -e；else 里的 $? 才是 rsync 真正的退出码
-  if "${RUN[@]}" rsync "${RSYNC_OPTS[@]}" "$SRC/" "$WORK/" >> "$LOG" 2>&1; then
+  if "${RUN[@]}" rsync "${RSYNC_OPTS[@]}" "$SRC/" "$WORK/" >"$stats_file" 2>&1; then
     rc=0
   else
     rc=$?
   fi
+  cat "$stats_file" >> "$LOG" 2>/dev/null || true
   class="$(rsync_class "$rc")"
 
   if [ "$class" = "fail" ]; then
+    rm -f -- "$stats_file" 2>/dev/null || true
     log "备份失败 $SRC -> $WORK，退出码 $rc，耗时 $((SECONDS - t0))s"
     mark_failed "$WORK" "$BASE" "$DATE"
     CURRENT_WORK=""
@@ -668,6 +724,26 @@ backup_one() {
   if command -v sync >/dev/null 2>&1; then
     sync -f "$WORK" 2>/dev/null || sync 2>/dev/null || true
   fi
+
+  # 把本次 rsync 看到的普通文件数写进快照，供下次缩小检查直接读取。
+  # 用 --stats 而不是再 find 一遍：rsync 刚走完源，这里是零额外 I/O。
+  # 兼容两种格式：真实 rsync 是 "Number of files: 1,234 (reg: 1,200, ...)"，
+  # mock-rsync 只输出 "Number of files: 1234"。
+  if [ -r "$stats_file" ]; then
+    _reg="$(awk '
+      /^Number of files:/ {
+        if (match($0, /reg: *[0-9][0-9,]*/)) {
+          v = substr($0, RSTART, RLENGTH); sub(/reg: */, "", v)
+        } else {
+          v = $0; sub(/^[^:]*: */, "", v); sub(/[^0-9,].*$/, "", v)
+        }
+        gsub(/,/, "", v); print v; exit
+      }' "$stats_file" 2>/dev/null || true)"
+    if [[ "$_reg" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$_reg" > "$WORK/.filecount" 2>/dev/null || true
+    fi
+  fi
+  rm -f -- "$stats_file" 2>/dev/null || true
 
   if ! touch "$WORK/.complete"; then
     log "写入 .complete 失败: $WORK"
@@ -793,7 +869,9 @@ done
 unset _seen_name _entry _n
 
 # mapfile 是 builtin，不必探测。head 已不再依赖。
-for cmd in rsync flock find sort mountpoint nice stat df chmod touch mv rm mkdir sync; do
+# date/sleep/wc/tail/dirname/basename 也在用：缺 tail 会让空间检查被静默跳过。
+for cmd in rsync flock find sort mountpoint nice stat df chmod touch mv rm mkdir sync awk \
+           date sleep wc tail dirname basename; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "缺少命令: $cmd" >&2
     exit 1

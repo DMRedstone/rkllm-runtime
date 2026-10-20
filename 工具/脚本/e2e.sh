@@ -73,8 +73,8 @@ mkdir -p "$SB/src/data1/sub" "$SB/src/data2" "$SB/log" "$SB/lock"
 gen_copy "$SB/rsync-test.sh" KEEP=3 LOG_MAX_SIZE=500
 # 原文件末行无换行符，wc -l 会少数一行；awk END{print NR} 不受末行换行影响
 eq "1.1 副本与原件行数一致" "$(awk 'END{print NR}' "$SRC")" "$(awk 'END{print NR}' "$SB/rsync-test.sh")"
-sed -n '144,705p' "$SRC" > "$SB/zone-orig.txt"
-sed -n '144,705p' "$SB/rsync-test.sh" > "$SB/zone-copy.txt"
+sed -n '144,781p' "$SRC" > "$SB/zone-orig.txt"
+sed -n '144,781p' "$SB/rsync-test.sh" > "$SB/zone-copy.txt"
 if diff -q "$SB/zone-orig.txt" "$SB/zone-copy.txt" >/dev/null; then
   PASS=$((PASS+1)); printf '  PASS  1.2 函数区（144-705 行）逐字节一致，逻辑零改动\n'
 else

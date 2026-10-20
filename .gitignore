@@ -24,3 +24,9 @@ Thumbs.db
 工具/大模型测试工具链/corpus/
 工具/大模型测试工具链/csv/
 工具/大模型测试工具链/realworld_samples/
+
+# rsync-backup 测试残留（harness.sh 在脚本目录就地生成，不入库）
+工具/脚本/funcs.sh
+工具/脚本/harness.log
+工具/脚本/t[0-9]*/
+工具/脚本/h-*/

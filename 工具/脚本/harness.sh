@@ -11,7 +11,7 @@ LOG="$SB/harness.log"
 command rm -rf "$SB/t2" "$SB/t3" "$SB/t4a" "$SB/t4b" "$SB/t4c" "$SB/t4d" "$SB/t5" "$SB/t6a" "$SB/t6b" "$SB/t8" "$SB/t9" "$SB/t10" "$SB/t11" "$SB/h-back"
 
 # ---------- 抽取自证 ----------
-sed -n '144,705p' "$SRC" > "$SB/funcs.sh"
+sed -n '144,781p' "$SRC" > "$SB/funcs.sh"
 if [ "$(head -n 1 "$SB/funcs.sh")" != "log() {" ]; then echo "FATAL: 抽取起点不是 log() {"; exit 1; fi
 if [ "$(tail -n 1 "$SB/funcs.sh")" != "}" ]; then echo "FATAL: 抽取终点不是 backup_one 收尾"; exit 1; fi
 printf '函数抽取自证通过：%s 行\n' "$(wc -l < "$SB/funcs.sh")"
@@ -71,8 +71,10 @@ lc="$SB/t3"
 mkdir -p "$lc/2026-10-01_000000" "$lc/2026-10-02_000000" "$lc/2026-10-03_000000.failed.9" "$lc/.2026-10-04_000000.inprogress.9" "$lc/2026-10-05_000000"
 : > "$lc/2026-10-01_000000/.complete"; : > "$lc/2026-10-05_000000/.complete"
 : > "$lc/2026-10-03_000000.failed.9/.complete"; : > "$lc/.2026-10-04_000000.inprogress.9/.complete"
+mapfile -d '' -t _t3 < <(list_complete_snapshots "$lc")
 eq "T3.1 只列带 .complete 的正式快照、新的在前" \
-  "$(printf '2026-10-05_000000\n2026-10-01_000000')" "$(list_complete_snapshots "$lc")"
+  "2026-10-05_000000 2026-10-01_000000" "${_t3[*]}"
+eq "T3.1b 输出为 NUL 分隔（文件名含换行也不会串）" "2" "${#_t3[@]}"
 
 printf '\n=== T4 残留目录处理（handle_leftovers） ===\n'
 hl="$SB/t4a"
@@ -113,8 +115,9 @@ ps="$SB/t5"; mkdir -p "$ps"
 for i in 1 2 3 4 5 6; do d="$ps/2026-10-0${i}_000000"; mkdir -p "$d"; : > "$d/.complete"; : > "$d/f"; done
 chmod a-w "$ps/2026-10-01_000000" "$ps/2026-10-02_000000"
 prune_snapshots "$ps"
-eq "T5.1 保留 3 份最新" "3" "$(list_complete_snapshots "$ps" | wc -l)"
-eq "T5.2 剩余确为最新三份" "2026-10-06_000000 2026-10-05_000000 2026-10-04_000000" "$(list_complete_snapshots "$ps" | tr '\n' ' ' | sed 's/ $//')"
+mapfile -d '' -t _t5 < <(list_complete_snapshots "$ps")
+eq "T5.1 保留 3 份最新" "3" "${#_t5[@]}"
+eq "T5.2 剩余确为最新三份" "2026-10-06_000000 2026-10-05_000000 2026-10-04_000000" "${_t5[*]}"
 chk "T5.3 删除路径对只读顶层也生效（chmod u+w 已调用）" [ ! -d "$ps/2026-10-01_000000" ]
 
 printf '\n=== T6 失败目录清理（prune_failed） ===\n'
