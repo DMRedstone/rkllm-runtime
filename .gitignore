@@ -20,7 +20,11 @@ Thumbs.db
 # 测试工具链的运行产物（报告、结果、语料）
 工具/大模型测试工具链/report*.html
 工具/大模型测试工具链/report*.md
-工具/大模型测试工具链/results/
+# 整个目录排除用 results/*，不用 results/：后者会让下面的白名单失效，
+# 而 extra.json 是人工补充数据（板端资源、max_tokens 验证、被测版本），
+# 报告靠它才能复现，必须入库。
+工具/大模型测试工具链/results/*
+!工具/大模型测试工具链/results/extra.json
 工具/大模型测试工具链/corpus/
 工具/大模型测试工具链/csv/
 工具/大模型测试工具链/realworld_samples/

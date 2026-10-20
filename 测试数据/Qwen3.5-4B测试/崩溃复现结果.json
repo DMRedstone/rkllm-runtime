@@ -22,7 +22,7 @@
           "calls": [
             {
               "status": 200,
-              "elapsed": 4.69,
+              "elapsed": 4.64,
               "err": null
             }
           ],
@@ -33,7 +33,7 @@
           "calls": [
             {
               "status": 200,
-              "elapsed": 4.69,
+              "elapsed": 4.63,
               "err": null
             }
           ],
@@ -51,12 +51,12 @@
           "calls": [
             {
               "status": 200,
-              "elapsed": 1.0,
+              "elapsed": 2.01,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 1.97,
+              "elapsed": 3.98,
               "err": null
             }
           ],
@@ -67,12 +67,12 @@
           "calls": [
             {
               "status": 200,
-              "elapsed": 1.0,
+              "elapsed": 2.01,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 1.97,
+              "elapsed": 3.95,
               "err": null
             }
           ],
@@ -83,12 +83,12 @@
           "calls": [
             {
               "status": 200,
-              "elapsed": 1.01,
+              "elapsed": 2.01,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 1.97,
+              "elapsed": 3.97,
               "err": null
             }
           ],
@@ -106,12 +106,12 @@
           "calls": [
             {
               "status": 200,
-              "elapsed": 10.74,
+              "elapsed": 4.67,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 15.45,
+              "elapsed": 18.87,
               "err": null
             }
           ],
@@ -122,12 +122,12 @@
           "calls": [
             {
               "status": 200,
-              "elapsed": 10.82,
+              "elapsed": 4.69,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 15.59,
+              "elapsed": 18.8,
               "err": null
             }
           ],
@@ -138,12 +138,12 @@
           "calls": [
             {
               "status": 200,
-              "elapsed": 4.82,
+              "elapsed": 14.16,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 15.77,
+              "elapsed": 18.82,
               "err": null
             }
           ],
@@ -161,12 +161,12 @@
           "calls": [
             {
               "status": 200,
-              "elapsed": 13.44,
+              "elapsed": 16.63,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 32.2,
+              "elapsed": 28.88,
               "err": null
             }
           ],
@@ -177,12 +177,12 @@
           "calls": [
             {
               "status": 200,
-              "elapsed": 14.48,
+              "elapsed": 16.59,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 34.03,
+              "elapsed": 28.76,
               "err": null
             }
           ],
@@ -193,12 +193,12 @@
           "calls": [
             {
               "status": 200,
-              "elapsed": 19.51,
+              "elapsed": 12.23,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 33.98,
+              "elapsed": 28.77,
               "err": null
             }
           ],
@@ -216,22 +216,22 @@
           "calls": [
             {
               "status": 200,
-              "elapsed": 14.57,
+              "elapsed": 14.15,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 28.99,
+              "elapsed": 28.27,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 43.46,
+              "elapsed": 42.38,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 57.9,
+              "elapsed": 56.5,
               "err": null
             }
           ],
@@ -242,22 +242,22 @@
           "calls": [
             {
               "status": 200,
-              "elapsed": 14.47,
+              "elapsed": 14.16,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 28.92,
+              "elapsed": 28.27,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 41.77,
+              "elapsed": 42.41,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 54.91,
+              "elapsed": 56.51,
               "err": null
             }
           ],
@@ -268,22 +268,167 @@
           "calls": [
             {
               "status": 200,
-              "elapsed": 13.2,
+              "elapsed": 14.16,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 26.41,
+              "elapsed": 28.26,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 39.76,
+              "elapsed": 42.4,
               "err": null
             },
             {
               "status": 200,
-              "elapsed": 53.01,
+              "elapsed": 56.53,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        }
+      ]
+    },
+    {
+      "scenario": "S6 8x concurrent chat",
+      "repeat": 3,
+      "crashes": 0,
+      "runs": [
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 14.16,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 28.28,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 42.4,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 56.52,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 70.64,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 84.74,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 98.86,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 112.98,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        },
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 14.16,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 28.29,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 42.41,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 56.52,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 70.62,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 84.74,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 98.86,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 112.99,
+              "err": null
+            }
+          ],
+          "crashed": false,
+          "recovery_s": null
+        },
+        {
+          "calls": [
+            {
+              "status": 200,
+              "elapsed": 14.15,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 28.27,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 42.38,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 56.48,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 70.59,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 84.7,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 98.81,
+              "err": null
+            },
+            {
+              "status": 200,
+              "elapsed": 112.93,
               "err": null
             }
           ],

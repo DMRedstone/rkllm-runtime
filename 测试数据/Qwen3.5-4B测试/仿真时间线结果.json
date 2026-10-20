@@ -3,7 +3,7 @@
   "model": "qwen3.5-4b_w8a8_rk3588",
   "alive_at_end": true,
   "died_at": null,
-  "elapsed_s": 252.6,
+  "elapsed_s": 461.4,
   "paste_failures": [
     [
       8000,
@@ -15,12 +15,12 @@
     ]
   ],
   "final_stats": {
-    "requests": 23,
-    "rejected": 3,
+    "requests": 321,
+    "rejected": 260,
     "errors": 0,
-    "prompt_tokens": 3888,
-    "completion_tokens": 785,
-    "started": 1792060710.437685
+    "prompt_tokens": 20790,
+    "completion_tokens": 3599,
+    "started": 1792502265.5861912
   },
   "timeline": [
     {
@@ -35,7 +35,7 @@
       "label": "alive@handshake",
       "ok": true,
       "elapsed_s": null,
-      "detail": "requests=0"
+      "detail": "requests=286"
     },
     {
       "scenario": "handshake",
@@ -49,7 +49,7 @@
       "label": "alive@connectivity probe",
       "ok": true,
       "elapsed_s": null,
-      "detail": "requests=1"
+      "detail": "requests=287"
     },
     {
       "scenario": "handshake",
@@ -63,27 +63,27 @@
       "label": "alive@empty send",
       "ok": true,
       "elapsed_s": null,
-      "detail": "requests=1"
+      "detail": "requests=287"
     },
     {
       "scenario": "conversation",
       "label": "turn 1",
       "ok": true,
-      "elapsed_s": 10.011,
-      "detail": "我是 Qwen3.5，阿里巴巴最新推出的通义千问大语言模型。我具备强大的逻辑推理、代码生成及多模态理解能力，能高效处理复"
+      "elapsed_s": 14.836,
+      "detail": "我是 Qwen3.5，阿里巴巴最新推出的通义千问大语言模型。我具备强大的逻辑推理、代码生成及多模态理解能力，支持全球 1"
     },
     {
       "scenario": "conversation",
       "label": "alive@conversation turn 1",
       "ok": true,
       "elapsed_s": null,
-      "detail": "requests=2"
+      "detail": "requests=288"
     },
     {
       "scenario": "conversation",
       "label": "turn 2",
       "ok": true,
-      "elapsed_s": 3.995,
+      "elapsed_s": 6.081,
       "detail": "我是 Qwen3.5，阿里巴巴最新推出的通义千问大语言模型。"
     },
     {
@@ -91,13 +91,13 @@
       "label": "alive@conversation turn 2",
       "ok": true,
       "elapsed_s": null,
-      "detail": "requests=3"
+      "detail": "requests=289"
     },
     {
       "scenario": "conversation",
       "label": "turn 3",
       "ok": true,
-      "elapsed_s": 2.02,
+      "elapsed_s": 4.233,
       "detail": "The weather is nice today."
     },
     {
@@ -105,13 +105,13 @@
       "label": "alive@conversation turn 3",
       "ok": true,
       "elapsed_s": null,
-      "detail": "requests=4"
+      "detail": "requests=290"
     },
     {
       "scenario": "conversation",
       "label": "turn 4",
       "ok": true,
-      "elapsed_s": 1.815,
+      "elapsed_s": 4.238,
       "detail": "今日は天気が良いです。"
     },
     {
@@ -119,41 +119,41 @@
       "label": "alive@conversation turn 4",
       "ok": true,
       "elapsed_s": null,
-      "detail": "requests=5"
+      "detail": "requests=291"
     },
     {
       "scenario": "paste",
       "label": "800 chars",
       "ok": true,
-      "elapsed_s": 15.462,
-      "detail": "该文档介绍了在 OrangePi 5 Plus（RK3588 芯片）上部署大语言模型时，需综合考虑内"
+      "elapsed_s": 17.821,
+      "detail": "该文档介绍了在搭载 RK3588 芯片的 OrangePi 5 Plus（8GB 内存、三核 NPU"
     },
     {
       "scenario": "paste",
       "label": "alive@long paste 800 chars",
       "ok": true,
       "elapsed_s": null,
-      "detail": "requests=6"
+      "detail": "requests=292"
     },
     {
       "scenario": "paste",
       "label": "3000 chars",
       "ok": true,
-      "elapsed_s": 37.371,
-      "detail": "该文档强调在 OrangePi 5 Plus（RK3588）上部署大模型需平衡内存、算力、量化精度及"
+      "elapsed_s": 40.125,
+      "detail": "该文档介绍了在搭载 RK3588 芯片的 OrangePi 5 Plus（8GB 内存、三核 NPU"
     },
     {
       "scenario": "paste",
       "label": "alive@long paste 3000 chars",
       "ok": true,
       "elapsed_s": null,
-      "detail": "requests=7"
+      "detail": "requests=293"
     },
     {
       "scenario": "paste",
       "label": "8000 chars",
       "ok": false,
-      "elapsed_s": 0.06,
+      "elapsed_s": 0.067,
       "detail": "HTTP 400 {\"error\": {\"message\": \"prompt too long: about 5959 tokens for a 4096-token context window "
     },
     {
@@ -161,13 +161,20 @@
       "label": "alive@long paste 8000 chars",
       "ok": true,
       "elapsed_s": null,
-      "detail": "requests=8"
+      "detail": "requests=294"
+    },
+    {
+      "scenario": "paste",
+      "label": "reject_boundary_chars",
+      "ok": true,
+      "elapsed_s": null,
+      "detail": "8000"
     },
     {
       "scenario": "paste",
       "label": "16000 chars",
       "ok": false,
-      "elapsed_s": 0.061,
+      "elapsed_s": 0.045,
       "detail": "HTTP 400 {\"error\": {\"message\": \"prompt too long: about 11862 tokens for a 4096-token context window"
     },
     {
@@ -175,21 +182,35 @@
       "label": "alive@long paste 16000 chars",
       "ok": true,
       "elapsed_s": null,
-      "detail": "requests=9"
+      "detail": "requests=300"
+    },
+    {
+      "scenario": "paste",
+      "label": "reject_boundary_chars",
+      "ok": true,
+      "elapsed_s": null,
+      "detail": "12343"
     },
     {
       "scenario": "interruption",
       "label": "abort_mid_stream",
       "ok": true,
       "elapsed_s": null,
-      "detail": "5 chunks"
+      "detail": "4 chunks"
+    },
+    {
+      "scenario": "interruption",
+      "label": "server_busy_tail_s",
+      "ok": true,
+      "elapsed_s": null,
+      "detail": "57.6s"
     },
     {
       "scenario": "interruption",
       "label": "alive@after interruption",
       "ok": true,
       "elapsed_s": null,
-      "detail": "requests=10"
+      "detail": "requests=307"
     },
     {
       "scenario": "session",
@@ -203,119 +224,126 @@
       "label": "fresh_chat",
       "ok": true,
       "elapsed_s": null,
-      "detail": "1. **北京香山**：深秋时节层林尽染，红枫与黄叶交相辉映，是观赏红叶的最佳胜地之一。  \n2. **云南元阳梯田**"
+      "detail": "1. **北京香山**：层林尽染，红枫与银杏交织，是经典的秋日赏景地。  \n2. **云南元阳梯田**：灌水期如镜面倒映"
     },
     {
       "scenario": "session",
       "label": "alive@session switch",
       "ok": true,
       "elapsed_s": null,
-      "detail": "requests=11"
+      "detail": "requests=308"
     },
     {
       "scenario": "background",
       "label": "chat_while_title",
       "ok": true,
-      "elapsed_s": 14.38,
-      "detail": "Python 中**列表（list）**是可变序列，可修改内容；**元组（tuple）**是不可变序列，创建后无法更改。"
+      "elapsed_s": 24.473,
+      "detail": "1. **可变性**：列表（`list`）是可变的，创建后内容可修改；元组（`tuple`）是不可变的，一旦创建无法更改"
     },
     {
       "scenario": "background",
       "label": "title_request",
       "ok": true,
       "elapsed_s": null,
-      "detail": "{\"isNewTopic\": true, \"title\": \"Python Quick Sort Implementation\"}"
+      "detail": "{\"isNewTopic\": true, \"title\": \"python quicksort implementation guide\"}"
     },
     {
       "scenario": "background",
       "label": "alive@concurrent title generation",
       "ok": true,
       "elapsed_s": null,
-      "detail": "requests=13"
+      "detail": "requests=310"
     },
     {
       "scenario": "mixed",
       "label": "vu=3",
       "ok": true,
-      "elapsed_s": 53.768,
-      "detail": "n=10 ok=10 wall=53.8s"
+      "elapsed_s": 58.155,
+      "detail": "n=11 ok=11 wall=58.2s"
     },
     {
       "scenario": "mixed",
       "label": "short_chat",
       "ok": true,
-      "elapsed_s": 4.709,
-      "detail": "杭州是一座以西湖美景、丝绸文化和南宋历史闻名的江南名城，兼具自然山水与人文底蕴。"
+      "elapsed_s": 4.225,
+      "detail": "杭州是一座以西湖闻名、拥有千年历史底蕴且正蓬勃发展的现代化数字之城。"
     },
     {
       "scenario": "mixed",
       "label": "short_chat",
       "ok": true,
-      "elapsed_s": 8.638,
-      "detail": "杭州是浙江省省会，以西湖、丝绸和南宋文化著称的江南名城。"
+      "elapsed_s": 8.213,
+      "detail": "杭州是一座以西湖闻名、拥有数字经济活力与丰富历史文化的中国南方城市。"
     },
     {
       "scenario": "mixed",
       "label": "short_chat",
       "ok": true,
-      "elapsed_s": 12.597,
-      "detail": "杭州是一座因西湖而闻名的历史文化名城，兼具自然美景与深厚人文底蕴。"
+      "elapsed_s": 12.567,
+      "detail": "杭州是一座以西湖美景、数字经济和“诗与远方”文化闻名的现代化国际大都市。"
     },
     {
       "scenario": "mixed",
       "label": "short_chat",
       "ok": true,
-      "elapsed_s": 11.016,
-      "detail": "杭州是浙江省省会，以西湖、丝绸和南宋文化著称的江南名城。"
+      "elapsed_s": 11.679,
+      "detail": "杭州是一座以西湖闻名、拥有千年历史底蕴且正蓬勃发展的现代化数字之城。"
     },
     {
       "scenario": "mixed",
       "label": "short_chat",
       "ok": true,
-      "elapsed_s": 11.46,
-      "detail": "杭州是一座因西湖而闻名的历史文化名城，兼具自然美景与深厚人文底蕴。"
+      "elapsed_s": 12.087,
+      "detail": "杭州是一座以西湖闻名、拥有数字经济活力与丰富历史文化的中国南方城市。"
     },
     {
       "scenario": "mixed",
       "label": "short_chat",
       "ok": true,
-      "elapsed_s": 10.603,
-      "detail": "杭州是浙江省省会，以西湖、丝绸和南宋文化著称的江南名城。"
+      "elapsed_s": 11.186,
+      "detail": "杭州是一座以西湖美景、数字经济和“诗与远方”文化闻名的现代化国际大都市。"
     },
     {
       "scenario": "mixed",
       "label": "summarise",
       "ok": true,
-      "elapsed_s": 21.946,
-      "detail": "在嵌入式设备上部署大模型面临严峻挑战：首先需**高带宽内存**（如 LPDDR5"
+      "elapsed_s": 22.327,
+      "detail": "在嵌入式 NPU（如 Rockchip）上部署大模型面临严峻挑战：首先需**高带"
     },
     {
       "scenario": "mixed",
       "label": "short_chat",
       "ok": true,
-      "elapsed_s": 21.134,
-      "detail": "杭州是浙江省省会，以西湖、丝绸和南宋文化著称的江南名城。"
+      "elapsed_s": 21.425,
+      "detail": "杭州是一座以西湖闻名、拥有数字经济活力与丰富历史文化的中国南方城市。"
     },
     {
       "scenario": "mixed",
       "label": "title",
       "ok": true,
-      "elapsed_s": 22.932,
-      "detail": "{\"isNewTopic\": true, \"title\": \"杭州简介与 NPU"
+      "elapsed_s": 22.425,
+      "detail": "{\"isNewTopic\": true, \"title\": \"user 2 se"
     },
     {
       "scenario": "mixed",
       "label": "title",
       "ok": true,
-      "elapsed_s": 13.907,
-      "detail": "{\"isNewTopic\": true, \"title\": \"杭州简介与 NPU"
+      "elapsed_s": 12.916,
+      "detail": "{\"isNewTopic\": true, \"title\": \"user 1 se"
+    },
+    {
+      "scenario": "mixed",
+      "label": "short_chat",
+      "ok": true,
+      "elapsed_s": 12.655,
+      "detail": "杭州是一座以西湖闻名、拥有数字经济活力与丰富历史文化的中国南方城市。"
     },
     {
       "scenario": "mixed",
       "label": "alive@after mixed workload",
       "ok": true,
       "elapsed_s": null,
-      "detail": "requests=23"
+      "detail": "requests=321"
     }
   ]
 }

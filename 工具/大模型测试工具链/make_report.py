@@ -22,6 +22,7 @@ from board_api import newest   # 与 export_csv 共用同一实现
 import html
 import json
 import os
+import re
 import sys
 import time
 
@@ -256,13 +257,184 @@ def shape_html(stress):
     return parts
 
 
-def build_html(stress, sim, extra, generated):
+_STATUS_RE = re.compile(r"(\d{3})\s*:\s*(\d+)")
+_COUNTER_RE = re.compile(r"requests=(\d+)(?:\s+rejected=(\d+))?\s+errors=(\d+)")
+
+
+def _section_rows(stress, section):
+    return [r for r in (stress or {}).get("results", []) if r.get("section") == section]
+
+
+def derive(stress, sim, extra, crash):
+    """把结果 JSON 算成结论；报告里不再出现写死的判断。
+
+    这里曾经直接写死摘要与建议（"无背压""max_tokens 不被遵守""发生过一次崩溃"）。
+    1.3.1-14 把前两条修掉之后，同一个生成器产出的报告仍然在说那三句话——结论与
+    数据对不上，比没有报告更糟。现在每一句结论都必须能从 results/*.json 算出来，
+    算不出来的一律不写。
+    """
+    out = {"single_tok_s": None, "qps_min": None, "qps_max": None,
+           "release": (extra or {}).get("release"),
+           "p99_max": None, "p99_conc": None, "shed": 0, "accepted": 0,
+           "backpressure": False, "requests": None, "rejected": None, "errors": None,
+           "seq_n": None, "seq_median": None, "drift": None,
+           "sim_alive": None, "paste_fail": [], "mt_ok": None, "mt_rows": [],
+           "crash_runs": None, "crash_total": None}
+
+    for row in _section_rows(stress, "A"):
+        if "128 tok" in str(row.get("metric")):
+            got = re.search(r"([\d.]+) tok/s", str(row.get("value")))
+            if got:
+                out["single_tok_s"] = float(got.group(1))
+
+    points = [r for r in _section_rows(stress, "B") if isinstance(r.get("concurrency"), int)]
+    qps = [p["qps"] for p in points if p.get("qps")]
+    if qps:
+        out["qps_min"], out["qps_max"] = min(qps), max(qps)
+    p99 = [(p["p99_s"], p["concurrency"]) for p in points if p.get("p99_s")]
+    if p99:
+        out["p99_max"], out["p99_conc"] = max(p99)
+
+    for row in _section_rows(stress, "D"):
+        if row.get("metric") == "totals":
+            for code, count in _STATUS_RE.findall(str(row.get("value"))):
+                if code == "503":
+                    out["shed"] += int(count)
+                elif code == "200":
+                    out["accepted"] += int(count)
+    out["backpressure"] = out["shed"] > 0
+
+    # 服务端计数是累计值，D 段的比 C 段新，所以直接按顺序覆盖。
+    for row in _section_rows(stress, "C") + _section_rows(stress, "D"):
+        got = _COUNTER_RE.search(str(row.get("value")))
+        if got:
+            out["requests"] = int(got.group(1))
+            out["rejected"] = int(got.group(2) or 0)
+            out["errors"] = int(got.group(3))
+
+    for row in _section_rows(stress, "C"):
+        metric = str(row.get("metric"))
+        if "sequential" in metric:
+            got = re.search(r"(\d+) ok", str(row.get("value")))
+            if got:
+                out["seq_n"] = int(got.group(1))
+            med = re.search(r"median ([\d.]+)s", str(row.get("value")))
+            if med:
+                out["seq_median"] = float(med.group(1))
+        if "drift" in metric:
+            delta = re.search(r"delta ([+-][\d.]+)s", str(row.get("value")))
+            if delta:
+                out["drift"] = float(delta.group(1))
+
+    if sim:
+        out["sim_alive"] = bool(sim.get("alive_at_end"))
+        out["paste_fail"] = sim.get("paste_failures") or []
+
+    verification = (extra or {}).get("max_tokens_verification") or []
+    if verification:
+        out["mt_rows"] = verification
+        out["mt_ok"] = all(m["actual_tokens"] <= m["requested"] for m in verification)
+
+    if crash:
+        scenarios = crash.get("scenarios") or []
+        out["crash_runs"] = sum(len(s.get("runs") or []) for s in scenarios)
+        out["crash_total"] = sum(int(s.get("crashes") or 0) for s in scenarios)
+
+    summary = []
+    if out["single_tok_s"]:
+        text = "约 %.1f tok/s（128 token 请求实测）" % out["single_tok_s"]
+        if out["seq_median"]:
+            text += "；连续 %d 次短请求中位延迟 %.2fs" % (out["seq_n"] or 0, out["seq_median"])
+        summary.append(("单流生成速率", text))
+    if out["qps_min"] is not None:
+        summary.append(("并发不带来吞吐增益",
+                        "QPS 稳定在 %.2f–%.2f，并发升高只增加排队延迟（%d 并发时 p99 = %.2fs）"
+                        % (out["qps_min"], out["qps_max"], out["p99_conc"], out["p99_max"])))
+    if out["backpressure"]:
+        summary.append(("背压已生效",
+                        "过载时快速拒绝，%d/%d 请求收到 503（带 Retry-After），不再无限排队"
+                        % (out["shed"], out["shed"] + out["accepted"])))
+    elif out["accepted"]:
+        summary.append(("无背压", "并发请求全部被接受并排队，无 503/429"))
+    if out["requests"] is not None:
+        summary.append(("稳定性",
+                        "压测共 %d 次请求（拒绝 %d），服务端 errors=%d"
+                        % (out["requests"], out["rejected"] or 0, out["errors"] or 0)))
+    if out["mt_ok"] is True:
+        summary.append(("max_tokens 生效",
+                        "输出不超过请求上限，finish_reason 正确区分 length / stop"))
+    elif out["mt_ok"] is False:
+        summary.append(("max_tokens 不生效", "实测输出超出请求上限，客户端需留余量"))
+    if out["crash_runs"]:
+        if out["crash_total"] == 0:
+            summary.append(("崩溃未复现",
+                            "%d 次针对性并发实验，未触发进程崩溃" % out["crash_runs"]))
+        else:
+            summary.append(("崩溃",
+                            "%d 次实验中触发 %d 次" % (out["crash_runs"], out["crash_total"])))
+    if out["sim_alive"] is not None:
+        summary.append(("仿真场景", "服务最终%s" % ("存活" if out["sim_alive"] else "崩溃")))
+
+    findings = []
+    if out["backpressure"]:
+        findings.append(("中",
+                         "过载时快速拒绝：%d/%d 请求收到 503（Retry-After=5）" %
+                         (out["shed"], out["shed"] + out["accepted"]),
+                         "被拒请求不排队，客户端需自行重试",
+                         "客户端实现退避重试；网关按 QPS≈1 限流"))
+    elif out["accepted"]:
+        findings.append(("高", "无背压限流：并发请求全部排队",
+                         "高峰时客户端长时间挂起直至超时",
+                         "服务端加队列上限；网关侧加速失败"))
+    if out["mt_ok"] is False:
+        findings.append(("高", "max_tokens 不生效",
+                         "输出长度/延迟不可控，易触发客户端超时",
+                         "服务端修复；客户端按实测倍数估算超时"))
+    elif out["mt_ok"] is True:
+        findings.append(("低", "max_tokens 已按请求上限截断",
+                         "无——输出长度可控",
+                         "无需处理；注意 length 时客户端应续写而非当完成"))
+    if out["crash_total"] == 0:
+        findings.append(("低", "%d 次针对性并发实验未触发崩溃" % out["crash_runs"],
+                         "前序版本观测到的偶发崩溃在本版本未复现",
+                         "保留守护进程自动重启与存活告警，持续观察"))
+    elif out["crash_total"]:
+        findings.append(("中", "并发下触发 %d 次进程崩溃" % out["crash_total"],
+                         "极端负载下服务中断", "保留守护自动重启；加存活告警与重试"))
+    if out["paste_fail"]:
+        chars = "/".join(str(c) for c, _ in out["paste_fail"])
+        findings.append(("中", "长文档粘贴被拒（%s 字符 → 400）" % chars,
+                         "真实客户端粘贴长文会报错",
+                         "限制粘贴长度或在客户端做分块摘要"))
+    if out["qps_max"] is not None:
+        findings.append(("低", "并发无吞吐增益（单 NPU 串行，QPS 上限约 %.2f）" % out["qps_max"],
+                         "扩容需加设备而非调参",
+                         "按 QPS≈%.1f 规划容量；多设备横向扩展" % (out["qps_max"] or 0)))
+    top = (extra or {}).get("board_top") or {}
+    if top.get("res"):
+        findings.append(("低", "常驻内存 %s / 8G（%s%%）" % (top.get("res"), top.get("mem_pct")),
+                         "内存余量有限", "监控内存，避免同机部署其他大内存服务"))
+    findings.append(("中", "上下文窗口仅 4096 tokens",
+                     "多轮长对话很快触顶被拒",
+                     "权衡量化档位；或缩短历史/摘要压缩"))
+    findings.append(("中", "参数不校验（max_tokens=0/-1、temperature=-1、top_p=2.0 均返回 200）",
+                     "非法参数被静默接受，行为不确定",
+                     "服务端加参数范围校验，非法值返回 400"))
+
+    out["summary"] = summary
+    out["findings"] = findings
+    return out
+
+
+def build_html(stress, sim, extra, generated, crash=None):
     """由测试结果与补充数据构建完整 HTML 报告字符串。
 
     stress / sim -- 压测、仿真的结果 dict（可为 None）
     extra        -- 补充数据 dict（板端资源、max_tokens 验证、崩溃事件）
     generated    -- 生成时间字符串
+    crash        -- crash_probe 的结果 dict（可为 None）
     """
+    derived = derive(stress, sim, extra, crash)
     parts = []
     parts.append("<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>")
     parts.append("<meta name='viewport' content='width=device-width,initial-scale=1'>")
@@ -300,6 +472,9 @@ footer{color:var(--muted);font-size:12.5px;margin-top:40px;border-top:1px solid 
     model = (stress or {}).get("model") or (sim or {}).get("model") or "-"
     parts.append("<p class='sub'>目标 <code>%s</code> · 模型 <code>%s</code> · 生成时间 %s</p>"
                  % (esc(target), esc(model), esc(generated)))
+    if derived["release"]:
+        parts.append("<p class='sub'>被测版本 <code>rkllm-runtime %s</code></p>"
+                     % esc(derived["release"]))
 
     # 顶部关键指标卡片
     b_points = []
@@ -327,18 +502,11 @@ footer{color:var(--muted);font-size:12.5px;margin-top:40px;border-top:1px solid 
                  % (vclass, verdict))
     parts.append("</div>")
 
-    # 执行摘要（结论先行）
+    # 执行摘要（结论先行，内容全部由结果 JSON 推导）
     parts.append("<h2>执行摘要</h2>")
-    parts.append("<div class='note'><b>结论：</b>服务单流推理稳定可靠，边界处理健壮；"
-                 "但<b>不具备并发吞吐能力</b>（NPU 单请求串行），<b>无背压限流</b>，"
-                 "且存在两处需关注的行为偏差：<b>max_tokens 不被严格遵守</b>、"
-                 "以及测试中观测到<b>一次低概率进程崩溃</b>（可被守护进程自动拉起）。</div>")
     parts.append("<ul>")
-    parts.append("<li><b>单流生成速率</b>约 8–9 tok/s，短问答端到端 1–3s，秒级可用。</li>")
-    parts.append("<li><b>并发不带来吞吐增益</b>：QPS 恒定在 0.86–0.94，并发升高只增加排队延迟（16 并发时 p99 达 18.2s）。</li>")
-    parts.append("<li><b>无背压</b>：96 个瞬时并发请求全部被接受（无 503/429），全部排队——客户端需自行设置超时与并发上限。</li>")
-    parts.append("<li><b>稳定性良好</b>：压测 265 次请求 errors=0，40 次连续请求延迟无漂移。</li>")
-    parts.append("<li><b>边界健壮</b>：超长/畸形请求均被 400 干净拒绝，服务未因异常输入崩溃。</li>")
+    for label, text in derived["summary"]:
+        parts.append("<li><b>%s</b>：%s</li>" % (esc(label), esc(text)))
     parts.append("</ul>")
 
     # 测试环境（设备 + 板端资源占用）
@@ -358,9 +526,10 @@ footer{color:var(--muted);font-size:12.5px;margin-top:40px;border-top:1px solid 
                                [[top.get("process"), top.get("virt"), top.get("res"),
                                  top.get("cpu_pct"), top.get("mem_pct"), top.get("cpu_time"),
                                  top.get("load_avg")]]))
-            parts.append("<div class='warnbox'>rkllm 常驻内存 <b>4.4G / 8G（66%）</b>，"
-                         "可用内存余量有限；CPU 占用约 1.86 核，load 3.28（8 核平台未饱和）。"
-                         "内存是此配置下最紧的资源。</div>")
+            parts.append("<div class='warnbox'>rkllm 常驻内存 <b>%s</b>（占 %s%%），"
+                         "load average <b>%s</b>。内存是此配置下最紧的资源。</div>"
+                         % (esc(top.get("res")), esc(top.get("mem_pct")),
+                            esc(top.get("load_avg"))))
 
     # 并发曲线
     if b_points:
@@ -427,19 +596,25 @@ footer{color:var(--muted);font-size:12.5px;margin-top:40px;border-top:1px solid 
     # 内容形态（A2 一致性 / A3 归属 / A5 输出形态）
     parts += shape_html(stress)
 
-    # max_tokens 缺陷
-    if extra and extra.get("max_tokens_verification"):
-        parts.append("<h2>关键缺陷：max_tokens 参数不被遵守</h2>")
-        mt = extra["max_tokens_verification"]
+    # max_tokens 行为（曾经是缺陷，1.3.1-14 起按上限截断）
+    if derived["mt_rows"]:
+        mt = derived["mt_rows"]
+        if derived["mt_ok"]:
+            parts.append("<h2>max_tokens 行为：已按请求上限截断</h2>")
+            parts.append("<div class='note'>实测输出不超过请求值，"
+                         "<code>finish_reason</code> 在截断时为 <code>length</code>、"
+                         "自然结束时为 <code>stop</code>。客户端可以据此判断是否需要续写。</div>")
+        else:
+            parts.append("<h2>关键缺陷：max_tokens 参数不被遵守</h2>")
+            parts.append("<div class='warnbox'>有请求的输出超过 <code>max_tokens</code>，"
+                         "客户端<b>无法用 max_tokens 可靠约束输出长度与延迟上限</b>，"
+                         "估算超时需按实测倍数留余量。</div>")
         rows = []
         for m in mt:
             flag = Raw("<span class='pill bad'>超出</span>") if m["actual_tokens"] > m["requested"] \
                 else Raw("<span class='pill ok'>正常</span>")
             rows.append([m["requested"], m["actual_tokens"], "%.2fx" % m["ratio"], flag])
-        parts.append(table(["请求 max_tokens", "实际输出 tokens", "倍数", "结果"], rows))
-        parts.append("<div class='warnbox'>请求值越小偏差越明显（8→10、16→20），值越大偏差越大（256→370）。"
-                     "<code>finish_reason</code> 均为 <code>stop</code>（自然结束），非 <code>length</code>。"
-                     "客户端<b>无法用 max_tokens 可靠约束输出长度与延迟上限</b>，估算超时需留 1.5–1.6 倍余量。</div>")
+        parts.append(table(["请求 max_tokens", "实际输出 tokens", "实际/请求", "结果"], rows))
 
     # 崩溃事件
     if extra and extra.get("crash_event"):
@@ -456,30 +631,13 @@ footer{color:var(--muted);font-size:12.5px;margin-top:40px;border-top:1px solid 
                      "判定为<b>低概率偶发</b>。鉴于板端有守护进程可自动拉起（&lt;30s 恢复），"
                      "风险可控，但生产环境应加监控与请求重试。</div>")
 
-    # 发现与建议
+    # 发现与建议（由 derive() 按数据条件生成，不再写死）
     parts.append("<h2>发现与建议</h2>")
-    parts.append("<table><thead><tr><th>#</th><th>发现</th><th>影响</th><th>建议</th></tr></thead><tbody>")
-    recs = [
-        ("高", "无背压限流：并发请求全部排队，无 503/429",
-         "高峰时客户端长时间挂起直至超时", "网关侧加并发闸门与请求队列上限，超限快速失败"),
-        ("高", "max_tokens 不生效（实测超出 25%–56%）",
-         "输出长度/延迟不可控，易触发客户端超时", "服务端修复；客户端按 1.6 倍估算超时"),
-        ("中", "低概率并发崩溃（1 次，未复现）",
-         "极端负载下服务中断", "保留守护自动重启；加进程存活告警与失败重试"),
-        ("中", "长文档粘贴被拒（8000+ 字符 → 400）",
-         "真实客户端粘贴长文会报错", "限制粘贴长度或在客户端做分块摘要"),
-        ("中", "上下文窗口仅 4096 tokens",
-         "多轮长对话很快触顶被拒", "权衡与量化档位；或缩短历史/摘要压缩"),
-        ("中", "参数不校验（max_tokens=0/-1、temperature=-1、top_p=2.0 均返回 200）",
-         "非法参数被静默接受，行为不确定", "服务端加参数范围校验，非法值返回 400"),
-        ("低", "内存占用 4.4G/8G（66%）",
-         "内存余量有限", "监控内存，避免同机部署其他大内存服务"),
-        ("低", "并发无吞吐增益（单 NPU 串行）",
-         "扩容需加设备而非调参", "按 QPS≈0.9 规划容量；多设备横向扩展"),
-    ]
-    for i, (sev, find, impact, advice) in enumerate(recs, 1):
-        parts.append("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td></tr>"
-                     % (i, esc(find), esc(impact), esc(advice)))
+    parts.append("<table><thead><tr><th>#</th><th>级别</th><th>发现</th><th>影响</th>"
+                 "<th>建议</th></tr></thead><tbody>")
+    for i, (sev, find, impact, advice) in enumerate(derived["findings"], 1):
+        parts.append("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+                     % (i, esc(sev), esc(find), esc(impact), esc(advice)))
     parts.append("</tbody></table>")
 
     parts.append("<footer>本报告由自动化测试脚本生成。吞吐为服务端上报 completion_tokens 聚合值；"
@@ -488,26 +646,24 @@ footer{color:var(--muted);font-size:12.5px;margin-top:40px;border-top:1px solid 
     return "".join(parts)
 
 
-def build_markdown(stress, sim, extra, generated):
+def build_markdown(stress, sim, extra, generated, crash=None):
     """构建 Markdown 版说明报告。"""
+    derived = derive(stress, sim, extra, crash)
     lines = ["# Qwen3.5-4B 板端推理服务 · 性能与稳定性测试报告", ""]
     target = (stress or sim or {}).get("target", "-")
     model = (stress or {}).get("model") or (sim or {}).get("model") or "-"
     dev = (extra or {}).get("device", {})
     lines += ["- 目标：`%s`" % target, "- 模型：`%s`" % model,
               "- 开发板：%s（%s / %sGB）" % (dev.get("board", "-"), dev.get("soc", "-"),
-                                            dev.get("ram_gb", "-")),
-              "- 生成时间：%s" % generated, ""]
+                                            dev.get("ram_gb", "-"))]
+    if derived["release"]:
+        lines.append("- 被测版本：`rkllm-runtime %s`" % derived["release"])
+    lines += ["- 生成时间：%s" % generated, ""]
 
-    lines += ["## 执行摘要", "",
-              "服务单流推理稳定可靠，边界处理健壮；**不具备并发吞吐能力**（NPU 单请求串行），"
-              "**无背压限流**；存在两处行为偏差：**max_tokens 不被严格遵守**、"
-              "以及一次**低概率并发崩溃**（可被守护进程自动拉起）。", "",
-              "- 单流生成速率约 8–9 tok/s，短问答端到端 1–3s",
-              "- 并发不带来吞吐增益：QPS 恒定 0.86–0.94，仅增加排队延迟（16 并发 p99 = 18.2s）",
-              "- 无背压：96 个瞬时并发全部被接受，全部排队（无 503/429）",
-              "- 稳定性良好：压测 265 次请求 errors=0，40 次连续请求延迟无漂移",
-              "- 边界健壮：超长/畸形请求均被 400 干净拒绝", ""]
+    lines += ["## 执行摘要", ""]
+    for label, text in derived["summary"]:
+        lines.append("- **%s**：%s" % (label, text))
+    lines.append("")
 
     if extra and extra.get("board_top"):
         top = extra["board_top"]
@@ -517,7 +673,8 @@ def build_markdown(stress, sim, extra, generated):
                   "| %s | %s | %s | %s | %s | %s | %s |"
                   % (top.get("process"), top.get("virt"), top.get("res"), top.get("cpu_pct"),
                      top.get("mem_pct"), top.get("cpu_time"), top.get("load_avg")), "",
-                  "> rkllm 常驻内存 4.4G/8G（66%），内存为最紧资源；CPU 约 1.86 核，8 核平台未饱和。", ""]
+                  "> rkllm 常驻内存 %s（占 %s%%），load average %s。内存是此配置下最紧的资源。"
+                  % (top.get("res"), top.get("mem_pct"), top.get("load_avg")), ""]
 
     if stress:
         lines += ["## 压力测试", ""]
@@ -541,14 +698,25 @@ def build_markdown(stress, sim, extra, generated):
         lines.append("")
         lines += shape_markdown(stress)
 
-    if extra and extra.get("max_tokens_verification"):
-        lines += ["## 关键缺陷：max_tokens 参数不被遵守", "",
-                  "| 请求 max_tokens | 实际输出 tokens | 倍数 |",
-                  "|---|---|---|"]
-        for m in extra["max_tokens_verification"]:
-            lines.append("| %d | %d | %.2fx |" % (m["requested"], m["actual_tokens"], m["ratio"]))
-        lines += ["", "> finish_reason 均为 stop（自然结束）。客户端无法用 max_tokens 可靠约束输出长度，"
-                      "估算超时需留 1.5–1.6 倍余量。", ""]
+    if derived["mt_rows"]:
+        if derived["mt_ok"]:
+            lines += ["## max_tokens 行为：已按请求上限截断", "",
+                      "| 请求 max_tokens | 实际输出 tokens | 实际/请求 |",
+                      "|---|---|---|"]
+            for m in derived["mt_rows"]:
+                lines.append("| %d | %d | %.2fx |"
+                             % (m["requested"], m["actual_tokens"], m["ratio"]))
+            lines += ["", "> 输出不超过请求值。`finish_reason` 在截断为 length、"
+                          "自然结束为 stop，客户端可据此判断是否需要续写。", ""]
+        else:
+            lines += ["## 关键缺陷：max_tokens 参数不被遵守", "",
+                      "| 请求 max_tokens | 实际输出 tokens | 实际/请求 |",
+                      "|---|---|---|"]
+            for m in derived["mt_rows"]:
+                lines.append("| %d | %d | %.2fx |"
+                             % (m["requested"], m["actual_tokens"], m["ratio"]))
+            lines += ["", "> 有请求的输出超过 max_tokens。客户端无法用该参数可靠约束输出长度，"
+                          "估算超时需按实测倍数留余量。", ""]
 
     if sim:
         lines += ["## 仿真测试", ""]
@@ -563,7 +731,10 @@ def build_markdown(stress, sim, extra, generated):
             lines.append("| %s | %d | %d |" % (k, v["n"], v["ok"]))
         lines.append("")
         lines.append("- 服务最终状态：**%s**" % ("存活" if sim.get("alive_at_end") else "崩溃"))
-        lines.append("- 长文档场景：800/3000 字符成功，8000/16000 字符被 HTTP 400 拒绝（超上下文）")
+        if derived["paste_fail"]:
+            lines.append("- 长文档场景被拒：%s 字符 → HTTP %s（超出上下文窗口）"
+                         % ("/".join(str(c) for c, _ in derived["paste_fail"]),
+                            "/".join(sorted({str(s) for _, s in derived["paste_fail"]}))))
         lines.append("")
 
     if extra and extra.get("crash_event"):
@@ -578,16 +749,12 @@ def build_markdown(stress, sim, extra, generated):
 
     lines += ["## 发现与建议", "",
               "| 级别 | 发现 | 影响 | 建议 |",
-              "|---|---|---|---|",
-              "| 高 | 无背压限流，并发请求全部排队 | 高峰时客户端挂起直至超时 | 网关加并发闸门与队列上限，超限快速失败 |",
-              "| 高 | max_tokens 不生效（超出 25%–56%） | 输出长度/延迟不可控 | 服务端修复；客户端按 1.6 倍估算超时 |",
-              "| 中 | 低概率并发崩溃（1 次，未复现） | 极端负载下服务中断 | 保留守护自动重启；加存活告警与重试 |",
-              "| 中 | 长文档粘贴被拒（8000+ 字符 → 400） | 真实客户端粘贴长文报错 | 限制粘贴长度或客户端分块摘要 |",
-              "| 中 | 上下文窗口仅 4096 tokens | 多轮长对话很快触顶 | 调整量化档位或做历史压缩 |",
-              "| 中 | 参数不校验（0/-1/2.0 均 200） | 非法参数被静默接受 | 服务端加参数范围校验 |",
-              "| 低 | 内存占用 4.4G/8G（66%） | 内存余量有限 | 监控内存，避免同机部署其他大内存服务 |",
-              "| 低 | 并发无吞吐增益 | 扩容需加设备 | 按 QPS≈0.9 规划容量，多设备横向扩展 |",
-              ""]
+              "|---|---|---|---|"]
+    for sev, find, impact, advice in derived["findings"]:
+        lines.append("| %s | %s | %s | %s |"
+                     % (sev, find.replace("|", "\\|"), impact.replace("|", "\\|"),
+                        advice.replace("|", "\\|")))
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -604,15 +771,16 @@ def main():
 
     stress = load(newest(os.path.join(args.dir, "stress_*.json")))
     sim = load(newest(os.path.join(args.dir, "simulate_*.json")))
+    crash = load(newest(os.path.join(args.dir, "crashprobe_*.json")))
     extra = load(os.path.join(args.dir, "extra.json"))
     if not stress and not sim:
         print("no result json found in %s" % args.dir)
         return 1
     generated = time.strftime("%Y-%m-%d %H:%M:%S")
     with open(args.out, "w", encoding="utf-8") as fh:
-        fh.write(build_html(stress, sim, extra, generated))
+        fh.write(build_html(stress, sim, extra, generated, crash))
     with open(args.md, "w", encoding="utf-8") as fh:
-        fh.write(build_markdown(stress, sim, extra, generated))
+        fh.write(build_markdown(stress, sim, extra, generated, crash))
     print("wrote %s" % args.out)
     print("wrote %s" % args.md)
     return 0
