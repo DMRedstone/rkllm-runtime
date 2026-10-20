@@ -1597,6 +1597,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
         for name, value in (headers or {}).items():
             self.send_header(name, value)
+        # Say it out loud. Several paths set close_connection before answering
+        # (401 / 404 / 413 / 408 - the body was never fully read). Without this
+        # header an HTTP/1.1 client treats the connection as reusable and writes
+        # its next request into a socket that is about to be closed.
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1606,18 +1612,23 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"error": {"message": message, "type": error_type,
                                    "param": None, "code": None}}, status, headers)
 
-    def _reject(self, message, status=400, error_type="invalid_request_error"):
+    def _reject(self, message, status=400, error_type="invalid_request_error",
+                headers=None):
         """Count the refusal, say why in the journal, then answer.
 
         The journal line is the only place an operator can see what a client
         actually sent: a UI reports our 400 as "the model is unavailable", which
         hides the real cause entirely.
+
+        headers carries things like Retry-After. Every refusal goes through here
+        so the counters, the journal line and the response headers cannot drift
+        apart between exits - they did, for the two 503 exits.
         """
         self.server.stats["rejected"] += 1
         if not self.server.options.quiet:
             sys.stderr.write("[rkllm] rejected (%d): %s\n" % (status, message))
             sys.stderr.flush()
-        self._send_error_json(message, status, error_type)
+        self._send_error_json(message, status, error_type, headers)
 
     def _authorised(self):
         key = self.server.options.api_key
@@ -1761,7 +1772,7 @@ class Handler(BaseHTTPRequestHandler):
         if path not in ("/v1/chat/completions", "/chat/completions"):
             # The body is unread, so the connection cannot carry another request.
             self.close_connection = True
-            self._send_error_json(
+            self._reject(
                 "unknown endpoint %s; the completion endpoint is /v1/chat/completions and the "
                 "base_url for clients is http://<host>:<port>/v1" % path, 404, "not_found")
             return
@@ -1846,28 +1857,22 @@ class Handler(BaseHTTPRequestHandler):
         tools = body.get("tools")
 
         if not self.server.queue_slots.acquire(blocking=False):
-            self.server.stats["rejected"] += 1
-            self._send_error_json("server queue is full (%d already waiting), retry later"
-                                  % self.server.options.max_queue, 503, "server_error",
-                                  {"Retry-After": "5"})
+            self._reject("server queue is full (%d already waiting), retry later"
+                         % self.server.options.max_queue, 503, "server_error",
+                         {"Retry-After": "5"})
             return
         self.server.adjust_waiting(1)
         try:
             acquired = self.server.infer_lock.acquire(timeout=self.server.options.queue_timeout)
             self.server.adjust_waiting(-1)
             if not acquired:
-                self.server.stats["rejected"] += 1
-                # A single explicit response: _send_json would emit a second status line.
-                # Named error_body, not body: the request dict above is still in scope
-                # and shadowing it with bytes reads like a bug even where it is harmless.
-                error_body = json.dumps({"error": {"message": "timed out waiting for the NPU",
-                                                   "type": "server_error"}}).encode("utf-8")
-                self.send_response(503)
-                self.send_header("Retry-After", "5")
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(error_body)))
-                self.end_headers()
-                self.wfile.write(error_body)
+                # Same shape as the queue-full exit above. This used to hand-roll
+                # the response, which dropped two things a browser client needs:
+                # Access-Control-Allow-Origin (without it the 503 body is
+                # unreadable and the UI only sees "Failed to fetch") and the
+                # journal line that says why the request was refused.
+                self._reject("timed out waiting for the NPU", 503, "server_error",
+                             {"Retry-After": "5"})
                 return
             try:
                 self._run_inference(engine, model_name, prompt, role, system_prompt,
@@ -2183,6 +2188,9 @@ def cmd_serve(args):
     state = lock_frequencies(args.platform, enabled=not args.no_freq_lock, quiet=args.quiet)
 
     server = Server((args.host, args.port), Handler, engine, args)
+    # serve_forever() below polls with its own poll_interval and never reads
+    # BaseServer.timeout; only handle_request() does. Kept so that a future
+    # switch back to a handle_request() loop still gets a 1 s tick.
     server.timeout = 1.0
 
     stop = threading.Event()
@@ -2855,10 +2863,14 @@ def cmd_selftest(args):
         sys.stdout.write("\n[FAIL] selftest aborted: %r\n" % exc)
         results.append(False)
     finally:
-        server.shutdown()
+        # Mirrors cmd_serve: shutdown() waits for serve_forever to set its event
+        # on the way out, so only call it while that loop still runs, and never
+        # join without a timeout.
+        if thread.is_alive():
+            server.shutdown()
+            thread.join(timeout=5)
         server.server_close()
         engine.destroy()
-        thread.join()
 
     passed = sum(1 for entry in results if entry is True)
     failed = sum(1 for entry in results if entry is False)

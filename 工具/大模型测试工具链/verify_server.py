@@ -247,18 +247,33 @@ def test_oversize_closes(m, port):
     sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
                  b"Content-Type: application/json\r\n"
                  b"Content-Length: 10485760\r\n\r\n")
-    sock.settimeout(10)
-    head = sock.recv(4096).decode("latin-1", "replace")
-    status_line = head.split("\r\n")[0] if head else "无响应"
+    # Read until EOF, not one recv: the first chunk may stop mid-body, and a
+    # short read says nothing about whether the server closed the connection.
+    sock.settimeout(5)
+    buf = b""
     closed = False
     try:
-        sock.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
-        closed = (sock.recv(256) == b"")
-    except OSError:
-        closed = True
+        while True:
+            piece = sock.recv(4096)
+            if not piece:
+                closed = True
+                break
+            buf += piece
+    except socket.timeout:
+        closed = False                  # still open: no EOF within 5 s
     sock.close()
-    check("413 后关闭连接（不污染 keep-alive）",
-          " 413 " in status_line and closed, "%s | closed=%s" % (status_line, closed))
+    head = buf.decode("latin-1", "replace")
+    status_line = head.split("\r\n")[0] if head else "无响应"
+    # The response has to say so: without Connection: close an HTTP/1.1 client
+    # treats the socket as reusable and writes into one that is being closed.
+    conn_hdr = ""
+    for line in head.split("\r\n")[1:]:
+        if line.lower().startswith("connection:"):
+            conn_hdr = line.split(":", 1)[1].strip()
+            break
+    check("413 后关闭连接并声明 Connection: close",
+          " 413 " in status_line and closed and conn_hdr.lower() == "close",
+          "%s | Connection=%r | closed=%s" % (status_line, conn_hdr, closed))
 
 
 def test_reset_chunked(m, port):
@@ -313,6 +328,57 @@ def test_auth_counted(m, port, server):
           "rejected %d->%d, 第二次状态 %s" % (before, after, second.status))
 
 
+def test_busy_503(m, port, server):
+    """NPU 忙（infer_lock 超时）的 503 必须和 queue-full 出口长得一样。
+
+    这个出口曾经手工构造响应，漏了 Access-Control-Allow-Origin：浏览器客户端
+    读不到 503 的 body，只能看到 opaque 的 "Failed to fetch"，分不清是 NPU 忙
+    还是网络断了。
+    """
+    saved_timeout = server.options.queue_timeout
+    server.options.queue_timeout = 0.01
+    held = server.infer_lock.acquire()          # 占住推理锁，请求必然等超时
+    try:
+        before = server.stats["rejected"]
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+        conn.request("POST", "/v1/chat/completions",
+                     body=json.dumps({"messages": [{"role": "user", "content": "x"}]}),
+                     headers={"Content-Type": "application/json"})
+        reply = conn.getresponse()
+        reply.read()
+        status = reply.status
+        cors = reply.getheader("Access-Control-Allow-Origin")
+        retry = reply.getheader("Retry-After")
+        conn.close()
+        after = server.stats["rejected"]
+    finally:
+        server.options.queue_timeout = saved_timeout
+        if held:
+            server.infer_lock.release()
+    check("NPU 忙的 503 带 CORS + Retry-After 且计入 rejected",
+          status == 503 and bool(cors) and retry == "5" and after == before + 1,
+          "status %s cors=%r retry=%r rejected %d->%d"
+          % (status, cors, retry, before, after))
+
+
+def test_404_counted(m, port, server):
+    """未知端点也计入 rejected，且明确关闭连接。"""
+    before = server.stats["rejected"]
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.request("POST", "/v1/nope", body="{}",
+                 headers={"Content-Type": "application/json"})
+    reply = conn.getresponse()
+    reply.read()
+    status = reply.status
+    conn_hdr = reply.getheader("Connection") or ""
+    conn.close()
+    after = server.stats["rejected"]
+    check("404 计入 rejected 且带 Connection: close",
+          status == 404 and after == before + 1 and conn_hdr.lower() == "close",
+          "status %s rejected %d->%d Connection=%r"
+          % (status, before, after, conn_hdr))
+
+
 def test_health(m, port):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     conn.request("GET", "/health")
@@ -354,6 +420,8 @@ def main():
         test_reset_chunked(m, port)
         test_oversize_closes(m, port)
         test_auth_counted(m, port, server)
+        test_busy_503(m, port, server)
+        test_404_counted(m, port, server)
     finally:
         server.shutdown()
         server.server_close()
