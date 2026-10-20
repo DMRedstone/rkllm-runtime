@@ -2863,14 +2863,21 @@ def cmd_selftest(args):
         sys.stdout.write("\n[FAIL] selftest aborted: %r\n" % exc)
         results.append(False)
     finally:
-        # Mirrors cmd_serve: shutdown() waits for serve_forever to set its event
-        # on the way out, so only call it while that loop still runs, and never
-        # join without a timeout.
-        if thread.is_alive():
-            server.shutdown()
-            thread.join(timeout=5)
-        server.server_close()
-        engine.destroy()
+        # Mirrors cmd_serve, nesting included: shutdown() waits for serve_forever
+        # to set its event on the way out, so only call it while that loop still
+        # runs; and engine.destroy() must happen even if closing the socket
+        # fails. The engine here is a stand-in today, but selftest is the first
+        # thing anyone points at a real board, so the shape should already be the
+        # one that survives a RealEngine.
+        try:
+            if thread.is_alive():
+                server.shutdown()
+                thread.join(timeout=5)
+        finally:
+            try:
+                server.server_close()
+            finally:
+                engine.destroy()
 
     passed = sum(1 for entry in results if entry is True)
     failed = sum(1 for entry in results if entry is False)
