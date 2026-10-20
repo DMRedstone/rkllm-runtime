@@ -14,6 +14,11 @@ Thumbs.db
 # 构建产物不入库，只发 GitHub Release
 交付/*.deb
 
+# 上游 SDK 发行包（160 MiB 原始 / 27 MiB 精简）：构建输入，不入库。
+# 需要时从历史取回：git show 7e15488^:输入/rknn-llm-release-v1.3.1.tar.gz > 输入/...
+输入/*.tar.gz
+输入/*.tar.xz
+
 工具/build/
 工具/dist/
 
