@@ -29,7 +29,7 @@
 └── 本地目录说明.md
 ```
 
-## 三条常用命令
+## 常用命令
 
 ```bash
 # 构建 deb（需先指定上游 SDK 与打包脚手架的位置）
@@ -42,6 +42,13 @@ python 工具/编译工具链/verify_deb.py 交付/rkllm-runtime_1.3.1-12_arm64.
 
 # 板端测试全流程
 cd 工具/大模型测试工具链 && python run_all.py --host <板端地址> --key <令牌>
+
+# 本地对话
+rkllm chat qwen2.5-1.5b
+
+# OpenAI 兼容 API
+rkllm serve qwen2.5-1.5b
+或 systemctl enable --now rkllm-server（配置文件在/etc/default/rkllm-serve）
 ```
 
 ## 关于上游源料
