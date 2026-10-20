@@ -698,6 +698,10 @@ class RealEngine(EngineBase):
         self._run_keep = []      # per-inference buffers, dropped after each run
         self._sink = None
         self._sink_lock = threading.Lock()
+        # Real counts from the runtime's own perf stats (RKLLM_RUN_FINISH).
+        # A tuple (prefill_tokens, generate_tokens), or None before the first
+        # completed run. Preferred over the byte estimator for usage.
+        self._last_perf = None
         self._handle = ctypes.c_void_p()
         self._destroyed = False
         # Set once rkllm_set_function_tools has been called: the runtime offers
@@ -776,6 +780,14 @@ class RealEngine(EngineBase):
                 chunk = result.contents.text
                 if chunk and sink is not None:
                     sink.put(chunk.decode("utf-8", "replace"))
+            elif state == RKLLM_RUN_FINISH:
+                # The final callback carries the runtime's own token counters -
+                # the only exact numbers available without a tokeniser.
+                try:
+                    perf = result.contents.perf
+                    self._last_perf = (int(perf.prefill_tokens), int(perf.generate_tokens))
+                except Exception:                            # never unwind into C
+                    pass
             elif state == RKLLM_RUN_ERROR:
                 if sink is not None:
                     sink.put(_Failure("the runtime reported RKLLM_RUN_ERROR"))
@@ -842,6 +854,7 @@ class RealEngine(EngineBase):
         if self._destroyed:
             raise RKLLMError("engine already destroyed")
 
+        self._last_perf = None
         sink = queue.Queue()
         with self._sink_lock:
             self._sink = sink
@@ -893,6 +906,10 @@ class RealEngine(EngineBase):
             self._run_keep = []
             self._infer.sampling_params = None
             self._infer.max_new_tokens = 0
+
+    def last_perf(self):
+        """(prefill_tokens, generate_tokens) from the last completed run, or None."""
+        return self._last_perf
 
     def clear_history(self):
         return self.lib.rkllm_clear_kv_cache(self._handle, 1, None, None)
@@ -950,6 +967,9 @@ class FakeEngine(EngineBase):
             if self.delay:
                 time.sleep(self.delay)
             yield char
+
+    def last_perf(self):
+        return None
 
     def clear_history(self):
         self._turns = 0
@@ -1203,6 +1223,27 @@ def _openai_response(model, content, finish_reason="stop", prompt_tokens=0, comp
     }
 
 
+def _openai_usage_chunk(model, prompt_tokens, completion_tokens):
+    """Final SSE frame for stream_options.include_usage (OpenAI shape).
+
+    choices is empty on purpose: the usage frame carries no text, and clients
+    that ask for it know to look for an empty choices array.
+    """
+    payload = {
+        "id": "chatcmpl-" + uuid.uuid4().hex[:24],
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }
+    return "data: %s\n\n" % json.dumps(payload, ensure_ascii=False)
+
+
 def _openai_chunk(model, delta, finish_reason=None, role=None):
     body = {}
     if role:
@@ -1239,6 +1280,150 @@ def content_text(content):
     if isinstance(content, str):
         return content
     return ""
+
+
+def build_conversation(messages, budget_tokens=None, include_history=True):
+    """Flatten an OpenAI messages array into (role, prompt, system_prompt).
+
+    Stateless contract: an agent client resends the whole conversation on every
+    request, so the earlier turns have to travel inside the prompt - the service
+    keeps no history of its own (serve answers every request independently by
+    default). Only the last user/tool turn is handed to the runtime as the
+    prompt proper; the turns before it are rendered as a readable transcript so
+    the model can follow the thread.
+
+    budget_tokens trims the transcript from the oldest turn instead of rejecting
+    the request: a long conversation against a 4096-token window must still get
+    an answer, just with its earliest turns dropped.
+
+    include_history=False is for the legacy mode where the server itself keeps
+    the KV history (RKLLM_NO_HISTORY=0): replaying the transcript there would
+    double every earlier turn in the model's context.
+    """
+    system = ""
+    turns = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        text = content_text(message.get("content"))
+        if role == "system":
+            if text.strip():
+                system = text              # the last system message wins
+            continue
+        if role in ("user", "assistant", "tool") and text.strip():
+            turns.append((role, text))
+
+    if not include_history:
+        for message in reversed(messages):
+            if isinstance(message, dict) and message.get("role") in ("user", "tool"):
+                text = content_text(message.get("content"))
+                if text.strip():
+                    return "user", text, system
+        turns = turns[-1:]               # fall back to the last usable turn
+
+    if not turns:
+        # Clients probe a freshly configured model with a system-only or empty
+        # request; answering beats a 400 that reads as "the model is broken".
+        for message in reversed(messages):
+            if isinstance(message, dict):
+                text = content_text(message.get("content"))
+                if text.strip():
+                    if message.get("role") == "system":
+                        system = ""
+                    return "user", text, system
+        return "user", "", system
+
+    def render(items):
+        lines = []
+        for role, text in items:
+            label = {"user": "用户", "assistant": "助手", "tool": "工具"}.get(role, role)
+            lines.append("%s：%s" % (label, text))
+        return "\n".join(lines)
+
+    dropped = 0
+    if budget_tokens:
+        while len(turns) > 1:
+            if (_estimate_tokens(render(turns)) + _estimate_tokens(system)) <= budget_tokens:
+                break
+            turns.pop(0)
+            dropped += 1
+
+    if len(turns) == 1:
+        role, current = turns[0]
+        return ("user" if role == "tool" else role), current, system
+
+    prefix = "以下是此前的对话：\n"
+    if dropped:
+        prefix = ("（更早的 %d 轮对话因上下文长度限制已省略）\n" % dropped) + prefix
+    role, current = turns[-1]
+    prompt = prefix + render(turns[:-1]) + "\n\n" + current
+    return ("user" if role == "tool" else role), prompt, system
+
+
+def _normalise_stop(value):
+    """OpenAI 'stop' -> list of non-empty strings (at most 4, like OpenAI)."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    out = []
+    for item in value:
+        if isinstance(item, str) and item:
+            out.append(item)
+        if len(out) >= 4:
+            break
+    return out
+
+
+def _stop_index(text, stops):
+    """Offset of the earliest stop sequence in text, or None."""
+    best = None
+    for seq in stops:
+        found = text.find(seq)
+        if found >= 0 and (best is None or found < best):
+            best = found
+    return best
+
+
+def _apply_stop(text, stops):
+    """(visible_text, did_stop) - cut at the first stop sequence."""
+    if not stops:
+        return text, False
+    cut = _stop_index(text, stops)
+    if cut is None:
+        return text, False
+    return text[:cut], True
+
+
+def _finish_reason(stopped_at_stop, completion_tokens, max_tokens):
+    """'length' when generation ran into max_tokens, 'stop' otherwise.
+
+    Reporting 'stop' for a truncated answer is worse than useless: an agent
+    treats the text as complete and concatenates or parses it as if the model
+    had finished.
+    """
+    if stopped_at_stop:
+        return "stop"
+    if max_tokens and completion_tokens and completion_tokens >= max_tokens:
+        return "length"
+    return "stop"
+
+
+def _tokens_for(engine, prompt, answer):
+    """Exact counts from the runtime when available, byte estimate otherwise."""
+    perf = None
+    getter = getattr(engine, "last_perf", None)
+    if callable(getter):
+        try:
+            perf = getter()
+        except Exception:                                    # noqa: BLE001
+            perf = None
+    if perf:
+        prefill, generated = perf
+        if prefill > 0 or generated > 0:
+            return max(int(prefill), 1), max(int(generated), 0)
+    return _estimate_tokens(prompt), _estimate_tokens(answer)
 
 
 def last_message(messages):
@@ -1321,6 +1506,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.send_header("Content-Length", str(len(body)))
@@ -1450,7 +1636,35 @@ class Handler(BaseHTTPRequestHandler):
         engine = self.server.engine
         model_name = body.get("model") or engine.model_name
         stream = bool(body.get("stream", False))
-        role, prompt, system_prompt = last_message(messages)
+
+        try:
+            n = int(body.get("n", 1) or 1)
+        except (TypeError, ValueError):
+            self._reject("'n' must be an integer")
+            return
+        if n > 1:
+            # One NPU generates one candidate; silently returning a single
+            # choice for n=2 makes a caller believe it got two.
+            self._reject("'n' > 1 is not supported: this server runs a single NPU and "
+                         "always returns one choice", 400, "invalid_request_error")
+            return
+
+        stream_options = body.get("stream_options")
+        include_usage = bool(stream_options.get("include_usage", False)) \
+            if isinstance(stream_options, dict) else False
+        stop_seqs = _normalise_stop(body.get("stop"))
+
+        # Stateless contract: the client resends the whole conversation, so the
+        # transcript is rebuilt here. Leave a quarter of the window for the
+        # answer and trim the oldest turns rather than refusing a long chat.
+        context_hint = max(int(getattr(engine, "context_len", DEFAULT_CONTEXT) or DEFAULT_CONTEXT), 1)
+        carries = bool(getattr(engine, "keep_history", 0))
+        role, prompt, system_prompt = build_conversation(
+            messages, budget_tokens=max(context_hint - context_hint // 4, 128),
+            include_history=not carries)
+        response_format = body.get("response_format")
+        if isinstance(response_format, dict) and response_format.get("type") == "json_object":
+            prompt = prompt + "\n\n只输出一个 JSON 对象，不要任何解释、前后缀或代码块标记。"
         if not prompt.strip():
             # Say which shape arrived: a UI reports this 400 as "the model is
             # unavailable", so the journal has to carry the real cause.
@@ -1508,7 +1722,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self._run_inference(engine, model_name, prompt, role, system_prompt,
                                     stream=stream, sampling=sampling,
-                                    max_tokens=max_tokens, thinking=thinking, tools=tools)
+                                    max_tokens=max_tokens, thinking=thinking, tools=tools,
+                                    stop=stop_seqs, include_usage=include_usage)
             finally:
                 self.server.infer_lock.release()
         finally:
@@ -1530,9 +1745,20 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, ValueError):
             return True                      # 套接字已不可用，按断开处理
 
+    def do_OPTIONS(self):
+        """CORS preflight: browser-based clients cannot POST cross-origin otherwise."""
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _begin_stream(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Accel-Buffering", "no")
         self.send_header("Connection", "close")
@@ -1541,7 +1767,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _run_inference(self, engine, model_name, prompt, role, system_prompt,
                        stream=False, sampling=None, max_tokens=None,
-                       thinking=False, tools=None):
+                       thinking=False, tools=None, stop=None, include_usage=False):
         """Serve one request: apply the size guards, run the engine, emit the reply.
 
         Guards matter here. A prompt that does not fit the model's window makes the
@@ -1644,6 +1870,7 @@ class Handler(BaseHTTPRequestHandler):
                                       "server_error")
                 return
 
+        stop_seqs = stop or []
         pieces = []
         if stream:
             self._begin_stream()
@@ -1653,12 +1880,29 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 engine.abort()
                 return
+            sent_len = 0
+            stopped_at_stop = False
             try:
                 for fragment in engine.stream(prompt, role=role, enable_thinking=thinking,
                                               sampling=sampling, max_new_tokens=max_tokens):
                     pieces.append(fragment)
+                    if stop_seqs:
+                        # A stop sequence can straddle fragments, so look at the
+                        # whole text generated so far. On a hit, flush only the
+                        # part before the sequence and stop the NPU early.
+                        joined = "".join(pieces)
+                        cut = _stop_index(joined, stop_seqs)
+                        if cut is not None:
+                            if cut > sent_len:
+                                self.wfile.write(_openai_chunk(
+                                    model_name, joined[sent_len:cut]).encode("utf-8"))
+                                self.wfile.flush()
+                            stopped_at_stop = True
+                            engine.abort()
+                            break
                     self.wfile.write(_openai_chunk(model_name, fragment).encode("utf-8"))
                     self.wfile.flush()
+                    sent_len += len(fragment)
             except (BrokenPipeError, ConnectionResetError):
                 engine.abort()
                 return
@@ -1672,8 +1916,13 @@ class Handler(BaseHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError):
                     pass
                 return
+            prompt_tokens, completion_tokens = _tokens_for(engine, prompt, "".join(pieces))
+            finish = _finish_reason(stopped_at_stop, completion_tokens, max_tokens)
             try:
-                self.wfile.write(_openai_chunk(model_name, "", finish_reason="stop").encode("utf-8"))
+                self.wfile.write(_openai_chunk(model_name, "", finish_reason=finish).encode("utf-8"))
+                if include_usage:
+                    self.wfile.write(_openai_usage_chunk(
+                        model_name, prompt_tokens, completion_tokens).encode("utf-8"))
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
@@ -1706,15 +1955,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.stats["errors"] += 1
                 self._send_error_json(str(exc), 500, "server_error")
                 return
-            answer = "".join(pieces)
+            raw_answer = "".join(pieces)
+            answer, stopped_at_stop = _apply_stop(raw_answer, stop_seqs)
+            prompt_tokens, completion_tokens = _tokens_for(engine, prompt, raw_answer)
             self._send_json(_openai_response(
                 model_name, answer,
-                prompt_tokens=_estimate_tokens(prompt),
-                completion_tokens=_estimate_tokens(answer)))
+                finish_reason=_finish_reason(stopped_at_stop, completion_tokens, max_tokens),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens))
 
-        answer = "".join(pieces)
-        self.server.stats["prompt_tokens"] += _estimate_tokens(prompt)
-        self.server.stats["completion_tokens"] += _estimate_tokens(answer)
+        prompt_tokens, completion_tokens = _tokens_for(engine, prompt, "".join(pieces))
+        self.server.stats["prompt_tokens"] += prompt_tokens
+        self.server.stats["completion_tokens"] += completion_tokens
 
 
 def cmd_serve(args):
@@ -2504,8 +2756,10 @@ examples:
     serve.add_argument("--system", default=os.environ.get("RKLLM_SYSTEM") or None,
                        help="system prompt (also $RKLLM_SYSTEM)")
     serve.add_argument("--no-history", action="store_true",
-                       default=option_flag("NO_HISTORY", True),
-                       help="answer every request independently (no conversation context)")
+                       default=option_flag("NO_HISTORY", True, fallback=True),
+                       help="answer every request independently (default: the client "
+                            "resends the conversation). Set RKLLM_NO_HISTORY=0 to let "
+                            "the server carry history between requests instead")
     add_common_arguments(serve, env=True)
     add_sampling_arguments(serve, env=True)
     serve.set_defaults(func=cmd_serve)
