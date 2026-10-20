@@ -1402,10 +1402,15 @@ def _finish_reason(stopped_at_stop, completion_tokens, max_tokens):
     Reporting 'stop' for a truncated answer is worse than useless: an agent
     treats the text as complete and concatenates or parses it as if the model
     had finished.
+
+    The runtime's generate_tokens counter tops out one short of max_new_tokens
+    when it cuts generation off (measured on 1.3.1-14: max_tokens 8 -> 7,
+    40 -> 39, 6 -> 5), while a natural end reports well below it, so the
+    comparison allows that single-token slack.
     """
     if stopped_at_stop:
         return "stop"
-    if max_tokens and completion_tokens and completion_tokens >= max_tokens:
+    if max_tokens and completion_tokens and completion_tokens >= max_tokens - 1:
         return "length"
     return "stop"
 
