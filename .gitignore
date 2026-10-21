@@ -42,3 +42,4 @@ Thumbs.db
 
 # wheel 构建产物（make_mcp_wheel.py 输出，可随时重建）
 dist/
+新写代码-*.zip
