@@ -14,9 +14,9 @@ Thumbs.db
 # 构建产物不入库，只发 GitHub Release
 交付/*.deb
 
-# 上游 SDK 发行包（160 MiB 原始 / 27 MiB 精简）：构建输入，不入库。
-# 需要时从历史取回：git show 7e15488^:输入/rknn-llm-release-v1.3.1.tar.gz > 输入/...
-输入/*.tar.gz
+# 上游 SDK 原始发行包（160 MiB）不入库；精简构建输入（22.6 MiB，388 条目，
+# 由 stage() payload 裁剪而来）入库，另一台机器 clone 即可构建。
+输入/rknn-llm-release-v1.3.1.tar.gz
 输入/*.tar.xz
 
 工具/build/
@@ -39,9 +39,6 @@ Thumbs.db
 工具/脚本/harness.log
 工具/脚本/t[0-9]*/
 工具/脚本/h-*/
-
-# wheel 构建产物（make_mcp_wheel.py 输出，可随时重建）
-dist/
 
 # wheel 构建产物（make_mcp_wheel.py 输出，可随时重建）
 dist/
