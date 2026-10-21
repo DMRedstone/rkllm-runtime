@@ -12,10 +12,13 @@ __all__ = ["SseSession"]
 class SseSession:
     """一次 chat completion 的 SSE 状态：id/created 全程一致（D4）。"""
 
-    def __init__(self, completion_id: str | None = None, model: str = "rkllm"):
+    def __init__(self, completion_id: str | None = None, model: str = "rkllm",
+                 reasoning_field: str = "reasoning_content"):
         self.id = completion_id or ("chatcmpl-" + id(self).__format__("x"))
         self.created = int(time.time())
         self.model = model
+        # openai.reasoning_field：reasoning_content（DeepSeek 约定）/reasoning/none
+        self.reasoning_field = reasoning_field
         self.index = 0
 
     def first_frame(self, role: str = "assistant") -> str:
@@ -27,8 +30,8 @@ class SseSession:
         delta: dict[str, Any] = {}
         if content is not None:
             delta["content"] = content
-        if reasoning is not None:
-            delta["reasoning_content"] = reasoning   # DeepSeek 约定
+        if reasoning is not None and self.reasoning_field != "none":
+            delta[self.reasoning_field] = reasoning
         if tool_calls is not None:
             delta["tool_calls"] = tool_calls
         return self._frame(delta, finish_reason=None)

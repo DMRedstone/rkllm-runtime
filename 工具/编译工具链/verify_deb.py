@@ -20,7 +20,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 VALID_SECTIONS = {"libs", "devel", "utils", "misc", "doc", "python", "science"}
-REQUIRED_FIELDS = ["Package", "Version", "Architecture", "Maintainer", "Description"]
+REQUIRED_FIELDS = ["Package", "Version", "Architecture", "Maintainer",
+                   "Homepage", "Description"]
+# 本包由本仓库维护，Homepage 必须指向它而非上游 airockchip/rknn-llm——
+# 1.3.1-16 之前漏改，`apt show` 直接暴露给了运维。
+EXPECTED_HOMEPAGE = "https://github.com/DMRedstone/rkllm-runtime"
 KNOWN_MANDATORY_TREE = ["usr", "usr/share", "usr/share/doc", "usr/bin", "etc"]
 
 # Declared in DEBIAN/conffiles: dpkg keeps local edits of this file across an
@@ -247,6 +251,20 @@ def check_control(members: dict[str, bytes]) -> dict:
             if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]*(:[a-z0-9]+)?( \(.*\))?", dep):
                 fail("control Depends", f"malformed dependency {dep!r}")
         ok("control Depends", depends)
+        homepage = fields.get("Homepage", "").strip()
+        if homepage != EXPECTED_HOMEPAGE:
+            fail("control Homepage",
+                 f"{homepage!r} != {EXPECTED_HOMEPAGE!r} (must point at this repo)")
+        else:
+            ok("control Homepage", homepage)
+        suggests = fields.get("Suggests", "")
+        stale = [s.strip() for s in suggests.split(",")
+                 if s.strip().startswith("python3-flask")]
+        if stale:
+            fail("control Suggests",
+                 "python3-flask is a legacy-stack leftover; the service uses FastAPI")
+        else:
+            ok("control Suggests", suggests or "(none)")
         md5_member = control_files.get("./md5sums")
         md5_map = {}
         if md5_member is not None:

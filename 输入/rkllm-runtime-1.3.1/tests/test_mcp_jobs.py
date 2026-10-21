@@ -6,6 +6,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from rkllm.mcp.jobs import JobTable, estimate_seconds
@@ -58,6 +60,9 @@ def test_max_jobs_drops_oldest():
 
 
 def test_estimate_seconds():
-    assert estimate_seconds("small", 0, 512) == 64.0     # 512/8
-    assert estimate_seconds("large", 0, 512) == 256.0    # 512/2
+    # 2026-10-21 真机校准后的系数：small 4.5 / medium 3.5 / large 1.5 tok/s
+    assert estimate_seconds("small", 0, 512) == pytest.approx(113.78, abs=0.1)
+    assert estimate_seconds("large", 0, 512) == pytest.approx(341.33, abs=0.1)
     assert estimate_seconds("small", 50, 0) == 1.0       # prefill 50/50
+    # 校准的实际意义：4B 上 300 token 必须超过 45 s 阈值而转 job
+    assert estimate_seconds("small", 60, 300) > 45

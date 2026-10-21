@@ -1,7 +1,8 @@
 """长任务 job 状态机（MCP 设计 §5.3 / §5.4）。
 
-- 判定：估算耗时 = prefill/50 + max_tokens/decode（4B 8 / 7B 5 / 27B 2 tok/s），
-  超过 task_threshold_s（默认 45）→ 建任务返回 job_id；
+- 判定：估算耗时 = prefill/50 + max_tokens/decode（档位预设，2026-10-21 真机
+  校准：4B 4.5 / 7B 3.5 / 27B 1.5 tok/s），超过 task_threshold_s（默认 45）→
+  建任务返回 job_id；
 - 状态：working → completed | failed | cancelled；
 - 内存表 + TTL（job_ttl_s 默认 600）+ job_max 上限；
 - 取消：job.cancel() 幂等，推理侧通过 cancel_check 协作点感知。
@@ -16,7 +17,12 @@ from typing import Any, Callable
 
 __all__ = ["JobTable", "estimate_seconds", "DECODE_TOK_S"]
 
-DECODE_TOK_S = {"small": 8, "medium": 5, "large": 2}
+# 解码速度（tok/s）：设计 §5.3 给的是 8 / 5 / 2，2026-10-21 真机校准后下调——
+# OrangePi 5 Plus / qwen3.5-4b W8A8 实测 45 token / 9.3 s ≈ 4.8 tok/s（单发），
+# 长文批量时更低。按 8 tok/s 估算会把 300 token 的请求算成 38.7 s（< 45 阈值）
+# 而同步执行，实际却要 80 s，直接撞上客户端 60 s 硬超时——这是把长任务判错的
+# 方向性错误，因此以实测值下压，宁可多转 job 也不让客户端超时。
+DECODE_TOK_S = {"small": 4.5, "medium": 3.5, "large": 1.5}
 PREFILL_TOK_S = 50
 
 

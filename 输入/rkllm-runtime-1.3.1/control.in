@@ -2,29 +2,34 @@ Package: @PACKAGE@
 Version: @VERSION@
 Architecture: @ARCH@
 Maintainer: @MAINTAINER@
-Homepage: https://github.com/airockchip/rknn-llm
+Homepage: https://github.com/DMRedstone/rkllm-runtime
 Section: libs
 Priority: optional
 Depends: @DEPENDS@
-Suggests: cmake, g++, pkg-config, libopencv-dev, python3-flask
-Description: Rockchip RKLLM runtime for NPU platforms (RK3588/RK3576/RK3562/RV1126B)
- This package ships the Rockchip RKLLM software stack for deploying large
- language models on Rockchip NPU devices. It contains the shared runtime
- library librkllmrt.so, the public C/C++ header, CMake and pkg-config
- integration files, board tuning scripts and the upstream example sources.
+Suggests: cmake, g++, pkg-config, libopencv-dev
+Description: RKLLM runtime and OpenAI-compatible model service for Rockchip NPU
+ This package ships the Rockchip RKLLM runtime for deploying large language
+ models on Rockchip NPU devices (RK3588/RK3576/RK3562/RV1126B): the shared
+ library librkllmrt.so, the C/C++ header, CMake and pkg-config integration
+ files, board tuning scripts and the upstream example sources.
  .
- It also installs /usr/bin/rkllm, a command line front end written against the
- Python standard library only. It needs no compilation and no pip packages and
- drives the runtime directly through ctypes:
+ It also installs /usr/bin/rkllm as the single command entry point for both
+ local inference and the HTTP service:
    rkllm chat <model>     interactive local chat
    rkllm run  <model> ..  one-shot inference
-   rkllm serve <model>    OpenAI-compatible HTTP API (optionally via the
-                          shipped rkllm-server.service)
-   rkllm list / rkllm info / rkllm selftest
+   rkllm serve <model>    OpenAI-compatible API (rkllm-server.service)
+   rkllm list / info / selftest / config
+ .
+ The serve path runs the rewritten service stack: a FastAPI HTTP layer with
+ Bearer authentication, an isolated inference subprocess with supervision and
+ automatic restart, and memory budgeting that downgrades the context length
+ before refusing to start. Configuration lives in /etc/default/rkllm-server
+ (RKLLM_* variables); "rkllm config show" prints every key with its effective
+ value and source, "rkllm config docs" prints the full key table.
  .
  Models are not included: compile them from HuggingFace checkpoints with the
  RKLLM toolkit on an x86 host first. The runtime needs the rknpu kernel driver
  that your board image provides; this package never ships or builds it.
  .
- Documentation PDFs are installed under /usr/share/doc/@PACKAGE@/ and the
- example sources under /usr/share/@PACKAGE@/examples/.
+ Documentation is installed under /usr/share/doc/@PACKAGE@/ and the example
+ sources under /usr/share/@PACKAGE@/examples/.

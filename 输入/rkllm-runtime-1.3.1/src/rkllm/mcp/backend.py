@@ -82,6 +82,12 @@ class HttpBackend:
                 except json.JSONDecodeError:
                     continue
                 if cancel_check and cancel_check():
+                    # 先断流（设计 §4.3：关闭连接 → 板端检测断连后 abort），
+                    # 再尽力 /reset 兜底——顺序反了会把请求留在服务端算完。
+                    try:
+                        resp.close()
+                    except OSError:
+                        pass
                     req_abort = urllib.request.Request(
                         self.endpoint + "/reset", data=b"{}", method="POST",
                         headers={"Content-Type": "application/json",

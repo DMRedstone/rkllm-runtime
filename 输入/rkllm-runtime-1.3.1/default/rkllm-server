@@ -272,3 +272,102 @@ RKLLM_JSON_HINT=
 # 可选写法 / optional form:
 #RKLLM_EXTRA_ARGS="--no-history --verbose"
 RKLLM_EXTRA_ARGS=
+
+
+# ===========================================================================
+# 新栈扩展配置 / New-stack options
+# ---------------------------------------------------------------------------
+# EN: The implementation behind `rkllm serve` is now the new stack
+#     (FastAPI + inference subprocess). The command, its arguments, the unit
+#     name and this file's path are unchanged, so every entry above still
+#     works. This section only adds options the old file did not have; all of
+#     them are optional - leave them commented out to use the built-in default.
+#     80-key rule: any configuration key can also be set here as
+#     RKLLM_<SECTION>_<NAME> (e.g. RKLLM_SERVER_MAX_BODY_BYTES=8388608).
+#     `rkllm config show` prints all 80 keys with effective value and source;
+#     `rkllm config docs` prints the full table.
+# 中文: `rkllm serve` 的实现已换成新栈（FastAPI + 推理子进程）。
+#     命令、参数、systemd 单元名与本文件路径均未变化，上面的条目继续有效。
+#     本节只补充旧文件没有的选项，全部可选——保持注释即使用内置默认。
+#     80 键规则：任何配置键都可以在此以 RKLLM_<组>_<键名> 形式设置
+#     （如 RKLLM_SERVER_MAX_BODY_BYTES=8388608）。`rkllm config show` 查看
+#     80 键的生效值与来源，`rkllm config docs` 打印完整键表。
+# ===========================================================================
+
+# -- 推理进程 / engine ---------------------------------------------
+# EN: subprocess = crash-isolated worker (default); in_process = rollback
+#     switch for troubleshooting (an NPU fault then takes the HTTP process).
+# 中文: subprocess 为默认（推理在子进程，崩溃不拖垮 HTTP）；in_process 是
+#     回滚/排障开关（NPU 故障会带走整个 HTTP 进程）。
+#RKLLM_ENGINE_MODE=subprocess
+# EN: Pre-start memory budget check. When short, context drops 4096→2048→1024
+#     (not below RKLLM_MIN_CONTEXT); still short means refuse to start.
+# 中文: 启动前内存预算校验。不足时 context 按 4096→2048→1024 逐级降（不低于
+#     RKLLM_MIN_CONTEXT），仍不足则拒绝启动并打印所需内存。
+#RKLLM_MEMORY_CHECK=true
+#RKLLM_MEMORY_RESERVE_MB=1024
+#RKLLM_MIN_CONTEXT=1024
+# EN: Model class auto/small/medium/large; auto derives from file name + size.
+# 中文: 模型档位；auto 按文件名与体积推导。
+#RKLLM_MODEL_CLASS=auto
+
+# -- 服务端加固 / server hardening ---------------------------------
+#RKLLM_SERVER_MAX_BODY_BYTES=8388608
+# EN: Comma-separated CORS allowlist; empty sends no CORS headers.
+# 中文: CORS 白名单（逗号分隔）；留空不下发 CORS 头。
+#RKLLM_SERVER_CORS_ORIGINS=
+#RKLLM_SERVER_READ_TIMEOUT_S=30
+#RKLLM_SERVER_REQUEST_QUEUE_SIZE=128
+#RKLLM_SERVER_MAX_CONNECTIONS=256
+# EN: TLS is enabled only when both are given.
+# 中文: 两项都给出才启用 TLS。
+#RKLLM_SERVER_TLS_CERT=
+#RKLLM_SERVER_TLS_KEY=
+#RKLLM_SERVER_ACCESS_LOG=true
+
+# -- OpenAI 行为 / openai ------------------------------------------
+# EN: warn = keep going and report the parameter in X-RKLLM-Unsupported;
+#     reject = answer 400. Semantically critical keys always reject.
+# 中文: warn=放行并在 X-RKLLM-Unsupported 头里报告；reject=直接 400。
+#     语义关键项（n>1、tool_choice、流式 json_schema）恒为拒绝。
+#RKLLM_OPENAI_PARAM_POLICY=warn
+#RKLLM_OPENAI_TOOL_PARSER=auto
+# EN: SSE heartbeat interval in seconds; a `: ping` comment is sent while no
+#     token arrives, so long prefill does not look like a timeout.
+# 中文: SSE 心跳间隔（秒）；无 token 期间发 `: ping` 注释帧，长 prefill 不会
+#     被客户端误判为超时。
+#RKLLM_OPENAI_STREAM_HEARTBEAT_S=15
+#RKLLM_OPENAI_REASONING_FIELD=reasoning_content
+#RKLLM_OPENAI_JSON_SCHEMA_RETRIES=2
+#RKLLM_OPENAI_INCLUDE_USAGE_DEFAULT=false
+
+# -- 队列 / queue ---------------------------------------------------
+#RKLLM_QUEUE_REQUEST_TIMEOUT_S=900
+#RKLLM_QUEUE_BUSY_RETRY_AFTER_S=5
+
+# -- 日志与指标 / logging & metrics ---------------------------------
+#RKLLM_LOGGING_LEVEL=info
+# EN: text | json
+# 中文: text | json
+#RKLLM_LOGGING_FORMAT=text
+#RKLLM_LOGGING_FILE=
+#RKLLM_METRICS_ENABLED=true
+#RKLLM_METRICS_PATH=/metrics
+
+# -- 采样默认值 / sampling defaults ---------------------------------
+# EN: Defaults only - the same fields in a request body still win. Matches
+#     the previous release: top_k=1 (greedy), top_p=0.9, temperature=0.8, rp=1.1.
+# 中文: 这里只是默认值，请求体里的同名字段优先。默认与上一版一致：
+#     top_k=1（贪心）、top_p=0.9、temperature=0.8、repeat_penalty=1.1。
+#RKLLM_TOP_K=1
+#RKLLM_TOP_P=0.9
+#RKLLM_TEMPERATURE=0.8
+#RKLLM_REPEAT_PENALTY=1.1
+
+# -- 尚未接线 / not wired yet --------------------------------------
+# EN: prompt prefix cache and CPU/NPU frequency locking are not implemented
+#     yet; `rkllm config show` marks them "[未接线]". Do not expect them to
+#     change behaviour.
+# 中文: prompt 前缀缓存与锁频尚未实现；`rkllm config show` 会把它们标为
+#     [未接线]。目前调它们不会有行为变化。
+#RKLLM_CACHE_ENABLED=false

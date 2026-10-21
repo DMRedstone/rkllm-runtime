@@ -111,8 +111,8 @@ def test_tool_parser_whole_block():
     kinds = [k for k, _ in events]
     assert "content" in kinds and "tool_call" in kinds
     calls = p.tool_calls()
-    assert calls[0]["name"] == "f"
-    assert json.loads(calls[0]["arguments"]) == {"a": 1}
+    assert calls[0]["function"]["name"] == "f"
+    assert json.loads(calls[0]["function"]["arguments"]) == {"a": 1}
 
 
 def test_tool_parser_across_chunks():
@@ -123,8 +123,8 @@ def test_tool_parser_across_chunks():
         for kind, payload in p.feed(chunk):
             if kind == "tool_call":
                 tool_events.append(payload)
-    assert tool_events[0]["name"] == "g"
-    assert json.loads(tool_events[0]["arguments"]) == [1, 2]
+    assert tool_events[0]["function"]["name"] == "g"
+    assert json.loads(tool_events[0]["function"]["arguments"]) == [1, 2]
 
 
 def test_tool_parser_broken_json_degrades_to_text():
@@ -154,3 +154,25 @@ def test_detect_parser():
     assert detect_parser("deepseek-r1") == "deepseek"
     assert detect_parser("unknown-model", "hermes") == "hermes"
     assert detect_parser("unknown-model") == "qwen"
+
+
+def test_tool_calls_use_openai_nested_shape():
+    """tool_calls 必须是 {"function": {"name","arguments"}} 嵌套结构。
+
+    F10 实机回归：早期实现是扁平结构，LangGraph / Agents SDK 读
+    tool_call["function"]["name"] 得到空串，报 "Tool  not found in agent"。
+    """
+    from rkllm.agent.tools import ToolCallParser
+
+    parser = ToolCallParser("qwen")
+    chunks = list(parser.feed(
+        '<tool_call>{"name":"get_weather","arguments":{"city":"Paris"}}</tool_call>'))
+    calls = parser.tool_calls()
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["type"] == "function"
+    assert call["id"].startswith("call_")
+    assert call["function"]["name"] == "get_weather"
+    assert json.loads(call["function"]["arguments"]) == {"city": "Paris"}
+    # 扁平字段不应再出现
+    assert "name" not in call and "arguments" not in call

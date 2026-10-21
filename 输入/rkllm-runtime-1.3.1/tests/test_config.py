@@ -102,10 +102,22 @@ def test_http_transport_requires_origin():
 
 
 def test_legacy_env_migration():
+    # NO_HISTORY / NO_FREQ_LOCK 是**反义**开关：0 表示"没有禁用"→ 保留。
+    # 旧实现把它的值直接搬过去，语义完全颠倒（2026-10-21 修正）。
     cfg = load_config(env={"RKLLM_MODEL": "/m/qwen3-4b.rkllm",
                            "RKLLM_NO_HISTORY": "0"})
     assert cfg.model.path == "/m/qwen3-4b.rkllm"
-    assert cfg.model.keep_history is False   # 旧 NO_HISTORY=0 -> keep_history=false
+    assert cfg.model.keep_history is True
+    assert load_config(env={"RKLLM_NO_HISTORY": "1"}
+                       ).model.keep_history is False
+    assert load_config(env={"RKLLM_NO_FREQ_LOCK": "1"}
+                       ).model.freq_lock is False
+    # 空值不参与映射（conffile 里留下 KEY= 不应炸启动）
+    assert load_config(env={"RKLLM_NO_HISTORY": ""}
+                       ).model.keep_history is False   # 内置默认
+    # 旧 conffile 的单数 CORS 变量仍然生效
+    assert list(load_config(env={"RKLLM_CORS_ORIGIN": "http://a,http://b"}
+                            ).server.cors_origins) == ["http://a", "http://b"]
     # 新键名优先于旧名
     cfg2 = load_config(env={"RKLLM_MODEL": "/old.rkllm",
                             "RKLLM_MODEL_PATH": "/new.rkllm"})

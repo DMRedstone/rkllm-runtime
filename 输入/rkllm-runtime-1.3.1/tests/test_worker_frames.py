@@ -75,16 +75,38 @@ def _free_port():
 def worker_proc():
     port = _free_port()
     def spawn():
+        # stdout/stderr 只承载 C 库日志（1.3.1-16 起 ready 帧走连接本身）：
+        # 用 DEVNULL 而不是 PIPE，避免父进程不读导致管道写满、worker 卡死。
         proc = subprocess.Popen(
             [sys.executable, "-m", "rkllm.worker.main", "--address",
              "127.0.0.1:%d" % port, "--tcp", "--engine", "fake",
-             "--model", "fake-model"],
-            cwd=str(SRC), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        header = proc.stdout.read(4)
-        assert len(header) == 4, "worker 未启动: " + proc.stderr.read(2000).decode()
-        (length,) = struct.unpack(">I", header)
-        ready = json.loads(proc.stdout.read(length))
-        assert ready["op"] == "ready"
+             "--model", "fake-model",
+             # 每个 token 之间留 20 ms：abort 用例要在"生成中"插入控制帧，
+             # 引擎太快时 end 帧会先到（全量套件负载下表现为偶发失败）
+             "--delay", "0.02"],
+            cwd=str(SRC), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        deadline = time.time() + 30
+        conn = None
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                tail = ""
+                try:
+                    tail = proc.stderr.read(2000).decode("utf-8", "replace")
+                except (OSError, ValueError):
+                    pass
+                raise AssertionError("worker 提前退出：" + tail)
+            try:
+                conn = socket.create_connection(("127.0.0.1", port), timeout=5)
+                break
+            except OSError:
+                time.sleep(0.2)
+        if conn is None:
+            raise AssertionError("worker 未开始监听 %d" % port)
+        try:
+            ready = read_frame(conn.makefile("rb"))
+        finally:
+            conn.close()
+        assert ready.get("op") == "ready", "首帧应为 ready，实际 %r" % ready
         return proc
 
     # 负载偶发防护：启动失败/超时整体重试一次（见 _connect 同款理由）

@@ -16,6 +16,10 @@ from .reasoning import ReasoningSplitter
 from .tools import ToolCallParser, build_tools_prefix, detect_parser
 
 
+_SAMPLING_KEYS = ("top_k", "top_p", "temperature", "repeat_penalty",
+                  "presence_penalty", "frequency_penalty")
+
+
 class Pipeline:
     def __init__(self, svc, body: dict, *, chat: bool):
         self.svc = svc
@@ -25,6 +29,9 @@ class Pipeline:
         enable_thinking = bool(body.get("enable_thinking", False))
         self._splitter = ReasoningSplitter(enabled=enable_thinking)
         tools = body.get("tools") or None
+        # tools_mode 只影响"是否把工具注入提示词"；native 已在 app 层降级为 prompt
+        if tools and getattr(svc, "tools_mode", "prompt") == "off":
+            tools = None
         self._parser = ToolCallParser(
             detect_parser(svc.model_name, svc.tool_parser),
             max_calls=svc.max_tool_calls) if (chat and tools) else None
@@ -38,8 +45,24 @@ class Pipeline:
             prompt = str(body.get("prompt", ""))
         rf = body.get("response_format") or {}
         if isinstance(rf, dict) and rf.get("type") == "json_object":
-            prompt += ("\n\nRespond with a single valid JSON object and "
-                       "nothing else.")
+            # 与 1.3.1-15 一致：提示语可由旧 conffile 的 RKLLM_JSON_HINT 覆盖，
+            # 空=用内置默认，填 "none"=不追加任何提示。
+            import os
+            hint = (os.environ.get("RKLLM_JSON_HINT") or "").strip()
+            if hint.lower() == "none":
+                hint = ""
+            elif not hint:
+                hint = ("Respond with a single valid JSON object and "
+                        "nothing else.")
+            if hint:
+                prompt += "\n\n" + hint
+        elif isinstance(rf, dict) and rf.get("type") == "json_schema":
+            # emulated：schema 提示注入；校验与重试在非流式路径（openai.py）
+            spec = rf.get("json_schema") or {}
+            schema = spec.get("schema") if isinstance(spec, dict) else None
+            prompt += ("\n\nRespond with a single JSON value that conforms to "
+                       "this JSON Schema and nothing else:\n"
+                       + json.dumps(schema or {}, ensure_ascii=False))
         self._prompt = prompt
         self._reasoning: list[str] = []
         self._content_before: list[str] = []
@@ -51,14 +74,39 @@ class Pipeline:
     def iter_tokens(self) -> Iterator[str | dict]:
         """经队列调用：从 supervisor 拉 token，流经 reasoning/tools 解析，
         流结束后自动 drain（tool_calls 汇总、未闭合块降级、reasoning 收尾）。"""
+        import time as _time
+        _t0 = _time.monotonic()
         stream = self.svc.supervisor.execute(
             self._prompt, enable_thinking=bool(
                 self.body.get("enable_thinking", False)),
             max_new_tokens=self.max_tokens,
+            sampling=self.sampling(),
+            # 多轮对话才值得写前缀缓存（单轮存了不会命中）
+            cache_hint=len(self.body.get("messages") or []) >= 2,
             request_timeout_s=self.svc.queue.request_timeout_s)
+        _first = True
         for token in stream:
+            if _first:
+                _first = False
+                # TTFT 打点：supervisor 层返回首个 token 的耗时（N3 定位用）
+                self.svc.ttft_log(_time.monotonic() - _t0)
             yield from self._consume(token)
         yield from self.drain()
+
+    def sampling(self) -> dict | None:
+        """请求级采样参数 → runtime 的 _SamplingParam。
+
+        顺序：进程默认（serve 的 --temperature 等 / default_sampling）
+              < 请求体（OpenAI 的 temperature / top_p / top_k / *_penalty）。
+        此前这些参数只进了 usage 估算、从未传给 runtime —— 能力表却标成
+        native（审计发现的"静默不生效"），这里补上真正的传递。
+        """
+        merged: dict = dict(getattr(self.svc, "default_sampling", None) or {})
+        for key in _SAMPLING_KEYS:
+            value = self.body.get(key)
+            if value is not None:
+                merged[key] = value
+        return merged or None
 
     def _consume(self, token: str) -> Iterator[str | dict]:
         reasoning, content = self._splitter.feed(token)

@@ -13,6 +13,7 @@ WorkBuddy 是唯一适配承诺的客户端；协议按通用 MCP 实现。
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, Callable
 
 __all__ = ["JsonRpcError", "PROTOCOL_VERSIONS", "DEFAULT_PROTOCOL_VERSION",
@@ -62,16 +63,22 @@ def result_payload(protocol_version: str, result: dict) -> dict:
     return result
 
 
-def detect_protocol(first_frame: dict) -> str:
-    """按首包判定协议版本（MCP 设计 §8：首包 _meta 或 initialize）。"""
+def detect_protocol(first_frame: dict,
+                    supported: tuple[str, ...] | list[str] | None = None) -> str:
+    """按首包判定协议版本（MCP 设计 §8：首包 _meta 或 initialize）。
+
+    `supported` 来自 mcp.protocol_versions —— 收缩支持范围时，未列出的版本
+    一律回落到默认版本（客户端会按 initialize 返回的版本继续）。
+    """
+    versions = tuple(supported) if supported else PROTOCOL_VERSIONS
     params = first_frame.get("params") or {}
     meta = params.get("_meta") or {}
     version = meta.get("protocolVersion")
     if version:
-        return version if version in PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
+        return version if version in versions else DEFAULT_PROTOCOL_VERSION
     if first_frame.get("method") == "initialize":
         requested = params.get("protocolVersion")
-        if requested in PROTOCOL_VERSIONS:
+        if requested in versions:
             return requested
         return DEFAULT_PROTOCOL_VERSION
     return DEFAULT_PROTOCOL_VERSION
@@ -80,9 +87,19 @@ def detect_protocol(first_frame: dict) -> str:
 class Dispatcher:
     """方法注册表 + JSON-RPC 信封处理（解析/校验/错误码集中在此）。"""
 
-    def __init__(self, protocol_version: str):
+    def __init__(self, protocol_version: str,
+                 supported: tuple[str, ...] | list[str] | None = None):
         self.protocol_version = protocol_version
+        # mcp.protocol_versions：本连接器声明支持的版本（默认全部四版）
+        self.supported = tuple(supported) if supported else PROTOCOL_VERSIONS
         self._handlers: dict[str, Callable[[dict], dict]] = {}
+        # 当前正在处理的请求 id（线程本地）：stdio 用它把
+        # notifications/cancelled 的 requestId 对上号
+        self._local = threading.local()
+
+    @property
+    def current_request_id(self):
+        return getattr(self._local, "request_id", None)
 
     def register(self, method: str, handler: Callable[[dict], dict]) -> None:
         self._handlers[method] = handler
@@ -126,12 +143,15 @@ class Dispatcher:
         params = msg.get("params") or {}
         if not isinstance(params, dict):
             return self._error(msg_id, INVALID_PARAMS, "params must be an object")
+        self._local.request_id = msg_id
         try:
             result = handler(params)
         except JsonRpcError as exc:
             return self._error(msg_id, exc.code, exc.message, exc.data)
         except Exception as exc:               # 业务异常统一 -32603，不带堆栈
             return self._error(msg_id, INTERNAL_ERROR, str(exc)[:500])
+        finally:
+            self._local.request_id = None
         return {"jsonrpc": "2.0", "id": msg_id,
                 "result": result_payload(self.protocol_version, result)}
 

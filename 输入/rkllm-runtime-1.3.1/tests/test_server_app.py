@@ -172,17 +172,39 @@ def test_chat_completions_stream(client):
 
 
 def test_chat_rejects_unsupported_param(client):
-    """默认 warn 策略：logprobs/seed 走响应头放行；json_schema 恒 reject。"""
+    """默认 warn 策略：logprobs/seed 走响应头放行；tool_choice 恒 reject。"""
     r = client.post("/v1/chat/completions", json={
         "messages": [{"role": "user", "content": "x"}], "logprobs": True})
     assert r.status_code == 200
     assert r.headers.get("x-rkllm-unsupported") == "logprobs"
     r2 = client.post("/v1/chat/completions", json={
         "messages": [{"role": "user", "content": "x"}],
-        "response_format": {"type": "json_schema", "json_schema": {
-            "name": "o", "schema": {}}}})
+        "tool_choice": "auto"})
     assert r2.status_code == 400
     assert r2.json()["error"]["code"] == "unsupported_parameter"
+
+
+def test_chat_json_schema_non_stream_is_emulated():
+    """非流式 json_schema 走校验重试：模型返回合法 JSON 则 200。"""
+    cfg = load_config(env={})
+    app = create_app(cfg, supervisor=FakeSupervisor(tokens=['{"name": "x"}']))
+    with TestClient(app) as c:
+        r = c.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "x"}],
+            "response_format": {"type": "json_schema", "json_schema": {
+                "name": "o", "schema": {"type": "object",
+                                        "required": ["name"]}}}})
+    assert r.status_code == 200
+
+
+def test_chat_json_schema_stream_rejected(client):
+    """流式下 json_schema 明确 400（发帧后无法撤回重答）。"""
+    r = client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "x"}], "stream": True,
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": "o", "schema": {}}}})
+    assert r.status_code == 400
+    assert "json_schema" in r.json()["error"]["message"]
 
 
 def test_chat_warn_param_gets_header(client):

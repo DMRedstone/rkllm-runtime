@@ -1,0 +1,21 @@
+#!/usr/bin/python3
+"""rkllm: 统一命令入口（1.3.1-16 起）。
+
+命令名、子命令、参数、systemd 单元（rkllm-server.service）与 conffile
+（/etc/default/rkllm-server）全部沿用 1.3.1-15；实现换成新栈
+（FastAPI 服务端 + 推理子进程），源码在 /usr/lib/rkllm/current/rkllm。
+
+设计取舍：这里是**唯一入口**，不再另设 rkllm-serve 之类的第二条命令——
+运维脚本、unit、文档里的 `rkllm ...` 一行都不用改。
+"""
+import sys
+
+if sys.version_info[:2] < (3, 13):
+    sys.exit("rkllm: 需要 python3 >= 3.13（当前 %d.%d）" % sys.version_info[:2])
+
+sys.path.insert(0, "/usr/lib/rkllm/current")
+
+from rkllm.cli import main          # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -28,10 +28,18 @@ def test_param_tier():
 
 
 def test_check_reject_semantic_key_even_in_warn():
-    body = {"response_format": {"type": "json_schema"}, "model": "x"}
-    reject, warn = check_request_params(body, policy="warn")
-    assert "response_format.json_schema" in reject
-    assert not warn
+    # tool_choice 是声明为恒 reject 的语义关键项：必须真的拦（审计 P2-8）
+    reject, warn = check_request_params({"tool_choice": "auto"}, policy="warn")
+    assert reject == ["tool_choice"] and not warn
+    # json_schema：非流式是 emulated（提示+校验+重试），放行
+    reject, _ = check_request_params(
+        {"response_format": {"type": "json_schema"}}, policy="warn")
+    assert not reject
+    # 流式无法在发帧后纠正，明确拒绝
+    reject, _ = check_request_params(
+        {"response_format": {"type": "json_schema"}}, policy="warn",
+        stream=True)
+    assert reject and "json_schema" in reject[0]
 
 
 def test_check_warn_policy():

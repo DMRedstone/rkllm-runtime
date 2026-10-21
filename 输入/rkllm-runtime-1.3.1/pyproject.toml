@@ -13,8 +13,5 @@ license = { text = "MIT" }
 where = ["src"]
 include = ["rkllm*"]
 
-# 客户端 wheel 裁剪（S6）：仅打包 rkllm/mcp、rkllm/config.py、rkllm/caps.py，
-# 由打包工具链从同一棵源码树裁出，避免双份实现漂移（设计 §3.4）。
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 __all__ = ["Key", "SCHEMA", "Config", "ConfigError", "load_config",
-           "config_docs", "migrate_conffile"]
+           "config_docs", "config_init", "config_show", "migrate_conffile"]
 
 # ---------------------------------------------------------------------------
 # schema 定义
@@ -39,6 +39,7 @@ class Key:
     max_v: Any = None           # 数值上限（含）；list 时为长度上限
     choices: tuple = ()         # 枚举取值
     desc: str = ""
+    implemented: bool = True    # False = schema 存在但运行时尚未接线（G5 诚实）
 
     @property
     def full(self) -> str:
@@ -51,9 +52,10 @@ class Key:
 
 def _k(section: str, name: str, type_: type, default: Any, *,
        min_v: Any = None, max_v: Any = None, choices: tuple = (),
-       desc: str = "") -> Key:
+       desc: str = "", implemented: bool = True) -> Key:
     return Key(section, name, type_, default,
-               min_v=min_v, max_v=max_v, choices=choices, desc=desc)
+               min_v=min_v, max_v=max_v, choices=choices, desc=desc,
+               implemented=implemented)
 
 
 # 80 键全量 schema。分组顺序与《MCP 接入与配置设计》§7.2 一致。
@@ -78,7 +80,8 @@ SCHEMA: tuple[Key, ...] = (
     # -- model（11）---------------------------------------------------------
     _k("model", "path", str, "", desc=".rkllm 模型路径；serve 必填"),
     _k("model", "search_dirs", list, (), desc="裸模型名的搜索目录"),
-    _k("model", "freq_helper", str, "auto", desc="锁频脚本路径；auto 按 SoC 选"),
+    _k("model", "freq_helper", str, "auto",
+       desc="锁频脚本路径；auto=用内建 sysfs 方案，给了路径则交给脚本"),
     _k("model", "class", str, "auto", choices=("auto", "small", "medium", "large"),
        desc="模型档位；auto 按文件名与大小推导"),
     _k("model", "context", int, 4096, min_v=512, max_v=32768,
@@ -90,7 +93,8 @@ SCHEMA: tuple[Key, ...] = (
     _k("model", "threads", int, 4, min_v=1, max_v=8, desc="CPU 线程数"),
     _k("model", "platform", str, "auto",
        choices=("auto", "rk3588", "rk3576", "rk3562", "rv1126b"), desc="SoC 平台"),
-    _k("model", "freq_lock", bool, True, desc="NPU/CPU 锁频（需 root）"),
+    _k("model", "freq_lock", bool, True,
+       desc="NPU/CPU 锁频（需 root；非 root 或 sysfs 不支持时告警跳过）"),
     _k("model", "keep_history", bool, False, desc="服务端保历史；默认无状态"),
     # -- engine（8）---------------------------------------------------------
     _k("engine", "mode", str, "subprocess", choices=("subprocess", "in_process"),
@@ -133,10 +137,16 @@ SCHEMA: tuple[Key, ...] = (
        desc="单条消息允许的最大 tool_call 数"),
     _k("openai", "include_usage_default", bool, False, desc="默认是否在流末尾发 usage 帧"),
     # -- cache（4）----------------------------------------------------------
-    _k("cache", "enabled", bool, True, desc="prefix prompt cache 开关"),
-    _k("cache", "dir", str, "/var/cache/rkllm/prefix", desc="缓存目录；SD 卡建议改 eMMC"),
-    _k("cache", "max_mb", int, 512, min_v=0, max_v=8192, desc="缓存容量上限；0=不限"),
-    _k("cache", "ttl_s", int, 604800, min_v=0, max_v=2592000, desc="缓存条目 TTL"),
+    # 单槽前缀缓存（ADR-07）：上一轮 prompt 是新 prompt 的前缀时复用其 KV，
+    # 避免多轮对话反复全量 prefill。worker/promptcache.py 实现，加载失败自动
+    # 清槽重试一次不带缓存的推理（R5 的兜底）。
+    _k("cache", "enabled", bool, True, desc="prompt 前缀缓存开关"),
+    _k("cache", "dir", str, "/var/cache/rkllm/prefix",
+       desc="缓存目录；SD 卡建议改 eMMC"),
+    _k("cache", "max_mb", int, 512, min_v=0, max_v=8192,
+       desc="缓存目录容量上限；超出按最旧淘汰；0=不限"),
+    _k("cache", "ttl_s", int, 604800, min_v=0, max_v=2592000,
+       desc="缓存文件 TTL；0=不过期"),
     # -- mcp（24）-----------------------------------------------------------
     _k("mcp", "enabled", bool, True, desc="MCP 连接器总开关"),
     _k("mcp", "transport", str, "stdio", choices=("stdio", "http"), desc="传输方式"),
@@ -217,7 +227,18 @@ LEGACY_ENV_MAP: dict[str, str] = {
     "RKLLM_NO_FREQ_LOCK": "model.freq_lock",
     "RKLLM_UNSUPPORTED_POLICY": "openai.param_policy",
     "RKLLM_LOG_LEVEL": "logging.level",
+    # 1.3.1-15 的 conffile 用的是单数 RKLLM_CORS_ORIGIN：新栈的对应键是
+    # server.cors_origins（列表），加载时按逗号切分，旧设置继续生效。
+    "RKLLM_CORS_ORIGIN": "server.cors_origins",
 }
+
+
+# 反义开关：旧变量为真表示"关闭"，映射到新键时必须取反，否则语义完全相反。
+_NEGATED_LEGACY: frozenset[str] = frozenset({
+    "RKLLM_NO_HISTORY", "RKLLM_NO_FREQ_LOCK",
+})
+
+_TRUE_WORDS = ("1", "true", "yes", "on")
 
 
 # ---------------------------------------------------------------------------
@@ -339,8 +360,14 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
     for legacy, target in LEGACY_ENV_MAP.items():
         section, name = target.split(".", 1)
         new_env = f"RKLLM_{section}_{name}".upper()
-        if legacy in env and new_env not in env:
-            env[new_env] = env[legacy]
+        if legacy in env and new_env not in env and env[legacy].strip():
+            raw = env[legacy]
+            if legacy in _NEGATED_LEGACY:
+                # NO_HISTORY=1 → keep_history=false；NO_FREQ_LOCK=1 → freq_lock=false
+                env[new_env] = ("false" if raw.strip().lower() in _TRUE_WORDS
+                                else "true")
+            else:
+                env[new_env] = raw
 
     file_data: dict[str, Any] = {}
     if file:
@@ -403,17 +430,21 @@ def _cross_validate(values: dict[str, Any], errors: list[str],
 
 
 def config_show(cfg: Config, as_json: bool = False) -> str:
-    """打印生效值与来源（default/file/env/cli）。"""
+    """打印生效值与来源（default/file/env/cli）。未接线的键如实标注。"""
     import json
     if as_json:
-        return json.dumps({"values": cfg.values, "sources": cfg.sources},
+        return json.dumps({"values": cfg.values,
+                           "sources": cfg.sources,
+                           "not_implemented": [k.full for k in SCHEMA
+                                               if not k.implemented]},
                           ensure_ascii=False, indent=2)
     lines = []
     for section, keys in _BY_SECTION.items():
         lines.append(f"[{section}]")
         for key in keys:
+            mark = "" if key.implemented else "  [未接线]"
             lines.append(f"  {key.name} = {cfg.values[key.full]!r}"
-                         f"    # {cfg.sources[key.full]}  {key.desc}")
+                         f"    # {cfg.sources[key.full]}  {key.desc}{mark}")
     return "\n".join(lines)
 
 
@@ -424,8 +455,77 @@ def config_docs() -> str:
         rng = "/".join(key.choices) if key.choices else ""
         if key.min_v is not None or key.max_v is not None:
             rng = (rng + " " if rng else "") + f"[{key.min_v}, {key.max_v}]"
-        lines.append(f"| `{key.full}` | `{key.default!r}` | {rng} | {key.desc} |")
+        mark = "" if key.implemented else "（未接线）"
+        lines.append(f"| `{key.full}` | `{key.default!r}` | {rng} "
+                     f"| {key.desc}{mark} |")
     return "\n".join(lines)
+
+
+def config_init(target: str = "board") -> str:
+    """生成 TOML 模板（设计 §7.2 `rkllm config init --board|--client`）。
+
+    只输出注释 + 少量必填项，保持与 `config docs` 的 80 键同源但不重复抄写
+    全部默认值——默认值本来就不需要写进文件（优先级链已保证）。
+    """
+    if target == "client":
+        return """# ~/.config/rkllm/mcp.toml - rkllm-mcp 客户端配置
+# 优先级：内置默认 < 本文件 < RKLLM_* 环境变量
+# 完整键表：见板端 `rkllm-serve config docs` 的 [mcp] 组
+
+[mcp]
+# 板端 OpenAI 兼容端点（也可用 RKLLM_ENDPOINT 环境变量）
+target_endpoint = "http://127.0.0.1:8080/v1"
+# 板端 server.api_key（留空表示板端未启用鉴权）
+target_api_key = ""
+# 单次 HTTP 读超时（秒）
+target_timeout_s = 120
+# 超过此秒数转 job；必须 < 60（客户端工具硬超时）
+task_threshold_s = 45
+# 工具结果与输入上限（字符）
+max_result_chars = 20000
+max_input_chars = 12000
+"""
+    return """# /etc/rkllm/rkllm.toml - 板端 FastAPI 栈配置（`rkllm-serve serve`）
+# 优先级：内置默认 < 本文件 < RKLLM_* 环境变量 < 命令行
+# 全部 80 键与默认值：  rkllm-serve config docs
+# 生效值与来源：        rkllm-serve config show
+# 只填需要改的项即可。
+
+[server]
+# 默认只监听本机；对局域网提供服务时显式改这里，并同时配置 api_key。
+#bind_host = "127.0.0.1"
+#port = 8080
+#api_key = ""              # 空 = 不鉴权（与 1.3.1-15 行为一致）
+#api_key_file = ""         # 优先于 api_key；建议 0600
+
+[model]
+# serve 必须提供；也可用裸文件名并在 search_dirs 中查找
+path = "/var/lib/rkllm/models/your-model.rkllm"
+#search_dirs = ["/var/lib/rkllm/models"]
+#class = "auto"            # auto 按文件名与体积推导
+#context = 4096            # 内存不足时按 2048 / 1024 逐级降，不低于 min_context
+#min_context = 1024
+#max_tokens = 0            # 0 = 按档位（small 2048 / medium 1024 / large 512）
+
+[engine]
+#mode = "subprocess"        # in_process 为排障/回滚开关（崩溃不隔离）
+#memory_check = true        # 启动前内存预算校验
+#memory_reserve_mb = 1024
+
+[queue]
+#max_wait = 32
+#request_timeout_s = 900
+
+[openai]
+#param_policy = "warn"      # 语义关键项（n>1 / tool_choice / 流式 json_schema）恒 400
+#tool_parser = "auto"
+#stream_heartbeat_s = 15
+
+[logging]
+#level = "info"
+#format = "text"            # json 便于采集
+#file = ""                  # 空 = 只 stderr/journal
+"""
 
 
 def migrate_conffile(path: str) -> dict[str, Any]:

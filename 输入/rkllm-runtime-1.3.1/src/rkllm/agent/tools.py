@@ -86,10 +86,15 @@ class ToolCallParser:
                     yield "content", self._buf[:start]
                 self._buf = self._buf[start + len(self._open_tag):]
                 self._in_call = True
+                # OpenAI 规范：name/arguments 嵌在 function 里。
+                # 早期实现是扁平的（{"name":...}），LangGraph / Agents SDK 这类
+                # 标准客户端读 tool_call["function"]["name"] 会拿到空值，
+                # 报 "Tool  not found in agent"——F10 实机才暴露。
                 self._calls.append({"index": len(self._calls),
                                     "id": "call_" + uuid.uuid4().hex[:8],
                                     "type": "function",
-                                    "name": None, "arguments": ""})
+                                    "function": {"name": None,
+                                                 "arguments": ""}})
                 if len(self._calls) > self.max_calls:
                     self._parse_failed = True
                     yield "content", self._open_tag
@@ -105,9 +110,9 @@ class ToolCallParser:
                 call = self._calls[-1]
                 try:
                     parsed = json.loads(raw)
-                    call["name"] = parsed.get("name", "")
+                    call["function"]["name"] = parsed.get("name", "")
                     args = parsed.get("arguments", {})
-                    call["arguments"] = args if isinstance(args, str) \
+                    call["function"]["arguments"] = args if isinstance(args, str) \
                         else json.dumps(args, ensure_ascii=False)
                 except (json.JSONDecodeError, ValueError):
                     self._parse_failed = True
@@ -132,7 +137,9 @@ class ToolCallParser:
         return self._parse_failed
 
     def tool_calls(self) -> list[dict]:
-        return [c for c in self._calls if c.get("name")]
+        """只返回解析出工具名的调用，且是 OpenAI 标准嵌套结构。"""
+        return [c for c in self._calls
+                if (c.get("function") or {}).get("name")]
 
     @staticmethod
     def _hold(buf: str, tag: str) -> int:

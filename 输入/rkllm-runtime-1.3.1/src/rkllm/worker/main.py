@@ -45,7 +45,9 @@ class Worker:
     def _inference_loop(self, wfile) -> None:
         while not self._shutdown.is_set():
             try:
-                frame = self._run_queue.get(timeout=0.5)
+                # 0.02s 轮询：0.5s 的粒度会给每个请求叠加最多 0.5s
+                # 首帧延迟（真机 TTFT 实测暴露），而空转成本可忽略。
+                frame = self._run_queue.get(timeout=0.02)
             except queue.Empty:
                 if self._conn_closed.is_set():
                     return
@@ -58,7 +60,9 @@ class Worker:
                         frame.get("prompt", ""),
                         role=params.get("role", "user"),
                         enable_thinking=bool(params.get("enable_thinking", False)),
-                        max_new_tokens=params.get("max_new_tokens")):
+                        sampling=params.get("sampling"),
+                        max_new_tokens=params.get("max_new_tokens"),
+                        cache_hint=bool(params.get("cache_hint", True))):
                     if self._abort_requested.is_set():
                         self._send(wfile, {"op": "end", "id": req_id,
                                            "aborted": True})
@@ -159,9 +163,16 @@ def build_engine(args):
         return FakeEngine(model_name=args.model or "fake",
                           context_len=args.context, delay=args.delay)
     from rkllm.worker.engine import RealEngine
+    from rkllm.worker.promptcache import PromptCache
+    cache = None
+    if getattr(args, "cache_dir", "") and not getattr(args, "no_cache", False):
+        cache = PromptCache(args.cache_dir,
+                            max_mb=getattr(args, "cache_max_mb", 512),
+                            ttl_s=getattr(args, "cache_ttl_s", 604800))
     return RealEngine(model_path=args.model, platform=args.platform,
                       context_len=args.context, max_new_tokens=args.max_tokens,
-                      keep_history=not args.no_history, threads=args.threads)
+                      keep_history=not args.no_history, threads=args.threads,
+                      prompt_cache=cache)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -177,6 +188,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-tokens", type=int, default=2048)
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--no-history", action="store_true")
+    parser.add_argument("--cache-dir", default="",
+                        help="prompt 前缀缓存目录；空=关闭（cache.enabled=false）")
+    parser.add_argument("--cache-max-mb", type=int, default=512)
+    parser.add_argument("--cache-ttl-s", type=int, default=604800)
     parser.add_argument("--delay", type=float, default=0.0,
                         help="fake 引擎每 token 延迟（压测/演示）")
     args = parser.parse_args(argv)

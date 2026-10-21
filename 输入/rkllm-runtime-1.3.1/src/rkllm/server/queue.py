@@ -27,7 +27,17 @@ class InferenceQueue:
     """全局单执行槽 + 有界等待队列；等待中可取消（取消不占额度）。"""
 
     def __init__(self, max_wait: int = 32, wait_timeout_s: int = 600,
-                 request_timeout_s: int = 900, busy_retry_after_s: int = 5):
+                 request_timeout_s: int = 900, busy_retry_after_s: int = 5,
+                 max_concurrent: int = 1):
+        # queue.max_concurrent：真正的并发上限。单 NPU 只有一个引擎，engine 内部
+        # 还会拒绝并发 stream()，所以 >1 在这里只会有害无益——读取该键、夹紧为 1
+        # 并告警，比"键存在但不生效"诚实。
+        self.max_concurrent = 1
+        if int(max_concurrent) > 1:
+            import sys as _sys
+            _sys.stderr.write(
+                "[rkllm] queue.max_concurrent=%d 已夹紧为 1：单 NPU 单引擎串行\n"
+                % int(max_concurrent))
         self.max_wait = max_wait
         self.wait_timeout_s = wait_timeout_s
         self.request_timeout_s = request_timeout_s

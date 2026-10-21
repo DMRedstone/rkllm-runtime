@@ -51,3 +51,10 @@ dist/
 *.7z
 !输入/rknn-llm-release-v1.3.1-minimal.tar.gz
 
+
+# 构建与测试产物
+工具/dist/
+工具/build/
+.coverage
+.coverage.json
+.coverage.*

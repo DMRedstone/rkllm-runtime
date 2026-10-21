@@ -24,7 +24,7 @@ __all__ = ["CAPS", "capabilities_doc", "param_tier", "check_request_params"]
 ENDPOINTS: dict[str, str] = {
     "chat.completions": "native",
     "completions": "native",          # 薄封装：prompt 直喂 runtime
-    "responses": "emulated",          # 翻译层：Responses -> Chat（OpenAI Agents SDK 默认）
+    "responses": "emulated",          # 翻译层：Responses -> Chat（02 §4）
     "models": "native",               # 单模型；models/{id} 返回同一对象
     "embeddings": "unsupported",      # 仅当配置 embedding 模型才可用，不假装支持
     "messages(anthropic)": "unsupported",
@@ -63,7 +63,7 @@ UNSUPPORTED_PARAMS: tuple[str, ...] = (
 
 # 语义关键项：即便 param_policy=warn 也必须 reject（D2 教训：静默降级难定位）
 _ALWAYS_REJECT: frozenset[str] = frozenset({
-    "response_format.json_schema", "tool_choice", "n>1",
+    "tool_choice", "n>1",
 })
 
 _PARAM_TIER: dict[str, str] = {
@@ -86,7 +86,8 @@ LIMITS: dict[str, Any] = {
 }
 
 NOTES: dict[str, str] = {
-    "json_schema": "prompt+validate+retry, not constrained decoding",
+    "json_schema": "prompt+validate+retry on non-stream requests; streaming "
+                   "returns 400 (cannot correct frames already sent)",
     "tools": "prompt-injected; accuracy depends on model; handle-level "
              "rkllm_set_function_tools avoided by design",
     "seed": "RKLLM runtime exposes no RNG seed interface",
@@ -121,26 +122,37 @@ def param_tier(param: str) -> str:
 
 
 def check_request_params(body: dict[str, Any], *,
-                         policy: str = "warn") -> tuple[list[str], list[str]]:
+                         policy: str = "warn",
+                         stream: bool = False) -> tuple[list[str], list[str]]:
     """对请求体做参数档位检查，返回 (unsupported_to_reject, unsupported_to_warn)。
 
     策略（openai.param_policy）：
     - reject：所有 unsupported 项 400；
     - warn：无害项写 X-RKLLM-Unsupported 头放行，语义关键项仍 400。
     ignored 项永不进入这两个列表（D2 的反面：新 SDK 默认字段不能打挂服务）。
+
+    json_schema 是 emulated（提示 + 校验 + 重试），只在**非流式**放行：
+    流式响应一旦开始发帧，就无法在结尾"撤回并重答"，因此流式下明确拒绝而不是
+    假装支持（设计 §6.1 emulated 的诚实实现方式）。
     """
     reject: list[str] = []
     warn: list[str] = []
 
     if body.get("n", 1) not in (1, None):
         reject.append("n>1")
+    # tool_choice 与 json_schema 同属语义关键项：_ALWAYS_REJECT 声明为恒 reject，
+    # 就必须真的拦——旧实现只在注释里拒绝、代码里静默忽略（审计 P2-8）。
+    if body.get("tool_choice") is not None:
+        reject.append("tool_choice")
     for name in ("seed", "logprobs", "top_logprobs", "logit_bias",
                  "modalities", "audio", "prediction"):
         if name in body and body[name] not in (None, False, []):
             (reject if policy == "reject" else warn).append(name)
     rf = body.get("response_format") or {}
     if isinstance(rf, dict) and rf.get("type") == "json_schema":
-        reject.append("response_format.json_schema")   # 语义关键项恒 reject
+        if stream:
+            reject.append("response_format.json_schema(stream)")
+        # 非流式：交由 Pipeline 注入提示 + 校验重试（emulated），不在此拦截
     elif isinstance(rf, dict) and rf.get("type") == "json_object":
         pass  # emulated：由 agent/jsonmode 处理，不在此拦截
     for name in IGNORED_PARAMS:

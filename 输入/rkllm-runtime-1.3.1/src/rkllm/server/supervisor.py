@@ -42,14 +42,22 @@ class WorkerClient:
 
     def run(self, prompt: str, *, role: str = "user",
             enable_thinking: bool = False, max_new_tokens: int | None = None,
+            sampling: dict | None = None, cache_hint: bool = True,
             request_timeout_s: int = 900) -> Iterator[str]:
         req_id = uuid.uuid4().hex[:10]
-        with self._write_lock:
-            write_frame(self._wfile, {"op": "run", "id": req_id,
-                                      "prompt": prompt,
-                                      "params": {"role": role,
-                                                 "enable_thinking": enable_thinking,
-                                                 "max_new_tokens": max_new_tokens}})
+        try:
+            with self._write_lock:
+                write_frame(self._wfile, {"op": "run", "id": req_id,
+                                          "prompt": prompt,
+                                          "params": {"role": role,
+                                                     "enable_thinking": enable_thinking,
+                                                     "max_new_tokens": max_new_tokens,
+                                                     "sampling": sampling,
+                                                     "cache_hint": cache_hint}})
+        except OSError as exc:
+            # worker 被 kill -9 后第一次写帧是 BrokenPipeError，不是 EOF：
+            # 不转成 WorkerDown 的话，自愈逻辑不会触发，路由层还会把它当 500。
+            raise WorkerDown("worker write failed: %s" % exc)
         deadline = time.monotonic() + request_timeout_s
         while True:
             if time.monotonic() > deadline:
@@ -90,13 +98,16 @@ class WorkerClient:
 class Supervisor:
     def __init__(self, worker_args: list[str], *, transport: str = "auto",
                  load_timeout_s: int = 300, restart_backoff_s: int = 5,
-                 restart_backoff_max_s: int = 120, restart_max_per_hour: int = 3):
+                 restart_backoff_max_s: int = 120, restart_max_per_hour: int = 3,
+                 health_interval_s: int = 10):
         self.worker_args = worker_args
         self.transport = transport        # auto | unix | tcp
         self.load_timeout_s = load_timeout_s
         self.backoff_s = restart_backoff_s
         self.backoff_max_s = restart_backoff_max_s
         self.restart_max_per_hour = restart_max_per_hour
+        self.health_interval_s = health_interval_s
+        self._health_stop = threading.Event()
         self.state = "loading"            # loading / ready / error / stopped
         self.restarts: list[float] = []
         self.metrics = {"worker_restarts_total": 0}
@@ -228,7 +239,11 @@ class Supervisor:
         self.restarts.append(time.monotonic())
 
     def execute(self, prompt: str, **kwargs) -> Iterator[str]:
-        """带自愈的执行入口：连接失效时重启一次再抛（由路由转 503）。"""
+        """带自愈的执行入口：连接失效时重启一次再抛（由路由转 503）。
+
+        kwargs 原样透传（role / enable_thinking / max_new_tokens / sampling /
+        request_timeout_s）——采样参数由 Pipeline 合成后经这里下发到 worker。
+        """
         client = self._client
         if client is None or self.state != "ready":
             self._current_backoff = self.backoff_s
@@ -252,6 +267,7 @@ class Supervisor:
             self._client.abort()
 
     def shutdown(self) -> None:
+        self._health_stop.set()
         self.state = "stopped"
         if self._client:
             self._client.close()
@@ -266,3 +282,65 @@ class Supervisor:
 def _unpack(head: bytes) -> tuple[int]:
     import struct
     return struct.unpack(">I", head)
+
+
+class LocalSupervisor:
+    """`engine.mode=in_process`：进程内推理（S1 回滚开关 / 排障用）。
+
+    与 Supervisor 同接口，但**不隔离崩溃**——NPU/库段错误会带走整个 HTTP
+    进程。设计把 in_process 定位为回滚与排障通道，生产默认仍是 subprocess：
+
+      engine.mode = "subprocess"（默认，崩溃隔离）
+      engine.mode = "in_process"（回滚：省掉 IPC，换掉隔离性）
+
+    abort() 从非推理线程调用 rkllm_abort，与 worker 内部的做法一致。
+    """
+
+    def __init__(self, engine, *, load_timeout_s: int = 300):
+        self.engine = engine
+        self.load_timeout_s = load_timeout_s
+        self.state = "ready"          # 引擎在构造时就已加载完成
+        self.metrics = {"worker_restarts_total": 0}
+
+    def is_ready(self) -> bool:
+        return self.state == "ready"
+
+    def start(self) -> None:
+        self.state = "ready"
+
+    def restart(self) -> None:        # 语义对齐：进程内无子进程可重启
+        raise WorkerDown("in_process mode has no worker to restart")
+
+    def execute(self, prompt: str, *, role: str = "user",
+                enable_thinking: bool = False,
+                max_new_tokens: int | None = None,
+                sampling: dict | None = None,
+                cache_hint: bool = True,
+                request_timeout_s: int = 900) -> Iterator[str]:
+        if self.state != "ready":
+            raise WorkerDown("engine not ready")
+        try:
+            yield from self.engine.stream(
+                prompt, role=role, enable_thinking=enable_thinking,
+                sampling=sampling, max_new_tokens=max_new_tokens,
+                cache_hint=cache_hint)
+        except WorkerDown:
+            raise
+        except Exception as exc:      # 与 worker 路径的错误语义对齐：结构 503
+            self.state = "error"
+            raise WorkerDown("engine failure: %s" % exc)
+
+    def abort(self) -> None:
+        try:
+            self.engine.abort()
+        except Exception:
+            pass
+
+    def shutdown(self) -> None:
+        self._health_stop.set()
+        self.state = "stopped"
+        try:
+            self.engine.destroy()
+        except Exception:
+            pass
+
