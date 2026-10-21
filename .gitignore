@@ -43,3 +43,10 @@ Thumbs.db
 # wheel 构建产物（make_mcp_wheel.py 输出，可随时重建）
 dist/
 新写代码-*.zip
+
+# 所有压缩包不入库；唯一例外：官方 SDK 精简包（构建源料，见 输入/构建资料说明.md）
+*.zip
+*.tar.gz
+*.tar.xz
+*.7z
+!输入/rknn-llm-release-v1.3.1-minimal.tar.gz
