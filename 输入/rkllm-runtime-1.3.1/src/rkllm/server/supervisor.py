@@ -11,6 +11,7 @@ kill -9 worker 后 HTTP 存活并在飞请求 503，120 s 内恢复）。
 
 from __future__ import annotations
 
+import collections
 import json
 import socket
 import subprocess
@@ -131,26 +132,73 @@ class Supervisor:
         self._proc = subprocess.Popen(cmd, cwd=SRC_DIR,
                                       stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE)
-        # 读 ready 帧（worker 加载完模型才发）
-        header = self._proc.stdout.read(4)
-        if len(header) < 4:
-            stderr = self._proc.stderr.read(4000).decode("utf-8", "replace")
-            raise WorkerDown("worker failed to start: %s" % stderr[-800:])
-        (length,) = _unpack(header)
-        ready = json.loads(self._proc.stdout.read(length))
+        # stdout/stderr 都只承载 librkllmrt 的 C 库日志，起排水线程持续排空：
+        # 管道缓冲仅 64KB，没人读的话 worker 会卡死在日志 write 上。
+        # ready 帧不再走 stdout——真机首测中 C 库日志把 stdout 帧流污染，
+        # 帧头被解析成 1.2 GB 的假长度后 supervisor 永久阻塞（FakeEngine
+        # 日志少，pytest 全绿测不到）。ready 改走 UDS 连接本身，见下。
+        self._drain("stdout")
+        self._drain("stderr")
+        # 轮询 connect worker 的 socket：连接成功即模型加载完成（worker 在
+        # bind+listen 之后、accept 首连接时发 ready）。
+        deadline = time.monotonic() + self.load_timeout_s
+        conn = None
+        while conn is None:
+            if self._proc.poll() is not None:
+                raise WorkerDown("worker exited during load: %s"
+                                 % self._stderr_tail(4000))
+            if time.monotonic() > deadline:
+                raise WorkerDown("worker not ready within %ss"
+                                 % self.load_timeout_s)
+            try:
+                if tcp:
+                    host, _, port = address.rpartition(":")
+                    conn = socket.create_connection((host, int(port)),
+                                                    timeout=5)
+                else:
+                    import os
+                    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    conn.settimeout(5)
+                    conn.connect(address)
+            except OSError:
+                if conn is not None:
+                    conn.close()
+                    conn = None
+                time.sleep(0.5)
+        conn.settimeout(self.load_timeout_s)
+        self._client = WorkerClient(conn)
+        # ready 帧从 UDS 连接收：read_frame 自带帧长上限校验，C 库日志再也无法
+        # 伪装成协议帧。
+        ready = read_frame(self._client._rfile)
         if ready.get("op") != "ready":
             raise WorkerDown("worker sent %r instead of ready" % ready)
-        if tcp:
-            host, _, port = address.rpartition(":")
-            conn = socket.create_connection((host, int(port)),
-                                            timeout=self.load_timeout_s)
-        else:
-            import os
-            conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            conn.settimeout(self.load_timeout_s)
-            conn.connect(address)
-        self._client = WorkerClient(conn)
         self.state = "ready"
+
+    def _drain(self, which: str) -> None:
+        """后台线程持续排空 worker 的 stdout/stderr（C 库日志），防管道死锁。
+
+        stderr 尾部片段存内存，WorkerDown 时作为诊断输出；stdout 的 C 库日志
+        无协议价值，读后直接丢弃。"""
+        if which == "stderr":
+            self._stderr_tail_buf = collections.deque(maxlen=32)   # ~8KB 尾部
+        proc = self._proc
+        stream = proc.stdout if which == "stdout" else proc.stderr
+
+        def _pump():
+            try:
+                for raw in iter(lambda: stream.read(256), b""):
+                    if which == "stderr":
+                        self._stderr_tail_buf.append(
+                            raw.decode("utf-8", "replace"))
+            except (ValueError, OSError):
+                pass   # 进程退出 / 管道关闭：正常结束
+
+        threading.Thread(target=_pump, daemon=True,
+                         name="rkllm-worker-%s-drain" % which).start()
+
+    def _stderr_tail(self, limit: int = 4000) -> str:
+        """WorkerDown 时替代原来的 stderr.read()（那个会再次死锁）。"""
+        return "".join(getattr(self, "_stderr_tail_buf", []))[-limit:]
 
     def start(self) -> None:
         with self._lock:

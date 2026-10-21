@@ -138,13 +138,17 @@ class Worker:
                 pass
             srv.bind(address)
         srv.listen(1)
-        self._send(sys.stdout.buffer, {"op": "ready"})   # 通知 supervisor
-        sys.stdout.flush()
+        first = True
         while not self._shutdown.is_set():
-            try:
-                conn, _ = srv.accept()
-            except OSError:
-                break
+            conn, _ = srv.accept()
+            wfile = conn.makefile("wb")
+            if first:
+                # ready 帧走 UDS 连接本身，不走 stdout：librkllmrt 的 C 库日志
+                # 会污染 stdout 管道（真机首测：帧头被日志字节覆盖，supervisor
+                # 解析出 1.2 GB 假长度后永久阻塞）。stdout 从此只承载 C 库日志，
+                # 由 supervisor 的排水线程丢弃。
+                self._send(wfile, {"op": "ready"})
+                first = False
             self.serve_connection(conn)
 
 
