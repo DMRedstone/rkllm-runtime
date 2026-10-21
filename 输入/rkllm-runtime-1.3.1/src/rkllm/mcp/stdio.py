@@ -235,8 +235,39 @@ class StdioServer:
                     first = json.loads(line)
                     self._protocol_version = detect_protocol(first)
                     self.dispatcher = self._build_dispatcher()
+                    self._log_first_connect(first)
                 except json.JSONDecodeError:
                     pass
             response = self.dispatcher.handle_message(line)
             if response is not None:
                 self._send(response)
+
+    def _log_first_connect(self, first: dict) -> None:
+        """首连事实记录（M10）：协议版本、clientInfo、时间——实测回写配置的依据。
+
+        stderr 在 WorkBuddy 拉起下不可见，落文件；路径可由
+        RKLLM_MCP_CONNECT_LOG 覆盖，默认 ~/.config/rkllm/connect.log。
+        """
+        import os
+        import time as _time
+        try:
+            path = os.environ.get(
+                "RKLLM_MCP_CONNECT_LOG",
+                os.path.join(os.path.expanduser("~"), ".config", "rkllm",
+                             "connect.log"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            params = first.get("params") or {}
+            entry = {
+                "ts": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "method": first.get("method"),
+                "detected_protocol": self._protocol_version,
+                "requested_protocol": (params.get("_meta") or
+                                       {}).get("protocolVersion")
+                                       or params.get("protocolVersion"),
+                "clientInfo": params.get("clientInfo"),
+                "meta_keys": sorted((params.get("_meta") or {}).keys()),
+            }
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError:
+            pass                                   # 记录失败不影响服务
