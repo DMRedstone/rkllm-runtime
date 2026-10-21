@@ -1,0 +1,137 @@
+"""config.py 单测：80 键契约、优先级、校验、迁移（N11/F13 验收）。"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+import textwrap
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from rkllm.config import (SCHEMA, ConfigError, config_docs, load_config,
+                          migrate_conffile)
+
+# 80 键分组计数（与《MCP 接入与配置设计》§7.2 一致）
+GROUP_COUNTS = {"server": 13, "model": 11, "engine": 8, "queue": 5,
+                "openai": 8, "cache": 4, "mcp": 24, "logging": 5, "metrics": 2}
+
+
+def test_schema_is_exactly_80_keys():
+    assert len(SCHEMA) == 80
+    counts: dict[str, int] = {}
+    for key in SCHEMA:
+        counts[key.section] = counts.get(key.section, 0) + 1
+    assert counts == GROUP_COUNTS
+
+
+def test_schema_keys_unique():
+    fulls = [k.full for k in SCHEMA]
+    assert len(fulls) == len(set(fulls)), "存在重复键"
+
+
+def test_defaults_load():
+    cfg = load_config(env={})
+    assert cfg.server.bind_host == "127.0.0.1"
+    assert cfg.server.port == 8080
+    assert cfg.mcp.task_threshold_s == 45
+    assert cfg.mcp.default_max_tokens == 512
+    assert cfg.model.keep_history is False
+    assert cfg.queue.max_concurrent == 1
+    assert cfg.source_of("server.port") == "default"
+
+
+def test_priority_file_env_cli(tmp_path):
+    f = tmp_path / "rkllm.toml"
+    f.write_text(textwrap.dedent("""
+        [server]
+        port = 9000
+        [mcp]
+        task_threshold_s = 30
+    """), encoding="utf-8")
+    env = {"RKLLM_SERVER_PORT": "9100"}
+    cfg = load_config(file=str(f), env=env, cli={"server.port": 9200})
+    assert cfg.server.port == 9200
+    assert cfg.source_of("server.port") == "cli"
+
+    cfg = load_config(file=str(f), env=env)
+    assert cfg.server.port == 9100
+    assert cfg.source_of("server.port") == "env"
+
+    cfg = load_config(file=str(f), env={})
+    assert cfg.server.port == 9000
+    assert cfg.source_of("server.port") == "file"
+    assert cfg.mcp.task_threshold_s == 30
+
+
+def test_env_bool_and_list_coercion():
+    cfg = load_config(env={"RKLLM_MODEL_KEEP_HISTORY": "1",
+                           "RKLLM_MODEL_SEARCH_DIRS": "/a,/b"})
+    assert cfg.model.keep_history is True
+    assert cfg.model.search_dirs == ("/a", "/b")
+
+
+def test_validation_collects_all_errors():
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(env={"RKLLM_SERVER_PORT": "70000",
+                         "RKLLM_MCP_TASK_THRESHOLD_S": "90",
+                         "RKLLM_MODEL_CONTEXT": "100"})
+    errs = "\n".join(excinfo.value.errors)
+    assert "server.port" in errs
+    assert "mcp.task_threshold_s" in errs   # >= 60 被跨键校验拦截
+    assert "model.context" in errs
+    assert len(excinfo.value.errors) >= 3   # 一次性列出，不是首个即停
+
+
+def test_cross_validation():
+    with pytest.raises(ConfigError) as e1:
+        load_config(env={"RKLLM_SERVER_TLS_CERT": "/a.pem"})   # tls 不成对
+    assert "成对" in "\n".join(e1.value.errors)
+    with pytest.raises(ConfigError) as e2:
+        load_config(env={"RKLLM_MODEL_MIN_CONTEXT": "8192"})   # > context
+    assert "min_context" in "\n".join(e2.value.errors)
+
+
+def test_http_transport_requires_origin():
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(env={"RKLLM_MCP_TRANSPORT": "http"})
+    assert "allow_remote_origin" in "\n".join(excinfo.value.errors)
+
+
+def test_legacy_env_migration():
+    cfg = load_config(env={"RKLLM_MODEL": "/m/qwen3-4b.rkllm",
+                           "RKLLM_NO_HISTORY": "0"})
+    assert cfg.model.path == "/m/qwen3-4b.rkllm"
+    assert cfg.model.keep_history is False   # 旧 NO_HISTORY=0 -> keep_history=false
+    # 新键名优先于旧名
+    cfg2 = load_config(env={"RKLLM_MODEL": "/old.rkllm",
+                            "RKLLM_MODEL_PATH": "/new.rkllm"})
+    assert cfg2.model.path == "/new.rkllm"
+
+
+def test_migrate_conffile(tmp_path):
+    f = tmp_path / "rkllm-server"
+    f.write_text(textwrap.dedent("""
+        # comment
+        RKLLM_MODEL=/var/lib/rkllm/models/qwen3-4b.rkllm
+        RKLLM_PORT=8081
+        UNRELATED=yes
+    """), encoding="utf-8")
+    out = migrate_conffile(str(f))
+    assert out == {"model.path": "/var/lib/rkllm/models/qwen3-4b.rkllm",
+                   "server.port": "8081"}
+
+
+def test_require_model_path():
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(env={}, require_model_path=True)
+    assert "model.path" in "\n".join(excinfo.value.errors)
+
+
+def test_config_docs_mentions_all_keys():
+    doc = config_docs()
+    for key in SCHEMA:
+        assert f"`{key.full}`" in doc

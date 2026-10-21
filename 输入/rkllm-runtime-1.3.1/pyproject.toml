@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rkllm-runtime"
+version = "1.4.0.dev0"
+description = "RKLLM board-side model service (OpenAI subset + MCP connector)"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["rkllm*"]
+
+# 客户端 wheel 裁剪（S6）：仅打包 rkllm/mcp、rkllm/config.py、rkllm/caps.py，
+# 由打包工具链从同一棵源码树裁出，避免双份实现漂移（设计 §3.4）。
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
