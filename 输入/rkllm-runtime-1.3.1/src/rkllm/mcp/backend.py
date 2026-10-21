@@ -107,10 +107,18 @@ class HttpBackend:
                 "finish_reason": finish_reason}
 
     def status(self) -> dict:
-        """板端健康摘要（local_llm_status 用）。"""
+        """板端健康摘要（local_llm_status 用）。
+
+        鉴权：/health 与其他端点同受 Bearer 保护（实测 401 被旧代码的
+        except 吞成 unreachable——wheel 冒烟抓出的缺陷）。
+        """
+        headers = {"Authorization": "Bearer " + self.api_key} \
+            if self.api_key else {}
         try:
-            with urllib.request.urlopen(self.endpoint.rsplit("/", 1)[0]
-                                        + "/health", timeout=10) as resp:
+            with urllib.request.urlopen(
+                    urllib.request.Request(
+                        self.endpoint.rsplit("/", 1)[0] + "/health",
+                        headers=headers), timeout=10) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except (OSError, ValueError):
             return {"state": "unreachable"}

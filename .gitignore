@@ -39,3 +39,9 @@ Thumbs.db
 工具/脚本/harness.log
 工具/脚本/t[0-9]*/
 工具/脚本/h-*/
+
+# wheel 构建产物（make_mcp_wheel.py 输出，可随时重建）
+dist/
+
+# wheel 构建产物（make_mcp_wheel.py 输出，可随时重建）
+dist/
