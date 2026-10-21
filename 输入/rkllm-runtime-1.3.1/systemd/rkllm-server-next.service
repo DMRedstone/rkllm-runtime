@@ -1,0 +1,28 @@
+# rkllm-server-next.service - FastAPI stack (1.3.1-16+)
+# Ships alongside the legacy rkllm-server.service during the transition:
+# both can be installed at once, only one may bind the port. Not enabled by
+# the package; operators opt in explicitly:
+#   systemctl enable --now rkllm-server-next
+# Model selection lives in @TOML_CONFFILE@ (model.path), not in the unit.
+
+[Unit]
+Description=rkllm model service (FastAPI stack)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=@SERVE_LAUNCHER@ serve --config @TOML_CONFFILE@
+# 27B cold load takes 1-2 minutes; 4B needs under a minute.
+TimeoutStartSec=300
+# graceful drain of in-flight requests (server.shutdown_grace_s)
+TimeoutStopSec=40
+Restart=on-failure
+RestartSec=5
+# The service reads the model from /var/lib/rkllm and writes logs/metrics;
+# full lock-down is applied once the stack passes board acceptance.
+NoNewPrivileges=true
+ProtectSystem=full
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

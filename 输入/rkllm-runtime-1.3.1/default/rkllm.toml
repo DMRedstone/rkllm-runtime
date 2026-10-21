@@ -1,0 +1,41 @@
+# /etc/rkllm/rkllm.toml - rkllm-server-next configuration (conffile)
+#
+# Priority: built-in default < this file < RKLLM_* env < command line.
+# Every key has a default; only overrides need to live here.
+# Full reference (80 keys, types, ranges):  rkllm-serve config docs
+# Effective values + source per key:        rkllm-serve config show
+# Validation without starting:              rkllm-serve config validate
+
+[server]
+# bind_host defaults to 127.0.0.1 on purpose; widening it is a decision.
+#bind_host = "127.0.0.1"
+#port = 8080
+#api_key = ""              # empty = no auth; prefer api_key_file (0600)
+
+[model]
+# serve refuses to start without model.path; 8G board: 4B@4096, 7B@2048.
+#path = "/var/lib/rkllm/models/qwen3.5-4b.rkllm"
+#class = "auto"            # auto/small/medium/large; auto derives from name+size
+#context = 4096
+#threads = 4
+#keep_history = false      # stateless by default; each request replays history
+
+[engine]
+#mode = "subprocess"       # crash isolation: NPU faults never take HTTP down
+#load_timeout_s = 300
+
+[queue]
+#max_wait = 32
+#request_timeout_s = 900
+
+[openai]
+#param_policy = "warn"     # unsupported params: warn+header, semantic keys still 400
+#tool_parser = "auto"
+
+[cache]
+#enabled = true            # prompt cache; flip off until the S0 spike proves semantics
+
+[mcp]
+#task_threshold_s = 45     # must stay < 60 (client hard timeout)
+#max_input_chars = 12000
+#default_max_tokens = 512

@@ -66,9 +66,27 @@ ARCHITECTURES = {
 # Dependencies derived from DT_NEEDED of librkllmrt.so:
 #   libgomp.so.1, libpthread.so.0, libstdc++.so.6, libdl.so.2, libm.so.6,
 #   libgcc_s.so.1, libc.so.6 with GLIBC_2.29 symbol versions.
-# python3 is required by /usr/bin/rkllm, which is deliberately written against
-# the standard library only: no pip, no Flask, nothing to install on the board.
-DEPEND_TEMPLATE = "libc6 (>= 2.29), libgomp1, libstdc++6, python3:any"
+# python3 (>= 3.13): rkllm-serve (new stack, 2026-10-21) uses tomllib and
+#   3.13-only stdlib; trixie ships 3.13 as the default python3.
+# python3-fastapi / python3-uvicorn / python3-pydantic: the new FastAPI stack
+#   (apt route, decided 2026-10-21 - no vendored wheels). trixie versions meet
+#   the floors (pydantic >= 2.9 supports 3.13); verified on board before
+#   release, see 文档/待办事项.md.
+DEPEND_TEMPLATE = ("libc6 (>= 2.29), libgomp1, libstdc++6, "
+                   "python3:any (>= 3.13), python3-fastapi, python3-uvicorn, "
+                   "python3-pydantic")
+
+# The API server unit keeps a fixed name independent of --package so that
+# operators always find it under the same name.
+SERVER_UNIT = "rkllm-server.service"
+# New-stack (FastAPI) service, shipped alongside the legacy unit during the
+# transition: both can be installed, only one is enabled at a time.
+SERVER_UNIT_NEXT = "rkllm-server-next.service"
+SERVE_LAUNCHER = "/usr/bin/rkllm-serve"
+TOML_CONFFILE = "/etc/rkllm/rkllm.toml"
+# New-stack python sources (single tree; the client wheel is cut from the
+# same sources, see 工具/编译工具链/make_mcp_wheel.py).
+SRC_TREE = ROOT.parent / "输入" / "rkllm-runtime-1.3.1" / "src" / "rkllm"
 
 # The API server unit keeps a fixed name independent of --package so that
 # operators always find it under the same name.
@@ -147,6 +165,9 @@ class BuildContext:
             "@PKGEXAMPLESDIR@": self.examples_dir,
             "@DOCDIR_ABS@": self.docdir,
             "@SERVER_UNIT@": SERVER_UNIT,
+            "@SERVER_UNIT_NEXT@": SERVER_UNIT_NEXT,
+            "@SERVE_LAUNCHER@": SERVE_LAUNCHER,
+            "@TOML_CONFFILE@": TOML_CONFFILE,
             "@SERVER_DEFAULTS@": SERVER_DEFAULTS,
             "@PREFIX@": "/usr",
             "@DATE@": time.strftime("%a, %d %b %Y %H:%M:%S +0000", time.gmtime(self.epoch)),
@@ -438,6 +459,34 @@ def stage(ctx: BuildContext, source_tarball: Path) -> tuple[list[Shipped], dict]
                                             link="rkllm/rkllm.h", origin="generated",
                                             note="兼容按上游习惯 #include \"rkllm.h\" 的工程")
 
+    # --- new FastAPI stack (2026-10-21, apt route) ---------------------------
+    # Sources ship as plain .py under /usr/lib/rkllm/current: small tree, the
+    # board operator can read the installed file, and dpkg upgrade/rollback
+    # semantics stay untouched. The client wheel is cut from the same tree by
+    # make_mcp_wheel.py - single implementation, two artifacts.
+    new_pkg = "/usr/lib/rkllm/current/rkllm"
+    for path in sorted(SRC_TREE.rglob("*")):
+        if path.is_dir() or "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(SRC_TREE).as_posix()
+        add(f"{new_pkg}/{rel}", path.read_bytes(), FILE_MODE,
+            f"src/rkllm/{rel}", "新栈模块树(FastAPI 服务端/worker/agent/mcp)")
+
+    add(SERVE_LAUNCHER,
+        ctx.apply(read_packaging("launcher/rkllm-serve")).encode("utf-8"),
+        EXEC_MODE, "packaging/launcher/rkllm-serve",
+        "新栈启动器:校验 python3>=3.13 → sys.path 挂 /usr/lib/rkllm/current → rkllm.cli")
+
+    add(TOML_CONFFILE,
+        ctx.apply(read_packaging("default/rkllm.toml")).encode("utf-8"),
+        FILE_MODE, "packaging/default/rkllm.toml",
+        "新栈 TOML 配置(conffile:升级保留本地修改;全键见 rkllm-serve config docs)")
+
+    add(f"/usr/lib/systemd/system/{SERVER_UNIT_NEXT}",
+        ctx.apply(read_packaging("systemd/rkllm-server-next.service")).encode("utf-8"),
+        FILE_MODE, "packaging/systemd/rkllm-server-next.service",
+        "新栈服务单元(与旧 unit 并存;不 enable,灰度期手工管理)")
+
     items = sorted(files.values(), key=lambda f: f.dest)
     return items, {"dropped": classifier.dropped, "dropped_bytes": classifier.dropped_bytes}
 
@@ -527,8 +576,10 @@ def build_deb(items, ctx: BuildContext, out_dir: Path, tmp_dir: Path) -> Path:
     file_paths = [f.dest for f in items]
     # A conffile that is not part of the payload is a packaging error dpkg only
     # reports at install time, so refuse to build one.
-    if SERVER_DEFAULTS not in file_paths:
-        raise SystemExit(f"conffile {SERVER_DEFAULTS} is not in the payload")
+    conffile_paths = [SERVER_DEFAULTS, TOML_CONFFILE]
+    for cf in conffile_paths:
+        if cf not in file_paths:
+            raise SystemExit(f"conffile {cf} is not in the payload")
     entries = [("./" + d, DIR_MODE, None, None) for d in collect_dirs(file_paths)]
     md5_lines = []
     for item in items:
@@ -549,7 +600,7 @@ def build_deb(items, ctx: BuildContext, out_dir: Path, tmp_dir: Path) -> Path:
     # Paths are absolute, one per line, sorted - dpkg reads the list verbatim
     # and only treats a file as a conffile when this member names it.
     control_entries.append(("./conffiles", FILE_MODE,
-                            (SERVER_DEFAULTS + "\n").encode("utf-8"), None))
+                            ("\n".join(conffile_paths) + "\n").encode("utf-8"), None))
     control_text = ctx.apply(read_packaging("control.in"))
     control_entries.append(("./control", FILE_MODE, control_text.encode("utf-8"), None))
     control_entries.append(("./md5sums", FILE_MODE, ("\n".join(md5_lines) + "\n").encode("utf-8"), None))
