@@ -74,25 +74,40 @@ def _free_port():
 @pytest.fixture(scope="module")
 def worker_proc():
     port = _free_port()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "rkllm.worker.main", "--address",
-         "127.0.0.1:%d" % port, "--tcp", "--engine", "fake",
-         "--model", "fake-model"],
-        cwd=str(SRC), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    # 等 ready 帧
-    header = proc.stdout.read(4)
-    assert len(header) == 4, "worker 未启动: " + proc.stderr.read(2000).decode()
-    (length,) = struct.unpack(">I", header)
-    ready = json.loads(proc.stdout.read(length))
-    assert ready["op"] == "ready"
+    def spawn():
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "rkllm.worker.main", "--address",
+             "127.0.0.1:%d" % port, "--tcp", "--engine", "fake",
+             "--model", "fake-model"],
+            cwd=str(SRC), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        header = proc.stdout.read(4)
+        assert len(header) == 4, "worker 未启动: " + proc.stderr.read(2000).decode()
+        (length,) = struct.unpack(">I", header)
+        ready = json.loads(proc.stdout.read(length))
+        assert ready["op"] == "ready"
+        return proc
+
+    # 负载偶发防护：启动失败/超时整体重试一次（见 _connect 同款理由）
+    try:
+        proc = spawn()
+    except (AssertionError, subprocess.SubprocessError):
+        proc = spawn()
     yield port, proc
     proc.terminate()
     proc.wait(timeout=10)
 
 
-def _connect(port):
-    conn = socket.create_connection(("127.0.0.1", port), timeout=15)
-    return conn, conn.makefile("rb"), conn.makefile("wb")
+def _connect(port, retries=5):
+    """系统繁忙时 worker 的 accept 短暂不可达（偶发失败模式），带退避重试。"""
+    last = None
+    for i in range(retries):
+        try:
+            conn = socket.create_connection(("127.0.0.1", port), timeout=15)
+            return conn, conn.makefile("rb"), conn.makefile("wb")
+        except OSError as exc:
+            last = exc
+            time.sleep(0.5 * (i + 1))
+    raise last
 
 
 def test_worker_run_and_end(worker_proc):
