@@ -120,6 +120,11 @@ class StdioServer:
         if handler is None:
             raise JsonRpcError(-32602, f"unknown tool: {name}")
 
+        # status 只读不推理，恒同步秒回（实测发现：job 化判定按 max_tokens
+        # 估算会把 status 也转后台，违反设计 §4.1「秒回」语义）
+        if short == "status":
+            return handler(arguments)
+
         # job 化判定：估算耗时超过阈值（task_mode=never 强制同步）
         estimate = (self._job_estimate or self._default_estimate)(arguments)
         task_mode = self.cfg.get("task_mode", "auto")
