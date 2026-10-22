@@ -32,6 +32,15 @@ class WorkerDown(Exception):
     """worker 不可用（崩溃 / 加载中）：调用方应回 503 + Retry-After。"""
 
 
+class RequestFailed(WorkerDown):
+    """单次请求失败（op:"error" 帧 / 请求超时），worker 进程本身仍然健康。
+
+    必须与 WorkerDown 区分：execute() 只在连接失效时重启 worker。把请求级
+    错误也当连接死亡，代价是一次 rkllm_run -1 就触发 14 s 模型重载，还烧掉
+    restart_max_per_hour 配额（2026-10-22 审计 P1-2）。
+    """
+
+
 class WorkerClient:
     """与单个 worker 连接的帧客户端：run 请求逐 token 产出。"""
 
@@ -63,7 +72,7 @@ class WorkerClient:
         while True:
             if time.monotonic() > deadline:
                 self.abort()
-                raise WorkerDown("request timeout")
+                raise RequestFailed("request timeout")
             try:
                 frame = read_frame(self._rfile)
             except (FrameError, OSError) as exc:
@@ -76,7 +85,8 @@ class WorkerClient:
             elif op == "end":
                 return
             elif op == "error":
-                raise WorkerDown(frame.get("message", "worker error"))
+                # worker 明确报告本次请求失败：进程活着，绝不走重启路径
+                raise RequestFailed(frame.get("message", "worker error"))
 
     def abort(self) -> None:
         with self._write_lock:
@@ -266,6 +276,8 @@ class Supervisor:
             client = self._client
         try:
             yield from client.run(prompt, **kwargs)
+        except RequestFailed:
+            raise                          # worker 健康，路由层转 503 即可
         except WorkerDown:
             self.state = "loading"
             try:
@@ -339,9 +351,9 @@ class LocalSupervisor:
                 cache_hint=cache_hint)
         except WorkerDown:
             raise
-        except Exception as exc:      # 与 worker 路径的错误语义对齐：结构 503
-            self.state = "error"
-            raise WorkerDown("engine failure: %s" % exc)
+        except Exception as exc:      # 与 worker 路径的错误语义对齐：结构 503；
+            # 引擎进程仍在，按请求级失败处理，不把 supervisor 打进 error
+            raise RequestFailed("engine failure: %s" % exc)
 
     def abort(self) -> None:
         try:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Callable, Iterator
 
@@ -120,11 +121,12 @@ class HttpBackend:
         """
         headers = {"Authorization": "Bearer " + self.api_key} \
             if self.api_key else {}
+        # urljoin 正确处理 endpoint 带/不带 /v1、带/不带末尾斜杠的边界
+        url = urllib.parse.urljoin(self.endpoint + "/", "../health")
         try:
             with urllib.request.urlopen(
-                    urllib.request.Request(
-                        self.endpoint.rsplit("/", 1)[0] + "/health",
-                        headers=headers), timeout=10) as resp:
+                    urllib.request.Request(url, headers=headers),
+                    timeout=10) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except (OSError, ValueError):
             return {"state": "unreachable"}

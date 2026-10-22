@@ -336,7 +336,16 @@ def _completion_payload(svc, pipe: Pipeline, result: dict,
 def completions(body: CompletionRequest, request: Request):
     """薄封装：prompt 直喂 runtime（设计 §4.1 native）。"""
     svc = _svc(request)
-    pipe = _pipeline(svc, body.model_dump(), chat=False)
+    raw = body.model_dump()
+    # completions 同样走 caps 参数策略（审计 P3-9）
+    reject, warn = caps.check_request_params(raw, policy=svc.param_policy,
+                                            stream=bool(raw.get("stream")))
+    if reject:
+        return _http_error(400, "invalid_request_error",
+                           "unsupported parameter(s): %s" % ", ".join(reject),
+                           code="unsupported_parameter")
+    headers = {"X-RKLLM-Unsupported": ",".join(warn)} if warn else {}
+    pipe = _pipeline(svc, raw, chat=False)
     try:
         result = _run_blocking(svc, pipe)
     except QueueBusy as exc:
@@ -345,7 +354,7 @@ def completions(body: CompletionRequest, request: Request):
                            **{"Retry-After": str(exc.retry_after_s)})
     except (QueueTimeout, WorkerDown) as exc:
         return _http_error(503, "server_error", str(exc)[:200])
-    return {
+    return JSONResponse({
         "id": "cmpl-" + str(id(result))[-8:],
         "object": "text_completion",
         "created": int(time.time()),
@@ -353,4 +362,4 @@ def completions(body: CompletionRequest, request: Request):
         "choices": [{"index": 0, "text": result["text"],
                      "finish_reason": pipe.finish_reason()}],
         "usage": pipe.usage(result),
-    }
+    }, headers=headers)

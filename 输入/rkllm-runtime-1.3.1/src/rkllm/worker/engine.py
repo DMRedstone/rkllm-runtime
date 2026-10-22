@@ -228,11 +228,16 @@ class RealEngine:
                         yield item
                     break
                 except RKLLMError:
-                    if (not recovered and not produced and cache_path
-                            and save == 0 and self.prompt_cache is not None):
+                    # 缓存加载失败（rkllm_run -1 / 内部码 10000）：实测换 save=1
+                    # 重跑仍失败——失败后运行时状态已脏，唯一可靠出路是
+                    # **完全不带缓存**干净重跑，并熔断本进程的缓存功能。
+                    # 若重跑也失败（状态确实坏了），向上抛由 supervisor 重启。
+                    if (not produced and cache_path is not None
+                            and not recovered and self.prompt_cache is not None):
                         recovered = True
                         self.prompt_cache.invalidate()
-                        save = 1                 # 退化为"本次重新保存"
+                        self.prompt_cache.disable()
+                        cache_path, save = None, 0
                         continue
                     raise
             if self.prompt_cache is not None and cache_path:

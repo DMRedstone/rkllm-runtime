@@ -138,7 +138,7 @@ def _cmd_serve(args) -> int:
     app.state.svc.default_sampling = _sampling_from_args(args)
 
     sys.stderr.write(
-        "rkllm 1.4.0 服务模型 '%s'，监听 http://%s:%d\n"
+        "rkllm 1.3.1-16 服务模型 '%s'，监听 http://%s:%d\n"
         "  endpoints : GET /health /ready /v1/capabilities /metrics, "
         "GET /v1/models, POST /v1/chat/completions /v1/completions /v1/reset\n"
         "  history   : %s   api key : %s   推理进程 : %s\n"
@@ -379,7 +379,7 @@ def _cmd_info(args) -> int:
     from .platform import available_mb, detect_platform, npu_status
     npu_available, npu_detail = npu_status()
     info = {
-        "rkllm": "1.4.0",
+        "rkllm": "1.3.1-16",
         "python": sys.version.split()[0],
         "platform_detected": detect_platform(),
         "machine": py_platform.machine(),
@@ -528,7 +528,7 @@ def _add_sampling_args(parser, env: bool = False) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=PROGRAM,
                                      description="RKLLM runtime + OpenAI 兼容服务")
-    parser.add_argument("--version", action="version", version="rkllm 1.4.0")
+    parser.add_argument("--version", action="version", version="rkllm 1.3.1-16")
     sub = parser.add_subparsers(dest="command")
 
     serve = sub.add_parser("serve", help="启动 OpenAI 兼容 HTTP 服务")

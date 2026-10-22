@@ -60,6 +60,7 @@ def default_cfg(endpoint: str, api_key: str) -> dict:
         "job_poll_hint_s": 2,
         "progress_interval_s": 5,
         "extract_retries": 2,
+        "session_max_messages": 0,       # 0=不限制；>0 时裁剪会话历史
         # -- 目标 ----------------------------------------------------------
         "target_timeout_s": 120,
         "target_endpoint": endpoint,
@@ -71,7 +72,7 @@ def default_cfg(endpoint: str, api_key: str) -> dict:
 
 
 def load_cfg() -> dict:
-    """环境变量 + 安装目录 mcp.toml 覆盖（TOML 只覆盖已知键）。"""
+    """安装目录 mcp.toml + RKLLM_* 环境变量覆盖（env 优先，与板端 80 键一致）。"""
     endpoint = os.environ.get("RKLLM_ENDPOINT", "http://127.0.0.1:8080/v1")
     api_key = os.environ.get("RKLLM_API_KEY", "")
     cfg = default_cfg(endpoint, api_key)
@@ -92,6 +93,17 @@ def load_cfg() -> dict:
                 cfg["api_key"] = str(section["target_api_key"])
         except (OSError, ValueError):
             pass
+    # 环境变量最终覆盖 TOML（RKLLM_MCP_* 或兼容名 RKLLM_ENDPOINT / RKLLM_API_KEY）
+    for key in cfg:
+        env_key = "RKLLM_MCP_" + key.upper()
+        if env_key in os.environ:
+            cfg[key] = os.environ[env_key]
+    if "RKLLM_ENDPOINT" in os.environ:
+        cfg["endpoint"] = os.environ["RKLLM_ENDPOINT"]
+        cfg["target_endpoint"] = cfg["endpoint"]
+    if "RKLLM_API_KEY" in os.environ:
+        cfg["api_key"] = os.environ["RKLLM_API_KEY"]
+        cfg["target_api_key"] = cfg["api_key"]
     return cfg
 
 

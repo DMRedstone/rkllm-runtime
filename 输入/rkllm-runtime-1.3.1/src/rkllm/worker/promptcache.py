@@ -10,6 +10,10 @@ prompt 以缓存内容为前缀时才有意义。所以这里维护「上一次�
 - 命中：`new_prompt.startswith(上次 prompt)` → save=0（加载并按前缀复用）；
 - 未命中：save=1（本次推理结束后由 runtime 写入缓存）。
 
+存储位置：默认放在 tmpfs（/dev/shm/rkllm/prefix），完全在内存中，避免
+eMMC/SD 的 I/O 瓶颈与写入磨损。若 tmpfs 不可用则自动降级到 /tmp；再不可用
+则停用缓存。
+
 单槽而非多槽：多轮对话是串行追加的，上一轮就是最长可复用前缀；多槽需要
 会话标识，而服务按设计是无状态的。容量与 TTL 仍按配置执行，用于清理异常
 增长（历史遗留文件、模型更换后失效的缓存）。
@@ -31,20 +35,50 @@ _CACHE_NAME = "prefix.cache"
 _META_NAME = "prefix.meta"
 _STATS_NAME = "stats.json"
 
+# 内存优先：tmpfs 是 Linux 标准内存文件系统，无需外部依赖。
+_DEFAULT_TMPFS_DIR = "/dev/shm/rkllm/prefix"
+_FALLBACK_TMP_DIR = "/tmp/rkllm/prefix"
+
+
+def _pick_cache_dir(requested: str | None) -> str:
+    """选择实际可用的缓存目录。
+
+    - 用户显式指定目录：优先用它，不可用时不自动回退（保持原退化语义，
+      让 _usable 决定本次是否使用缓存）。
+    - 未指定：优先 tmpfs，回退 /tmp；都失败则返回 tmpfs 路径，由 _usable
+      报告不可用并退化。
+    """
+    if requested:
+        return requested
+    for path in (_DEFAULT_TMPFS_DIR, _FALLBACK_TMP_DIR):
+        try:
+            os.makedirs(path, exist_ok=True)
+            # 试探写：某些挂载点允许创建目录但禁止写（如只读 rootfs）
+            probe = os.path.join(path, ".probe")
+            with open(probe, "w") as fh:
+                fh.write("1")
+            os.unlink(probe)
+            return path
+        except OSError:
+            continue
+    return _DEFAULT_TMPFS_DIR   # 都失败也返回一个路径，让后续 _usable 再报一次
+
 
 class PromptCache:
     """管理一个缓存目录下的单槽前缀缓存。"""
 
-    def __init__(self, directory: str, max_mb: int = 512, ttl_s: int = 604800):
-        self.dir = directory
+    def __init__(self, directory: str | None = None, max_mb: int = 512,
+                 ttl_s: int = 604800):
+        self.dir = _pick_cache_dir(directory)
         self.max_mb = max_mb
         self.ttl_s = ttl_s
-        self.cache_path = os.path.join(directory, _CACHE_NAME)
-        self.meta_path = os.path.join(directory, _META_NAME)
-        self.stats_path = os.path.join(directory, _STATS_NAME)
+        self.cache_path = os.path.join(self.dir, _CACHE_NAME)
+        self.meta_path = os.path.join(self.dir, _META_NAME)
+        self.stats_path = os.path.join(self.dir, _STATS_NAME)
         self.hits = 0
         self.misses = 0
         self._warned = False
+        self._disabled = False
 
     # -- 查询 ---------------------------------------------------------------
     def prepare(self, prompt: str) -> tuple[str | None, int]:
@@ -127,8 +161,19 @@ class PromptCache:
             self._warn("缓存维护失败：%s" % exc)
 
     # -- 内部 ---------------------------------------------------------------
+    def disable(self) -> None:
+        """本 worker 生命周期内彻底停用缓存（加载失败的熔断开关）。
+
+        2026-10-22 实测：当前 runtime 对 cache 文件的**加载**路径返回
+        rkllm_run -1（内部码 10000），且失败后即使换 save=1 重跑仍失败——
+        运行时状态已脏。熔断后本次进程不再碰缓存，宁可全量 prefill。
+        """
+        self._disabled = True
+
     def _usable(self) -> bool:
         """目录不可写时不报错，只告警并退化为"不用缓存"。"""
+        if self._disabled:
+            return False
         try:
             os.makedirs(self.dir, exist_ok=True)
         except OSError as exc:

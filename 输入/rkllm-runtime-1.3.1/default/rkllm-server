@@ -364,10 +364,18 @@ RKLLM_EXTRA_ARGS=
 #RKLLM_TEMPERATURE=0.8
 #RKLLM_REPEAT_PENALTY=1.1
 
-# -- 尚未接线 / not wired yet --------------------------------------
-# EN: prompt prefix cache and CPU/NPU frequency locking are not implemented
-#     yet; `rkllm config show` marks them "[未接线]". Do not expect them to
-#     change behaviour.
-# 中文: prompt 前缀缓存与锁频尚未实现；`rkllm config show` 会把它们标为
-#     [未接线]。目前调它们不会有行为变化。
+# -- 已接线但默认关闭 / wired but off by default ---------------------
+# EN: prompt prefix cache IS wired, but OFF by default: the current
+#     runtime build fails to LOAD a cache file (rkllm_run -1, internal
+#     code 10000). Saving works; loading corrupts the run. Re-enable only
+#     after the upstream runtime fixes cache loading. When enabled, the
+#     default directory is a tmpfs path in RAM (/dev/shm/rkllm/prefix) to
+#     avoid eMMC/SD wear; it falls back to /tmp/rkllm/prefix if tmpfs is
+#     unavailable.
+# 中文: prompt 前缀缓存已接线，但默认关闭：当前 runtime 版本**加载**缓存
+#     文件会返回 rkllm_run -1（内部码 10000）——保存正常，加载即坏。
+#     上游修复缓存加载前不要打开。开启后默认目录为内存 tmpfs
+#     (/dev/shm/rkllm/prefix)，避免 eMMC/SD 磨损；tmpfs 不可用时自动回退到
+#     /tmp/rkllm/prefix。
 #RKLLM_CACHE_ENABLED=false
+#RKLLM_CACHE_DIR=/dev/shm/rkllm/prefix

@@ -58,7 +58,7 @@ class ServiceState:
         # 由 cli 在启动时填入；空 dict 表示全用 runtime 默认。
         self.default_sampling: dict = {}
         self.system_prompt = ""
-        self.version = "1.4.0"
+        self.version = "1.3.1-16"
         self.lib_fingerprint: dict | None = None
 
     def on_reset(self) -> None:
@@ -76,7 +76,7 @@ class ServiceState:
 def create_app(cfg=None, *, supervisor=None) -> FastAPI:
     from .routes import ops, openai, responses, unsupported
 
-    app = FastAPI(title="rkllm-server", version="1.4.0",
+    app = FastAPI(title="rkllm-server", version="1.3.1-16",
                   docs_url=None, redoc_url=None, openapi_url="/openapi.json")
     svc = ServiceState(cfg, supervisor=supervisor) if cfg else None
     app.state.svc = svc

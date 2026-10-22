@@ -191,12 +191,16 @@ class StdioServer:
             return self._run_as_job(short, handler, arguments, progress_token,
                                     request_id)
 
-        # 同步执行：用轻量取消标志注册到 in-flight（不占 job 表）
-        flag = CancelFlag()
+        # 同步执行：复用 reader 在入池前预注册的 CancelFlag（排队期间也能
+        # 被 notifications/cancelled 取消）。若未预注册则兜底新建。
         key = str(request_id) if request_id is not None else None
-        if key is not None:
-            with self._lock:
-                self._inflight[key] = flag
+        with self._lock:
+            flag = self._inflight.get(key) if key is not None else None
+        if flag is None:
+            flag = CancelFlag()
+            if key is not None:
+                with self._lock:
+                    self._inflight[key] = flag
         try:
             result = handler(arguments, should_cancel=flag.is_set)
             if flag.is_set():
@@ -229,6 +233,12 @@ class StdioServer:
         if self.jobs.get(job.id) is None:      # 防御：刚建即被逐出
             raise JsonRpcError(-32603, "job table overflow")
         key = str(request_id) if request_id is not None else None
+        # 复用 reader 在入池前预注册的 CancelFlag：若已取消则立即 job.cancel()
+        with self._lock:
+            pre_flag = self._inflight.get(key) if key is not None else None
+        if isinstance(pre_flag, CancelFlag):
+            if pre_flag.is_set():
+                job.cancel()
         if key is not None:
             with self._lock:
                 self._inflight[key] = job
@@ -256,8 +266,12 @@ class StdioServer:
                 # 注意：必须传**可调用对象**——`job.cancel_requested` 是 property，
                 # 直接传会得到当时的 bool（永远 False），取消检查就等于没接
                 # （2026-10-21 真机发现：cancel 后槽位仍被占到任务结束）。
-                result = handler(arguments,
-                                 should_cancel=lambda: job.cancel_requested)
+                def _should_cancel():
+                    if isinstance(pre_flag, CancelFlag) and pre_flag.is_set():
+                        job.cancel()
+                        return True
+                    return job.cancel_requested
+                result = handler(arguments, should_cancel=_should_cancel)
                 if job.cancel_requested:
                     job.cancel()          # batch 等吞掉 Cancelled 时仍要记取消
                     return
@@ -338,32 +352,43 @@ class StdioServer:
                     pass
             # tools/call 交给线程：reader 必须随时可读，才能收到 cancelled。
             # status/job 走控制池，长同步 ask 占住推理池时它们仍能秒回。
-            route = self._tool_route(line)
-            if route == "control":
-                self._control_pool.submit(self._handle_and_send, line)
-                continue
-            if route == "work":
-                self._pool.submit(self._handle_and_send, line)
+            # 入池前先把 CancelFlag 预注册到 in-flight：排队期间收到
+            # notifications/cancelled 也能生效（审计 P2-4）。
+            route, request_id = self._tool_route(line)
+            if route in ("control", "work"):
+                flag = CancelFlag()
+                if request_id is not None:
+                    with self._lock:
+                        self._inflight[str(request_id)] = flag
+                pool = (self._control_pool if route == "control"
+                        else self._pool)
+                pool.submit(self._handle_and_send, line, flag)
                 continue
             response = self.dispatcher.handle_message(line)
             if response is not None:
                 self._send(response)
 
-    def _tool_route(self, line: str) -> str | None:
-        """tools/call 分流：status/job → control，其余推理工具 → work。"""
+    def _tool_route(self, line: str) -> tuple[str | None, str | None]:
+        """tools/call 分流：status/job → control，其余推理工具 → work。
+
+        返回 (route, request_id)：request_id 用于入池前预注册 CancelFlag。
+        """
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
-            return None
+            return None, None
         if not (isinstance(msg, dict) and msg.get("method") == "tools/call"
                 and msg.get("id") is not None):
-            return None
+            return None, None
         name = str((msg.get("params") or {}).get("name", ""))
         prefix = self.cfg.get("tool_prefix", "")
         short = name[len(prefix):] if prefix and name.startswith(prefix) else name
-        return "control" if short in ("status", "job") else "work"
+        route = "control" if short in ("status", "job") else "work"
+        return route, msg.get("id")
 
-    def _handle_and_send(self, line: str) -> None:
+    def _handle_and_send(self, line: str, _flag: CancelFlag | None = None) -> None:
+        # _flag 由 reader 预注册；具体取消检查在 _tools_call/_run_as_job 中
+        # 通过 request_id 从 self._inflight 复用，这里不直接使用。
         try:
             response = self.dispatcher.handle_message(line)
         except Exception as exc:              # 兜底：工作线程异常不能静默

@@ -140,9 +140,11 @@ SCHEMA: tuple[Key, ...] = (
     # 单槽前缀缓存（ADR-07）：上一轮 prompt 是新 prompt 的前缀时复用其 KV，
     # 避免多轮对话反复全量 prefill。worker/promptcache.py 实现，加载失败自动
     # 清槽重试一次不带缓存的推理（R5 的兜底）。
-    _k("cache", "enabled", bool, True, desc="prompt 前缀缓存开关"),
-    _k("cache", "dir", str, "/var/cache/rkllm/prefix",
-       desc="缓存目录；SD 卡建议改 eMMC"),
+    _k("cache", "enabled", bool, False,
+       desc="prompt 前缀缓存开关；默认关闭——当前 runtime 版本加载缓存文件"
+            "返回 rkllm_run -1（内部码 10000），待上游修复后再开"),
+    _k("cache", "dir", str, "/dev/shm/rkllm/prefix",
+       desc="缓存目录；默认 tmpfs（内存），不可写时自动回退 /tmp/rkllm/prefix"),
     _k("cache", "max_mb", int, 512, min_v=0, max_v=8192,
        desc="缓存目录容量上限；超出按最旧淘汰；0=不限"),
     _k("cache", "ttl_s", int, 604800, min_v=0, max_v=2592000,

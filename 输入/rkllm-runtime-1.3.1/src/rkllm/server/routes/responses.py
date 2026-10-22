@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import queue as queue_mod
 import threading
 import time
@@ -26,9 +27,12 @@ from ...agent import responses as tr
 from ...agent.pipeline import Pipeline
 from ..queue import QueueBusy, QueueTimeout
 from ..supervisor import WorkerDown
-from .openai import _http_error, _pipeline, _run_blocking, _svc
+from .openai import (_http_error, _pipeline, _run_blocking, _svc,
+                     _run_blocking_checked, _SchemaError, _json_payload)
 
 router = APIRouter(prefix="/v1")
+
+log = logging.getLogger("rkllm.server.responses")
 
 _STREAM_DONE = object()
 
@@ -87,8 +91,20 @@ def create_response(request: Request, body: dict):
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
                      **headers})
 
+    # 非流式：复用 chat 的 json_schema 校验重试（审计 P3-7）
+    max_tokens = (chat_body.get("max_tokens")
+                  or svc.default_max_tokens)
+    rf = chat_body.get("response_format") or {}
+    schema = None
+    if isinstance(rf, dict) and rf.get("type") == "json_schema":
+        spec = rf.get("json_schema") or {}
+        schema = spec.get("schema") if isinstance(spec, dict) else None
     try:
-        result = _run_blocking(svc, pipe)
+        result, pipe = _run_blocking_checked(svc, chat_body, max_tokens, schema)
+    except _SchemaError as exc:
+        return _http_error(422, "invalid_request_error",
+                           "response did not match response_format.json_schema "
+                           "after retries: %s" % exc, code="schema_mismatch")
     except QueueBusy as exc:
         return _error(503, "model busy", "queue_full",
                       retry_after_s=exc.retry_after_s)
@@ -141,6 +157,25 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
             seq += 1
             return _sse(name, payload)
 
+        def _abort() -> None:
+            if svc.supervisor is not None:
+                try:
+                    svc.supervisor.abort()
+                except Exception:
+                    pass
+
+        async def watch_disconnect() -> None:
+            """直接长轮询 receive()：uvicorn 在 connection_lost 时推 http.disconnect。"""
+            try:
+                while not stop_watch.is_set():
+                    message = await request.receive()
+                    if message.get("type") == "http.disconnect":
+                        log.info("client disconnected -> abort worker")
+                        _abort()
+                        return
+            except Exception:
+                return
+
         message_id = "msg_" + resp_id[5:29]
         shell = tr.response_object(resp_id=resp_id,
                                    model=body.get("model", svc.model_name),
@@ -161,6 +196,8 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
         failure: BaseException | None = None
         finished = False
         last_emit = time.monotonic()
+        stop_watch = asyncio.Event()
+        watcher = asyncio.create_task(watch_disconnect())
         try:
             while True:
                 try:
@@ -171,6 +208,8 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
                         last_emit = time.monotonic()
                     await asyncio.sleep(0.02)
                     continue
+                if stop_watch.is_set():
+                    return
                 if item is _STREAM_DONE:
                     break
                 if isinstance(item, BaseException):
@@ -233,10 +272,9 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
             yield "data: [DONE]\n\n"
             finished = True
         finally:
-            if not finished and svc.supervisor is not None:
-                try:
-                    svc.supervisor.abort()
-                except Exception:
-                    pass
+            stop_watch.set()
+            watcher.cancel()
+            if not finished:
+                _abort()
 
     return generate()
