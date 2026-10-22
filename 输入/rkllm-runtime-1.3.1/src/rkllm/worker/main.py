@@ -151,7 +151,14 @@ class Worker:
                 # 会污染 stdout 管道（真机首测：帧头被日志字节覆盖，supervisor
                 # 解析出 1.2 GB 假长度后永久阻塞）。stdout 从此只承载 C 库日志，
                 # 由 supervisor 的排水线程丢弃。
-                self._send(wfile, {"op": "ready"})
+                ready = {"op": "ready"}
+                fingerprint = getattr(self.engine, "lib_fingerprint", None)
+                if fingerprint:
+                    # D10：库指纹由真正 dlopen 的 worker 提供，server 不重复加载
+                    ready.update({"lib_sha256": fingerprint.get("sha256"),
+                                  "lib_size": fingerprint.get("size"),
+                                  "lib_path": fingerprint.get("path")})
+                self._send(wfile, ready)
                 first = False
             self.serve_connection(conn)
 

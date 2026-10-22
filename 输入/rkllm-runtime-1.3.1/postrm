@@ -21,6 +21,14 @@ set -e
 case "$1" in
     remove|purge)
         rm -f @SERVER_DEFAULTS@
+        # Runtime 会在包目录旁写 __pycache__（1.3.1-16 已用
+        # PYTHONDONTWRITEBYTECODE 禁止新写），它们不在 dpkg 文件清单里，
+        # 不清理会让 /usr/lib/rkllm 在卸载后残留。只动本包私有目录，且只删
+        # 字节码与随后变空的目录——不用 rm -rf，避免误伤。
+        if [ -d /usr/lib/rkllm ]; then
+            find /usr/lib/rkllm -type f -name '*.pyc' -delete 2>/dev/null || true
+            find /usr/lib/rkllm -depth -type d -empty -delete 2>/dev/null || true
+        fi
         if command -v ldconfig >/dev/null 2>&1; then
             ldconfig
         fi

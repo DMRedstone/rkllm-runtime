@@ -236,6 +236,31 @@ _SIGNATURES = {
 }
 
 
+def _resolve_library_path(candidate: str) -> str:
+    """把 ctypes 的加载名解析成可读的真实路径（D10 指纹用）。
+
+    `ctypes.CDLL("librkllmrt.so")` 的 `_name` 只是候选名，不是链接器实际
+    加载的绝对路径；直接对它 os.stat 会失败，指纹就成了 None。顺序：
+    候选本身是文件 → /proc/self/maps 里 basename 匹配的映射 → 原候选。
+    """
+    try:
+        if os.path.isfile(candidate):
+            return os.path.realpath(candidate)
+    except OSError:
+        pass
+    base = os.path.basename(candidate)
+    try:
+        with open("/proc/self/maps", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if base in line:
+                    mapped = line.rsplit(None, 1)[-1]
+                    if os.path.isfile(mapped):
+                        return mapped
+    except OSError:
+        pass
+    return candidate
+
+
 def load_library(lib_path: str | None = None) -> tuple[ctypes.CDLL, str, dict]:
     """加载 librkllmrt.so 并记录指纹（D10）。
 
@@ -253,8 +278,8 @@ def load_library(lib_path: str | None = None) -> tuple[ctypes.CDLL, str, dict]:
     for candidate in candidates:
         try:
             lib = ctypes.CDLL(candidate)
-            # CDLL 已解析到某个搜索路径；指纹按可读路径尽力取
-            fp_path = getattr(lib, "_name", candidate)
+            # CDLL 只记住搜索名；映射到真实路径后再算指纹
+            fp_path = _resolve_library_path(getattr(lib, "_name", candidate))
             fingerprint = {"path": fp_path}
             try:
                 st = os.stat(fp_path)
@@ -263,7 +288,7 @@ def load_library(lib_path: str | None = None) -> tuple[ctypes.CDLL, str, dict]:
                 fingerprint["size"] = st.st_size
             except OSError:
                 fingerprint["sha256"] = None
-            return lib, candidate, fingerprint
+            return lib, fp_path, fingerprint
         except OSError as exc:
             errors.append("  %s: %s" % (candidate, exc))
     raise RKLLMError("cannot load librkllmrt.so. Tried:\n%s\n"

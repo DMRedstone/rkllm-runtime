@@ -376,7 +376,8 @@ def _cmd_list(args) -> int:
 def _cmd_info(args) -> int:
     import json
     import platform as py_platform
-    from .platform import available_mb, detect_platform
+    from .platform import available_mb, detect_platform, npu_status
+    npu_available, npu_detail = npu_status()
     info = {
         "rkllm": "1.4.0",
         "python": sys.version.split()[0],
@@ -384,6 +385,8 @@ def _cmd_info(args) -> int:
         "machine": py_platform.machine(),
         "mem_available_mb": (round(available_mb(), 0)
                              if available_mb() is not None else None),
+        "npu_available": npu_available,
+        "npu_detail": npu_detail,
     }
     try:
         from .abi import load_library

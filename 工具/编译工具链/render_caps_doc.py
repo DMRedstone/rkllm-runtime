@@ -24,7 +24,7 @@ sys.path.insert(0, SRC)
 
 from rkllm.caps import CAPS, NOTES, LIMITS   # noqa: E402
 
-HEADER = "## 8. OpenAI 参数支持矩阵（新栈 rkllm-serve）"
+HEADER = "## 10. OpenAI 参数支持矩阵（新栈）"
 
 
 def render() -> str:

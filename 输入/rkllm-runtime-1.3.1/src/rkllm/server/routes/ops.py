@@ -12,6 +12,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from ... import caps
+from ...platform import npu_status
 
 router = APIRouter()
 
@@ -55,6 +56,11 @@ def _cache_stats(cfg) -> dict:
 def health(request: Request):
     """永远 200：进程活着。/ready 才反映模型可用性（D3：补 context_len / 档位）。"""
     svc = _svc(request)
+    npu_ok, npu_detail = npu_status()
+    # D10：subprocess 模式下库由 worker 加载，指纹从 supervisor 的 ready 帧来；
+    # in_process 模式下 supervisor 直接暴露 engine 的指纹。
+    fingerprint = (getattr(svc.supervisor, "lib_fingerprint", None)
+                   or svc.lib_fingerprint or {})
     return {
         "state": svc.supervisor.state if svc.supervisor else "unconfigured",
         "context_len": svc.context_len,
@@ -65,8 +71,10 @@ def health(request: Request):
         "model": svc.model_name,
         "model_path": svc.model_path,
         "version": svc.version,
-        "lib_sha256": (svc.lib_fingerprint or {}).get("sha256"),
-        "lib_size": (svc.lib_fingerprint or {}).get("size"),
+        "lib_sha256": fingerprint.get("sha256"),
+        "lib_size": fingerprint.get("size"),
+        # 驱动可用性对运维/本地 status 工具可见（0.9.x 起是 DRM render node）
+        "npu": {"available": npu_ok, "detail": npu_detail},
         # 设计 §6.4(4)：缓存命中与占用对运维可见
         "cache": _cache_stats(svc.cfg),
     }

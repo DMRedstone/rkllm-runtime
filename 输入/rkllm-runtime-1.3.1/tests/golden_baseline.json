@@ -1,0 +1,115 @@
+{
+ "GET /v1/models|null": {
+  "object": "list",
+  "data": [
+   {
+    "id": "fake",
+    "object": "model",
+    "owned_by": "rkllm-runtime",
+    "context_len": 4096,
+    "model_class": "small"
+   }
+  ]
+ },
+ "POST /v1/chat/completions|{\"max_tokens\": 64, \"messages\": [{\"content\": \"用一句话介绍你自己\", \"role\": \"user\"}]}": {
+  "object": "chat.completion",
+  "model": "fake",
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "answer 1 to: User: 用一句话介绍你自己\n\nAssistant:"
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 13,
+   "completion_tokens": 20,
+   "total_tokens": 33,
+   "estimated": true
+  }
+ },
+ "POST /v1/chat/completions|{\"max_tokens\": 64, \"messages\": [{\"content\": \"回答保持一句话\", \"role\": \"system\"}, {\"content\": \"天空为什么是蓝的\", \"role\": \"user\"}], \"temperature\": 0.5}": {
+  "object": "chat.completion",
+  "model": "fake",
+  "choices": [
+   {
+    "index": 0,
+    "message": {
+     "role": "assistant",
+     "content": "answer 2 to: System: 回答保持一句话\n\nUser: 天空为什么是蓝的\n\nAssistant:"
+    },
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 21,
+   "completion_tokens": 28,
+   "total_tokens": 49,
+   "estimated": true
+  }
+ },
+ "POST /v1/chat/completions|{\"max_tokens\": 48, \"messages\": [{\"content\": \"写三行诗\", \"role\": \"user\"}], \"stream\": true}": {
+  "deltas": [
+   "a",
+   "n",
+   "s",
+   "w",
+   "e",
+   "r",
+   " ",
+   "3",
+   " ",
+   "t",
+   "o",
+   ":",
+   " ",
+   "U",
+   "s",
+   "e",
+   "r",
+   ":",
+   " ",
+   "写",
+   "三",
+   "行",
+   "诗",
+   "\n",
+   "\n",
+   "A",
+   "s",
+   "s",
+   "i",
+   "s",
+   "t",
+   "a",
+   "n",
+   "t",
+   ":",
+   "[DONE]"
+  ],
+  "finish_reasons": [
+   "stop"
+  ],
+  "usage_frame": false
+ },
+ "POST /v1/completions|{\"max_tokens\": 32, \"prompt\": \"数到三：\"}": {
+  "object": "text_completion",
+  "model": "fake",
+  "choices": [
+   {
+    "index": 0,
+    "text": "answer 4 to: 数到三：",
+    "finish_reason": "stop"
+   }
+  ],
+  "usage": {
+   "prompt_tokens": 2,
+   "completion_tokens": 8,
+   "total_tokens": 10,
+   "estimated": true
+  }
+ }
+}

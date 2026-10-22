@@ -71,7 +71,7 @@ ARCHITECTURES = {
 # python3-fastapi / python3-uvicorn / python3-pydantic: the new FastAPI stack
 #   (apt route, decided 2026-10-21 - no vendored wheels). trixie versions meet
 #   the floors (pydantic >= 2.9 supports 3.13); verified on board before
-#   release, see 文档/待办事项.md.
+#   release, see the appendix in 文档/开发记录.md.
 DEPEND_TEMPLATE = ("libc6 (>= 2.29), libgomp1, libstdc++6, "
                    "python3:any (>= 3.13), python3-fastapi, python3-uvicorn, "
                    "python3-pydantic")

@@ -59,6 +59,14 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):        # 静音
         pass
 
+    def handle(self):
+        # 连接器取消时会直接断流，socketserver 默认会把 ConnectionResetError
+        # 当异常打到 stderr；这是预期路径，不是失败。
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError):
+            self.close_connection = True
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
@@ -106,6 +114,9 @@ class Connector:
     def __init__(self, port: int, extra_env: dict | None = None):
         env = dict(os.environ)
         env.update({"PYTHONPATH": str(SRC),
+                    # Windows 下子进程 stdio 默认是 ANSI（cp936），父进程按 UTF-8
+                    # 读会 UnicodeDecodeError；显式钉死 UTF-8，跨平台行为一致。
+                    "PYTHONIOENCODING": "utf-8",
                     "RKLLM_ENDPOINT": "http://127.0.0.1:%d/v1" % port,
                     "RKLLM_API_KEY": "test-key",
                     "RKLLM_MCP_CONFIG": os.devnull})

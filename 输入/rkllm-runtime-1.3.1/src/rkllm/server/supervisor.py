@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import collections
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -115,6 +116,8 @@ class Supervisor:
         self._client: WorkerClient | None = None
         self._lock = threading.Lock()
         self._current_backoff = self.backoff_s
+        # D10：worker 在 ready 帧里报回真正 dlopen 的库指纹（server 不重复加载）
+        self.lib_fingerprint: dict | None = None
 
     # -- 状态 ---------------------------------------------------------------
 
@@ -142,7 +145,11 @@ class Supervisor:
             cmd.insert(cmd.index("--address") + 2, "--tcp")
         self._proc = subprocess.Popen(cmd, cwd=SRC_DIR,
                                       stdout=subprocess.PIPE,
-                                      stderr=subprocess.PIPE)
+                                      stderr=subprocess.PIPE,
+                                      # 禁止 worker 在包目录写 __pycache__：
+                                      # 字节码不在 dpkg 清单里，卸载会留残留
+                                      env=dict(os.environ,
+                                               PYTHONDONTWRITEBYTECODE="1"))
         # stdout/stderr 都只承载 librkllmrt 的 C 库日志，起排水线程持续排空：
         # 管道缓冲仅 64KB，没人读的话 worker 会卡死在日志 write 上。
         # ready 帧不再走 stdout——真机首测中 C 库日志把 stdout 帧流污染，
@@ -167,7 +174,6 @@ class Supervisor:
                     conn = socket.create_connection((host, int(port)),
                                                     timeout=5)
                 else:
-                    import os
                     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                     conn.settimeout(5)
                     conn.connect(address)
@@ -183,6 +189,12 @@ class Supervisor:
         ready = read_frame(self._client._rfile)
         if ready.get("op") != "ready":
             raise WorkerDown("worker sent %r instead of ready" % ready)
+        if ready.get("lib_sha256"):
+            self.lib_fingerprint = {
+                "sha256": ready.get("lib_sha256"),
+                "size": ready.get("lib_size"),
+                "path": ready.get("lib_path"),
+            }
         self.state = "ready"
 
     def _drain(self, which: str) -> None:
@@ -301,6 +313,7 @@ class LocalSupervisor:
         self.load_timeout_s = load_timeout_s
         self.state = "ready"          # 引擎在构造时就已加载完成
         self.metrics = {"worker_restarts_total": 0}
+        self.lib_fingerprint = getattr(engine, "lib_fingerprint", None)
 
     def is_ready(self) -> bool:
         return self.state == "ready"

@@ -8,7 +8,14 @@
 设计取舍：这里是**唯一入口**，不再另设 rkllm-serve 之类的第二条命令——
 运维脚本、unit、文档里的 `rkllm ...` 一行都不用改。
 """
+import os
 import sys
+
+# 板端包目录是 root 所有的 /usr/lib/rkllm/current；Python 默认会在旁边写
+# __pycache__，这些字节码不在 dpkg 文件清单里，卸载时会让私有目录删不干净。
+# 统一禁止写字节码：少几个目录、卸载不留残留（首启多几毫秒编译，可接受）。
+sys.dont_write_bytecode = True
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 if sys.version_info[:2] < (3, 13):
     sys.exit("rkllm: 需要 python3 >= 3.13（当前 %d.%d）" % sys.version_info[:2])
