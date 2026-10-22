@@ -1,6 +1,6 @@
 #!/bin/bash
 # harness.sh — rsync-backup.sh 函数级隔离测试（T1–T11）
-# 方法：从被测脚本原样抽取 144–705 行的全部函数（起点/终点断言自证），
+# 方法：从被测脚本动态定位并抽取全部函数（起点/终点断言自证），
 #       在桩全局配置下逐场景运行，只验证函数行为，不跑主流程。
 set -uo pipefail
 SB="$(cd "$(dirname "$0")" && pwd)"
@@ -11,10 +11,16 @@ LOG="$SB/harness.log"
 command rm -rf "$SB/t2" "$SB/t3" "$SB/t4a" "$SB/t4b" "$SB/t4c" "$SB/t4d" "$SB/t5" "$SB/t6a" "$SB/t6b" "$SB/t8" "$SB/t9" "$SB/t10" "$SB/t11" "$SB/h-back"
 
 # ---------- 抽取自证 ----------
-sed -n '144,781p' "$SRC" > "$SB/funcs.sh"
+# 动态定位函数区：起点为 log() 定义，终点为 backup_one 收尾的 }。
+# 不硬编码行号——被测脚本任何编辑都会使行号失效（2026-10-22 即因此 FATAL）。
+FN_START="$(grep -n '^log() {$' "$SRC" | head -n1 | cut -d: -f1)"
+if [ -z "$FN_START" ]; then echo "FATAL: 未找到 log() { 定义"; exit 1; fi
+FN_END="$(awk -v s="$FN_START" 'NR>=s && /^backup_one\(\) \{/{b=NR} b && NR>b && /^}$/{print NR; exit}' "$SRC")"
+if [ -z "$FN_END" ]; then echo "FATAL: 未找到 backup_one 收尾"; exit 1; fi
+sed -n "${FN_START},${FN_END}p" "$SRC" > "$SB/funcs.sh"
 if [ "$(head -n 1 "$SB/funcs.sh")" != "log() {" ]; then echo "FATAL: 抽取起点不是 log() {"; exit 1; fi
 if [ "$(tail -n 1 "$SB/funcs.sh")" != "}" ]; then echo "FATAL: 抽取终点不是 backup_one 收尾"; exit 1; fi
-printf '函数抽取自证通过：%s 行\n' "$(wc -l < "$SB/funcs.sh")"
+printf '函数抽取自证通过：%s 行（源 %s-%s）\n' "$(wc -l < "$SB/funcs.sh")" "$FN_START" "$FN_END"
 
 # ---------- 桩全局配置（与脚本可配置段同构） ----------
 BACKUP_BASE="$SB/h-back"

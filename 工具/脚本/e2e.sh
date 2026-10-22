@@ -70,7 +70,13 @@ command rm -rf "$SB/back" "$SB/log" "$SB/lock" "$SB/src" "$SB/e2e.out" "$SB/rsyn
   "$SB/h-back" "$SB/t2" "$SB/t3" "$SB/t4a" "$SB/t4b" "$SB/t4c" "$SB/t4d" "$SB/t5" "$SB/t6a" "$SB/t6b" \
   "$SB/t8" "$SB/t9" "$SB/t10" "$SB/t11" "$SB/zone-orig.txt" "$SB/zone-copy.txt" "$SB/funcs.sh" "$SB/harness.log"
 mkdir -p "$SB/src/data1/sub" "$SB/src/data2" "$SB/log" "$SB/lock" "$SB/bin"
-for m in rsync flock mountpoint; do ln -sf "$HERE/mock-$m.sh" "$SB/bin/$m"; done   # mock 以命令名注入 PATH 首位
+# mock 以命令名注入 PATH 首位。
+# 用复制而非软链：Git Bash 的 `ln -s` 会静默失败（exit 0 但不产生文件），
+# 导致 PATH 首位为空、被测副本启动自检报「缺少命令: rsync」而全量失败。
+for m in rsync flock mountpoint; do cp -f "$HERE/mock-$m.sh" "$SB/bin/$m"; done
+for m in rsync flock mountpoint; do
+  [ -x "$SB/bin/$m" ] || { echo "FATAL: mock 注入失败: $SB/bin/$m"; exit 1; }
+done
 : > "$OUT"; : > "$ARGV"; : > "$LOG"
 gen_copy "$SB/rsync-test.sh" KEEP=3 LOG_MAX_SIZE=500
 # 原文件末行无换行符，wc -l 会少数一行；awk END{print NR} 不受末行换行影响

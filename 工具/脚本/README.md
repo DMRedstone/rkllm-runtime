@@ -58,5 +58,13 @@
 | `space_sync_check.py` | `space_sync_check 说明.md` | [20261016 space_sync_check 说明](https://www.workbuddy.cn/space/d/hNQJTOyBmUqrrNwQ8svtTc) |
 | `space_name_check.py` | `space_name_check 说明.md` | [20261016 space_name_check 说明](https://www.workbuddy.cn/space/d/6JXulw9ttROS0amUr1TRIE) |
 | `space_rename_strip.py` | `space_rename_strip 说明.md` | — |
+| `coverage_report.py` | `coverage_report 说明.md` | — |
+| `magic_numbers.py` | `magic_numbers 说明.md` | — |
+| `mcp_conformance.py` | `mcp_conformance 说明.md` | — |
+| `f3_scenarios.py` | `f3_scenarios 说明.md` | — |
+| `f10_frameworks.py` | `f10_frameworks 说明.md` | — |
+| `restructure_devlog.py` | `restructure_devlog 说明.md` | — |
+| `renumber_devlog.py` | `renumber_devlog 说明.md` | — |
+| `append_devlog_sections.py` | `append_devlog_sections 说明.md` | — |
 
 2026-10-16 说明：本文档原为 rsync-backup 测试基建说明，当日重定位为目录 README；原有使用方式、覆盖场景、环境注意事项与测试结论等内容已迁入 rsync-backup 说明书附录。

@@ -2,7 +2,7 @@
 
 ## 一、定位
 
-`harness.sh` 是 `rsync-backup.sh` 的函数级隔离测试（T1–T11，53 项断言）。不跑备份主流程：从被测脚本原样抽取全部函数，在桩全局配置下逐场景直接调用，只验证函数行为。
+`harness.sh` 是 `rsync-backup.sh` 的函数级隔离测试（T1–T11，54 项断言）。不跑备份主流程：从被测脚本动态定位并抽取全部函数，在桩全局配置下逐场景直接调用，只验证函数行为。
 
 ## 二、运行方式
 
@@ -14,7 +14,8 @@ bash harness.sh
 
 ## 三、测试方法与自证
 
-- 用 `sed -n '144,705p'` 抽取被测脚本的函数区到 `funcs.sh`，起点必须是 `log() {`、终点必须是 `}`，两处断言自证——被测脚本函数区行号变动时，抽取范围必须同步修改，否则自证失败退出。
+- 动态定位函数区写入 `funcs.sh`：起点用 `grep` 找 `^log() {$`，终点用 `awk` 找 `backup_one()` 之后第一个行首 `}`；随后仍以两处断言自证（起点必须是 `log() {`、终点必须是 `}`），定位失败即 FATAL 退出。
+- 2026-10-22 前此处硬编码 `sed -n '144,781p'`，被测脚本函数区后移到 157–890 后测试直接 FATAL——已改为动态定位，不再随行号漂移失效。
 
 - 桩全局配置与被测脚本可配置段同构（`KEEP=3`、`MIN_FREE_PCT=1`、`REQUIRE_ROOT=0`、`SHRINK_RATIO=0` 等），`source funcs.sh` 后直接调用函数。
 
@@ -28,7 +29,7 @@ bash harness.sh
 
 - T3 `list_complete_snapshots`：只认 `.complete`、新的在前、排除 failed/inprogress。
 
-- T4 `handle_leftovers`：4 个场景——多残留按完成度选最厚续传（非时间戳）、单份免全树统计、已 complete 提升、目标已存在改判 failed。
+- T4 `handle_leftovers`：4 个场景（T4a–T4d）——多残留按完成度选最厚续传（非时间戳）、仅一份时免全树统计、已 complete 的残留提升为正式快照、目标已存在改判 failed。
 
 - T5 `prune_snapshots`：KEEP 淘汰、对只读顶层也能删（先 chmod u+w）。
 
