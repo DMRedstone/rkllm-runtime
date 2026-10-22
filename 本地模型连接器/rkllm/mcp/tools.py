@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, Callable
 
 from ..agent.json_schema import validate as validate_schema
@@ -47,8 +48,10 @@ def max_tool_prefix(prefix: str) -> str:
 
 
 def _tool(name: str, desc: str, schema: dict, *,
-          readonly: bool = False) -> dict:
+          readonly: bool = False, output_schema: dict | None = None) -> dict:
     out = {"name": name, "description": desc, "inputSchema": schema}
+    if output_schema is not None:
+        out["outputSchema"] = output_schema
     if readonly:
         out["annotations"] = {"readOnlyHint": True}
     return out
@@ -72,10 +75,13 @@ def tool_definitions(prefix: str = "local_llm_") -> list[dict]:
                            "description": "任务预设；不填则原样执行"},
                   "max_tokens": {"type": "integer",
                                  "description": "生成上限，默认 512"},
-                  "temperature": {"type": "number"}},
+                  "temperature": {"type": "number"},
+                  "format": {"type": "string", "enum": ["text", "json_object"],
+                             "description": "json_object 仅追加 JSON 提示（非受约束解码）"}},
                "required": ["prompt"]}),
         _tool(p + "chat",
               "多轮对话：需要上下文跟进时用；messages 为完整历史。\n"
+              "可选 session 由连接器记住最近几轮（MCP 无状态，会话显式传参）。\n"
               "不适合长文生成与多步推理。" + job_hint,
               {"type": "object", "properties": {
                   "messages": {"type": "array", "items": {
@@ -83,7 +89,9 @@ def tool_definitions(prefix: str = "local_llm_") -> list[dict]:
                           "role": {"type": "string"},
                           "content": {"type": "string"}},
                       "required": ["role", "content"]}},
-                  "system": {"type": "string"}},
+                  "system": {"type": "string"},
+                  "session": {"type": "string",
+                              "description": "可选会话 id；同一 id 连续调用保留最近上下文"}},
                "required": ["messages"]}),
         _tool(p + "extract",
               "结构化抽取：按 JSON Schema 从文本抽取，返回 structuredContent。"
@@ -93,7 +101,8 @@ def tool_definitions(prefix: str = "local_llm_") -> list[dict]:
                   "text": {"type": "string"},
                   "schema": {"type": "object", "description": "JSON Schema"},
                   "instructions": {"type": "string"}},
-               "required": ["text", "schema"]}),
+               "required": ["text", "schema"]},
+              output_schema={"type": "object", "additionalProperties": True}),
         _tool(p + "batch",
               "分段批量：对 segments 逐段执行同一任务，串行执行，"
               '返回与输入等长的结果数组（失败段为 {"error": ...}，不影响其他段）。'
@@ -138,11 +147,16 @@ def _extract_json(text: str) -> Any:
 
 def build_handlers(backend, cfg: dict, jobs, *,
                    progress_cb: Callable[[str], None] | None = None,
-                   extract_retries: int = 2) -> dict[str, Callable]:
+                   extract_retries: int = 2,
+                   sessions: dict[str, list[dict]] | None = None,
+                   sessions_lock: threading.Lock | None = None) -> dict[str, Callable]:
     """返回 {工具短名: handler(params, should_cancel=None)->result dict}。
 
     cfg 需要：tool_prefix / default_max_tokens / default_temperature /
     max_input_chars / max_result_chars / batch_max_segments。
+
+    sessions/sessions_lock 给 `local_llm_chat` 的可选会话记忆（MCP 2026 无状态，
+    会话只能作为工具参数显式传）；不传则每次只处理本次 messages。
 
     should_cancel 是 stdio 传入的 `() -> bool`：job 取消或客户端断开时应返回
     True。工具层把它一路传给 Backend，使 HTTP 读循环在 chunk 边界能中断。
@@ -160,6 +174,9 @@ def build_handlers(backend, cfg: dict, jobs, *,
     prefix = cfg["tool_prefix"]
     input_limit = cfg["max_input_chars"]
     result_limit = cfg["max_result_chars"]
+    session_store = sessions if sessions is not None else {}
+    session_lock = sessions_lock or threading.Lock()
+    max_session_messages = int(cfg.get("session_max_messages", 20))
 
     def _validate_input(text: str) -> str:
         if len(text) > input_limit:
@@ -192,6 +209,12 @@ def build_handlers(backend, cfg: dict, jobs, *,
         mode = params.get("mode")
         if mode and mode in _MODE_PROMPTS:
             prompt = _MODE_PROMPTS[mode] + prompt
+        fmt = str(params.get("format") or "text")
+        if fmt not in ("text", "json_object"):
+            raise ValueError("format 仅支持 text / json_object")
+        if fmt == "json_object":
+            # 提示约束（不是受约束解码）：与 extract 的 JSON 提示同一口径
+            prompt = prompt + "\n只输出一个 JSON 对象，不要输出其他内容。"
         text = _chat_once(str(params.get("system", "")), prompt,
                           int(params.get("max_tokens") or cfg["default_max_tokens"]),
                           float(params.get("temperature")
@@ -211,16 +234,29 @@ def build_handlers(backend, cfg: dict, jobs, *,
                 raise ValueError("messages 元素需含合法 role 与 content")
             clean.append({"role": role, "content": _validate_input(content)})
         system = str(params.get("system", ""))
-        if system:
-            clean.insert(0, {"role": "system", "content": system})
+        session = str(params.get("session") or "").strip()
+        if session and len(session) > 128:
+            raise ValueError("session 过长（最多 128 字符）")
+        if session:
+            with session_lock:
+                history = list(session_store.get(session, []))
+            base = history + clean
+        else:
+            base = clean
+        request = ([{"role": "system", "content": system}] if system else []) + base
         try:
-            out = backend.chat(clean, max_tokens=cfg["default_max_tokens"],
+            out = backend.chat(request, max_tokens=cfg["default_max_tokens"],
                                temperature=cfg["default_temperature"],
                                cancel_check=_as_check(should_cancel))
         except BackendError as exc:
             if getattr(exc, "kind", "") == "cancelled":
                 raise Cancelled() from exc
             raise
+        if session:
+            with session_lock:
+                session_store[session] = (base + [{"role": "assistant",
+                                                   "content": out["text"]}]
+                                          )[-max_session_messages:]
         return {"content": [{"type": "text", "text": _clip_result(out["text"])}]}
 
     _try_json = _extract_json        # 保持内层调用点不变
@@ -280,6 +316,10 @@ def build_handlers(backend, cfg: dict, jobs, *,
                                           cfg["default_temperature"],
                                           should_cancel))
             except Cancelled:
+                # 取消要向上传播（runner 才会把 job 记成 cancelled）；
+                # 单段普通失败仍按 F8 隔离成等长数组里的 error 项。
+                if check is not None and check():
+                    raise
                 results.append({"error": "cancelled"})
             except Exception as exc:      # F8：单段失败不中断整批
                 results.append({"error": str(exc)[:200]})

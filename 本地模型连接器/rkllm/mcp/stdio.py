@@ -1,16 +1,18 @@
-"""stdio 传输：读线程 + 工作线程池 + 取消传导 + 进度通知（MCP 设计 §6.1）。
+"""stdio 传输：读线程 + 推理池 + 控制池 + 取消传导 + 进度通知（MCP 设计 §6.1）。
 
-线程模型（本批重写，审计 P0-2）：
+线程模型：
 - reader 线程只做三件事：读一行、处理通知（cancelled/ping）、把 tools/call
-  提交给工作线程池。**绝不在 reader 里执行工具**——否则一次 ask（最长 45 s）
+  提交给线程池。**绝不在 reader 里执行工具**——否则一次 ask（最长 45 s）
   期间收不到取消通知，也收不到 job 轮询，job 机制形同虚设。
-- 工作线程池 max_workers=4：既保证调用中仍能响应 job/status，又不会对板端
-  形成压力（板端本来是单槽排队，背压在服务端）。
+- 两个池：推理池 max_workers=mcp.max_concurrent（默认 1，板端串行）；控制池
+  固定 2 线程，只跑 status/job。长同步 ask 占住推理池时，job/status 仍能秒回
+  （审计项：单池时 job 轮询会被排队的同步调用挡住）。
 - stdout 写入全局锁：一条协议报文绝不拆开。
 - 单条消息上限 8 MiB；非法 JSON 回 -32700 后继续服务，不退出。
-- 取消：notifications/cancelled 用 JSON-RPC 请求 id 匹配（此前错用
-  progressToken，取消对不上号），命中后置位取消标志，工具层把它传给
-  Backend → 在 SSE chunk 边界中断。
+- 取消：notifications/cancelled 用 JSON-RPC 请求 id 匹配，命中后置位取消标志，
+  工具层把它传给 Backend → 在 SSE chunk 边界中断。
+- 进度：独立心跳线程在任务执行期间按 interval 发 notifications/progress，
+  不再像旧实现那样先睡满 12 个周期才真正开始推理。
 - 进程退出时取消在飞任务。
 """
 from __future__ import annotations
@@ -59,15 +61,20 @@ class StdioServer:
         self._write_lock = threading.Lock()
         self._inflight: dict[str, Any] = {}     # request_id -> Job | CancelFlag
         self._lock = threading.Lock()
+        self._sessions: dict[str, list[dict]] = {}
+        self._sessions_lock = threading.Lock()
         self._protocol_version = protocol_version
-        # mcp.max_concurrent：同时在飞的工具调用数。默认 1（板端串行），
-        # 但读循环线程不占池，所以 job/status/cancel 随时可响应。
+        # mcp.max_concurrent：同时在飞**推理**工具数（默认 1，板端串行）。
+        # status/job 不改推理状态，走独立控制池，长 ask 期间仍可秒回。
         workers = max(1, int(cfg.get("max_concurrent") or POOL_WORKERS))
         self._pool = ThreadPoolExecutor(max_workers=workers,
                                         thread_name_prefix="mcp-call")
+        self._control_pool = ThreadPoolExecutor(max_workers=2,
+                                                thread_name_prefix="mcp-ctl")
         self._handlers = tools_mod.build_handlers(
             backend, cfg, self.jobs,
-            extract_retries=cfg.get("extract_retries", 2))
+            extract_retries=cfg.get("extract_retries", 2),
+            sessions=self._sessions, sessions_lock=self._sessions_lock)
         self.dispatcher = self._build_dispatcher()
         # 档位从板端 /health 取（F9）：失败不影响启动，退回 env 默认
         threading.Thread(target=self._refresh_model_class, daemon=True,
@@ -116,11 +123,18 @@ class StdioServer:
                     "serverInfo": SERVER_INFO}
 
         def tools_list(params: dict) -> dict:
-            return {"tools": tools_mod.tool_definitions(prefix)}
+            result = {"tools": tools_mod.tool_definitions(prefix)}
+            if version == "2026-07-28":
+                # 2026 列表结果必须带缓存元数据（设计 §1.1；工具表是静态的）
+                result.update({"ttlMs": 3600000, "cacheScope": "global"})
+            return result
 
         def server_discover(params: dict) -> dict:
+            # 全版本实现：新客户端探针 + 旧客户端兼容探测（设计 §1.2）
             return {"serverInfo": SERVER_INFO,
                     "protocolVersion": version,
+                    "supportedVersions": list(disp.supported),
+                    "capabilities": {"tools": {}},
                     "tools": [t["name"] for t in
                               tools_mod.tool_definitions(prefix)]}
 
@@ -143,8 +157,7 @@ class StdioServer:
         disp.register("tools/call", tools_call)
         disp.register("ping", ping)
         disp.register("notifications/cancelled", cancelled)
-        if version == "2026-07-28":
-            disp.register("server/discover", server_discover)
+        disp.register("server/discover", server_discover)
         return disp
 
     # -- tools/call 编排：job 判定 + 进度 + 取消 ------------------------------
@@ -169,7 +182,9 @@ class StdioServer:
             return handler(arguments)
 
         # job 化判定：估算耗时超过阈值（task_mode=never 强制同步）
-        estimate = (self._job_estimate or self._default_estimate)(arguments)
+        estimator = self._job_estimate
+        estimate = (estimator(arguments) if estimator
+                    else self._default_estimate(arguments, short))
         task_mode = self.cfg.get("task_mode", "auto")
         threshold = self.cfg.get("task_threshold_s", 45)
         if task_mode != "never" and estimate > threshold:
@@ -196,9 +211,13 @@ class StdioServer:
                 with self._lock:
                     self._inflight.pop(key, None)
 
-    def _default_estimate(self, arguments: dict) -> float:
+    def _default_estimate(self, arguments: dict, short: str | None = None) -> float:
         max_tokens = int(arguments.get("max_tokens")
                          or self.cfg.get("default_max_tokens", 512))
+        if short == "extract":
+            # extract handler 用 default_max_tokens * 2；估算必须同口径，
+            # 否则会低估耗时、把该 job 化的请求留在同步路径撞 60 s。
+            max_tokens *= 2
         text = json.dumps(arguments, ensure_ascii=False)
         prefill = max(1, len(text) // 2)   # 中文约 2 字符/token
         return estimate_seconds(self.model_class, prefill, max_tokens)
@@ -215,16 +234,23 @@ class StdioServer:
                 self._inflight[key] = job
 
         def runner():
+            stop_progress = threading.Event()
+
+            def heartbeat() -> None:
+                interval = max(1, int(self.cfg.get("progress_interval_s", 5)))
+                step = 0
+                while not stop_progress.wait(interval):
+                    if job.cancel_requested:
+                        return
+                    step += 1
+                    self._notify_progress(progress_token, step * interval, None)
+
+            progress_thread = None
+            if progress_token is not None and self.cfg.get("progress_interval_s", 5):
+                progress_thread = threading.Thread(
+                    target=heartbeat, daemon=True, name="mcp-job-progress-" + job.id)
+                progress_thread.start()
             try:
-                if progress_token is not None:
-                    interval = max(1, self.cfg.get("progress_interval_s", 5))
-                    for step in range(1, 13):   # 最多 12 次，够覆盖 27B 长任务
-                        if job.cancel_requested:
-                            break
-                        import time
-                        time.sleep(interval)
-                        self._notify_progress(progress_token, step * interval,
-                                              None)
                 if job.cancel_requested:
                     return
                 # 注意：必须传**可调用对象**——`job.cancel_requested` 是 property，
@@ -232,6 +258,9 @@ class StdioServer:
                 # （2026-10-21 真机发现：cancel 后槽位仍被占到任务结束）。
                 result = handler(arguments,
                                  should_cancel=lambda: job.cancel_requested)
+                if job.cancel_requested:
+                    job.cancel()          # batch 等吞掉 Cancelled 时仍要记取消
+                    return
                 job.complete(result)
             except tools_mod.Cancelled:
                 job.cancel()
@@ -240,6 +269,7 @@ class StdioServer:
                     return
                 job.fail(str(exc)[:300])
             finally:
+                stop_progress.set()
                 if key is not None:
                     with self._lock:
                         self._inflight.pop(key, None)
@@ -284,6 +314,7 @@ class StdioServer:
         # 进程退出：取消在飞任务（M4：断开后 NPU 不空转）
         for job in self.jobs.all():
             job.cancel()
+        self._control_pool.shutdown(wait=False, cancel_futures=True)
         self._pool.shutdown(wait=False, cancel_futures=True)
 
     def _read_loop(self) -> None:
@@ -305,22 +336,32 @@ class StdioServer:
                     self._log_first_connect(first)
                 except json.JSONDecodeError:
                     pass
-            # tools/call 交给工作线程：reader 必须随时可读，才能收到 cancelled
-            if self._is_tool_call(line):
+            # tools/call 交给线程：reader 必须随时可读，才能收到 cancelled。
+            # status/job 走控制池，长同步 ask 占住推理池时它们仍能秒回。
+            route = self._tool_route(line)
+            if route == "control":
+                self._control_pool.submit(self._handle_and_send, line)
+                continue
+            if route == "work":
                 self._pool.submit(self._handle_and_send, line)
                 continue
             response = self.dispatcher.handle_message(line)
             if response is not None:
                 self._send(response)
 
-    @staticmethod
-    def _is_tool_call(line: str) -> bool:
+    def _tool_route(self, line: str) -> str | None:
+        """tools/call 分流：status/job → control，其余推理工具 → work。"""
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
-            return False
-        return (isinstance(msg, dict) and msg.get("method") == "tools/call"
-                and msg.get("id") is not None)
+            return None
+        if not (isinstance(msg, dict) and msg.get("method") == "tools/call"
+                and msg.get("id") is not None):
+            return None
+        name = str((msg.get("params") or {}).get("name", ""))
+        prefix = self.cfg.get("tool_prefix", "")
+        short = name[len(prefix):] if prefix and name.startswith(prefix) else name
+        return "control" if short in ("status", "job") else "work"
 
     def _handle_and_send(self, line: str) -> None:
         try:

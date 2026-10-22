@@ -58,6 +58,11 @@ FastAPI 服务，两者互不混放。
 `task_threshold_s`（默认 45 s，必须 < 60）自动转 job，用 `local_llm_job`
 轮询或取消。协议支持四版（2026-07-28 无状态 + 三个 initialize 旧版）。
 
+2026-10-22 修复后：2026 `resultType=complete`、`server/discover` 全版本可用、
+`tools/list` 带 `ttlMs`/`cacheScope`；`ask` 支持 `format=json_object`（提示约束），
+`chat` 支持可选 `session` 记忆，`extract` 声明 `outputSchema`；job 进度不再阻塞
+启动，`status`/`job` 走独立控制池，长 ask 期间仍可轮询。
+
 ## 测试
 
 服务端 pytest 通过 `tests/conftest.py` 把本目录挂进 `rkllm.__path__` 覆盖

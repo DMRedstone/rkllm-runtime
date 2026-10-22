@@ -70,13 +70,14 @@ def test_detect_protocol_paths():
 
 
 def test_result_type_2026():
-    assert result_payload("2026-07-28", {"content": []})["resultType"] == "text"
+    assert result_payload("2026-07-28", {"content": []})["resultType"] == "complete"
     assert "resultType" not in result_payload("2024-11-05", {"content": []})
 
 
 def test_version_gated_method():
+    # server/discover 全版本实现：新客户端探针 + 旧客户端兼容探测
     disp = make_dispatcher("2024-11-05")
-    assert disp.handle_message(rpc("server/discover"))["error"]["code"] == -32601
+    assert disp.handle_message(rpc("server/discover"))["result"]["ok"] is True
     disp26 = make_dispatcher("2026-07-28")
     assert disp26.handle_message(rpc("server/discover"))["result"]["ok"] is True
 
@@ -87,7 +88,7 @@ def test_all_four_versions_handshake_shape():
         disp = make_dispatcher(version)
         result = disp.handle_message(rpc("ping"))["result"]
         if version == "2026-07-28":
-            assert result == {"resultType": "text"}   # 2026 强制 resultType
+            assert result == {"resultType": "complete"}   # 2026 强制 resultType
         else:
             assert result == {}
 

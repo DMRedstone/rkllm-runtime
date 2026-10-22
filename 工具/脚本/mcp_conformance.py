@@ -10,7 +10,8 @@
   6. 8 MiB 边界：超长帧被拒（PARSE_ERROR），进程仍存活。
 
 另有独立的取消断言：长调用进行中发 notifications/cancelled，要求 1 s 内
-返回且后续调用仍可用。
+返回且后续调用仍可用。并校验 `server/discover` 全版本可用、2026
+`resultType=complete`、`tools/list` 的 `ttlMs`/`cacheScope`。
 
 为什么不用真板：连接器与协议是本脚本的被测对象，后端只需一个可控的慢流。
 内置一个假 OpenAI 服务（stdlib http.server），因此本脚本在 Windows/Linux 都
@@ -185,8 +186,16 @@ def check_version(version: str, port: int) -> None:
         check("%s capabilities.tools" % version,
               "tools" in (result.get("capabilities") or {}))
         if version == "2026-07-28":
-            check("2026-07-28 resultType", "resultType" in result,
-                  str(result)[:100])
+            check("2026-07-28 resultType=complete",
+                  result.get("resultType") == "complete", str(result)[:100])
+
+        discover = (conn.call("server/discover", {}) or {}).get("result") or {}
+        check("%s server/discover" % version,
+              (discover.get("serverInfo") or {}).get("name") == "rkllm-mcp",
+              str(discover)[:120])
+        check("%s discover.supportedVersions" % version,
+              "2026-07-28" in (discover.get("supportedVersions") or []),
+              str(discover.get("supportedVersions")))
 
         conn.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         listed = (conn.call("tools/list", {}) or {}).get("result") or {}
@@ -197,6 +206,13 @@ def check_version(version: str, port: int) -> None:
         check("%s 每个工具有 inputSchema" % version,
               all(isinstance(t.get("inputSchema"), dict)
                   for t in listed.get("tools") or []))
+        if version == "2026-07-28":
+            check("2026-07-28 tools/list ttlMs",
+                  isinstance(listed.get("ttlMs"), int) and listed["ttlMs"] > 0,
+                  str(listed.get("ttlMs")))
+            check("2026-07-28 tools/list cacheScope",
+                  listed.get("cacheScope") in ("global", "session"),
+                  str(listed.get("cacheScope")))
 
         called = conn.call("tools/call",
                            {"name": "local_llm_ask",

@@ -31,9 +31,9 @@ DEFAULT_PROTOCOL_VERSION = "2024-11-05"   # 未知首包回退值（M1 处置）
 
 SERVER_INFO = {"name": "rkllm-mcp", "version": "1.0.0"}
 
-# 方法 → 支持的协议版本（未列出 = 全版本支持）
+# 方法 → 支持的协议版本（未列出 = 全版本支持）；server/discover 全版本实现，
+# 作为新客户端的探针与旧客户端的兼容探测（设计 §1.2）。
 PROTOCOL_MATRIX: dict[str, tuple[str, ...]] = {
-    "server/discover": ("2026-07-28",),
     # tasks 扩展不做（WorkBuddy 不声明）；tools/call 通用
 }
 
@@ -55,10 +55,15 @@ class JsonRpcError(Exception):
 
 
 def result_payload(protocol_version: str, result: dict) -> dict:
-    """按协议版本补齐 result 包裹（2026 要求 resultType）。"""
+    """按协议版本补齐 result 包裹。
+
+    2026-07-28 的 `resultType` 取值为 `complete` / `input_required`
+    （tasks 另有 `task`）。本连接器没有需要人工补输入的流程，统一 `complete`；
+    之前写成 `text`/`structured` 是错的（设计 §1.1）。
+    """
     if protocol_version == "2026-07-28" and "resultType" not in result:
         merged = dict(result)
-        merged["resultType"] = "text" if "structuredContent" not in result else "structured"
+        merged["resultType"] = "complete"
         return merged
     return result
 

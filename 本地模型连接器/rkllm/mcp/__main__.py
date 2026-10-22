@@ -96,7 +96,7 @@ def cli_ask(prompt: str) -> int:
     """排障 CLI：单轮调用，输出纯文本（不是任何客户端的兜底）。"""
     server = build_server()
     try:
-        result = server._handler_for("ask")({"prompt": prompt})
+        result = server._handlers["ask"]({"prompt": prompt})
         sys.stdout.write(result["content"][0]["text"] + "\n")
         return 0
     except BackendError as exc:
