@@ -19,7 +19,7 @@
 │   ├── 编译工具链/         make_deb · verify_deb · crosscheck_deb · render_template
 │   ├── 大模型测试工具链/   10 个脚本 + board_api.py + quality.py
 │   └── 脚本/               运维脚本：备份、空间同步校验、测试 harness
-├── 文档/                   部署说明 · 文件清单 · 对话接口用法 · 开发记录
+├── 文档/                   部署说明 · 对话接口用法 · 开发记录
 ├── 测试数据/Qwen3.5-4B测试/    结果 JSON/CSV、10 份脱敏真实公文、输出样本
 ├── 模型测试报告/Qwen3.5-4B测试/ 性能测试报告 · 真实公文场景测试报告
 ├── 本地模型连接器/         客户端 MCP 连接器（独立源码交付，不随 deb）
@@ -39,8 +39,8 @@ export RKLLM_RELEASE_TARBALL=/path/to/rknn-llm-release-v1.3.1.tar.gz
 export RKLLM_PACKAGING_DIR=$PWD/输入/rkllm-runtime-1.3.1
 python 工具/编译工具链/make_deb.py --arch arm64        # 产物落 工具/dist/
 
-# 静态自检（83 项）
-python 工具/编译工具链/verify_deb.py 工具/dist/rkllm-runtime_1.3.1-13_arm64.deb
+# 静态自检（86 项）
+python 工具/编译工具链/verify_deb.py 工具/dist/rkllm-runtime_1.3.1-16_arm64.deb
 
 # 板端测试全流程
 cd 工具/大模型测试工具链 && python run_all.py --host <板端地址> --key <令牌>
