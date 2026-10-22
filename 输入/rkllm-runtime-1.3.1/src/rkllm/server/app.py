@@ -109,6 +109,51 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
 
         app.middleware("http")(body_limit)
 
+        # -- 根路径兼容：OpenAI 端点在 /v1 与根下等价 -----------------------
+        # 背景：不少客户端把 base_url 配成 http://host:port（不带 /v1），
+        # 于是 /models、/chat/completions 全部落框架 404。这里把这类**精确**
+        # 路径改写到 /v1 前缀；/v1/* 与运维端点原样透传。
+        # 不用 301：部分客户端不跟随重定向，且 POST 会被改成 GET。
+        # 不复制 router：route.path 已含 /v1，去前缀需重建 endpoint 元数据，
+        # 与后续路由易漂移。
+        _ROOT_ALIASES = frozenset({
+            "/models", "/chat/completions", "/completions",
+            "/responses", "/embeddings", "/moderations",
+        })
+
+        async def root_alias(request: Request, call_next):
+            path = request.url.path
+            if request.method == "OPTIONS":
+                return await call_next(request)      # 预检交给 CORS 处理
+            if path == "/":
+                state = app.state.svc
+                if state is None:
+                    return JSONResponse({"service": "rkllm-server",
+                                         "version": "1.3.1-16"})
+                return JSONResponse({
+                    "service": "rkllm-server",
+                    "version": state.version,
+                    "model": state.model_name,
+                    "state": (state.supervisor.state
+                              if state.supervisor else "unconfigured"),
+                    "endpoints": {
+                        "health": "/health",
+                        "ready": "/ready",
+                        "models": ["/v1/models", "/models"],
+                        "chat_completions": ["/v1/chat/completions",
+                                             "/chat/completions"],
+                        "completions": ["/v1/completions", "/completions"],
+                        "responses": ["/v1/responses", "/responses"],
+                        "capabilities": "/v1/capabilities",
+                        "reset": "/v1/reset",
+                    },
+                })
+            if path in _ROOT_ALIASES:
+                request.scope["path"] = "/v1" + path
+            return await call_next(request)
+
+        app.middleware("http")(root_alias)
+
         # -- CORS（空列表 = 不发 CORS 头）------------------------------------
         origins = list(cfg.server.cors_origins or ())
         if origins:

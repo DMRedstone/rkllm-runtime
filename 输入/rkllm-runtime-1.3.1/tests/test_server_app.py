@@ -224,3 +224,61 @@ def test_completions_thin_wrapper(client):
 def test_param_validation_400(client):
     r = client.post("/v1/chat/completions", json={"messages": []})
     assert r.status_code == 422                   # pydantic 校验失败
+
+
+# -- 根路径兼容：base_url 不带 /v1 的客户端（2026-10-22 板端反馈）----------
+
+
+def test_root_returns_service_info(client):
+    """裸地址不再 404：返回服务名、版本、模型与端点清单。"""
+    r = client.get("/")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["service"] == "rkllm-server"
+    assert body["model"]                     # 来自 cfg.model.path 推导
+    assert body["endpoints"]["models"] == ["/v1/models", "/models"]
+
+
+def test_models_alias_without_v1_prefix(client):
+    """/models 与 /v1/models 等价（OpenAI 客户端常省掉 /v1）。"""
+    r = client.get("/models")
+    assert r.status_code == 200
+    assert r.json() == client.get("/v1/models").json()
+
+
+def test_chat_completions_alias_without_v1_prefix(client):
+    """/chat/completions 与 /v1/chat/completions 等价。"""
+    r = client.post("/chat/completions",
+                    json={"messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["message"]["content"] == "你好"
+
+
+def test_completions_alias_without_v1_prefix(client):
+    r = client.post("/completions", json={"prompt": "hi"})
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["text"] == "你好"
+
+
+def test_v1_paths_untouched_by_alias(client):
+    """/v1/* 原样透传，不被改写（防回归）。"""
+    assert client.get("/v1/models").status_code == 200
+    assert client.get("/v1/models/whatever").json()["id"] == "rkllm"
+    assert client.get("/v1/capabilities").status_code == 200
+
+
+def test_unknown_root_path_still_404(client):
+    """别名只覆盖精确集合，不滥造通配。"""
+    assert client.get("/nope").status_code == 404
+    assert client.get("/models/extra/deep").status_code == 404
+
+
+def test_root_alias_does_not_break_auth_exemption():
+    """/ready 豁免鉴权，根路径别名不得把它也改写。"""
+    cfg = load_config(env={"RKLLM_API_KEY": "secret"})
+    app = create_app(cfg, supervisor=FakeSupervisor())
+    with TestClient(app) as c:
+        assert c.get("/ready").status_code == 200
+        assert c.get("/models").status_code == 401      # 未带 key 仍拒绝
+        r = c.get("/models", headers={"Authorization": "Bearer secret"})
+        assert r.status_code == 200
