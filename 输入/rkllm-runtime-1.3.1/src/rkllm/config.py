@@ -468,7 +468,7 @@ def config_init(target: str = "board") -> str:
     全部默认值——默认值本来就不需要写进文件（优先级链已保证）。
     """
     if target == "client":
-        return """# ~/.config/rkllm/mcp.toml - rkllm-mcp 客户端配置
+        return """# <连接器安装目录>/mcp.toml - rkllm-mcp 客户端配置
 # 优先级：内置默认 < 本文件 < RKLLM_* 环境变量
 # 完整键表：见板端 `rkllm-serve config docs` 的 [mcp] 组
 

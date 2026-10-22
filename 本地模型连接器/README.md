@@ -24,10 +24,12 @@ FastAPI 服务，两者互不混放。
    ~/.workbuddy/mcp-servers/rkllm-mcp/rkllm/
    ```
 
-2. 复制 `mcp.toml.example` 到 `~/.config/rkllm/mcp.toml`，填 endpoint 与
-   api_key，权限 `chmod 600`；密钥不要写进 mcp.json。
+2. 复制 `mcp.toml.example` 为本目录（安装目录）下的 `mcp.toml`，填 endpoint 与
+   api_key，权限 `chmod 600`；密钥只留在这个文件里，不要写进 mcp.json。
+   连接器默认就读 `<安装目录>/mcp.toml`，无需配置路径。
 
-3. 在 `~/.workbuddy/mcp.json` 注册（`PYTHONPATH` 指 `rkllm` 的父目录）：
+3. 在 `~/.workbuddy/mcp.json` 注册（`PYTHONPATH` 指 `rkllm` 的父目录，
+   `RKLLM_MCP_CONFIG` 可省略——默认就是安装目录下的 `mcp.toml`）：
 
    ```json
    {
@@ -36,8 +38,7 @@ FastAPI 服务，两者互不混放。
          "command": "python",
          "args": ["-m", "rkllm.mcp"],
          "env": {
-           "PYTHONPATH": "C:/Users/<you>/.workbuddy/mcp-servers/rkllm-mcp",
-           "RKLLM_MCP_CONFIG": "C:/Users/<you>/.config/rkllm/mcp.toml"
+           "PYTHONPATH": "C:/Users/<you>/.workbuddy/mcp-servers/rkllm-mcp"
          }
        }
      }

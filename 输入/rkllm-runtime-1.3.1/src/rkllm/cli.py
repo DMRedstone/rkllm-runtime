@@ -458,7 +458,7 @@ def _cmd_config(args) -> int:
         return 0
     if args.action == "init":
         target = "client" if args.client else "board"
-        path = args.path or ("~/.config/rkllm/mcp.toml" if args.client
+        path = args.path or ("mcp.toml" if args.client
                              else "/etc/rkllm/rkllm.toml")
         path = os.path.expanduser(path)
         if os.path.exists(path) and not args.force:

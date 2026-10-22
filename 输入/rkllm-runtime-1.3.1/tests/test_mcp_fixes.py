@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -174,3 +175,9 @@ def test_job_cancelled_even_if_handler_ignores_flag():
     finally:
         server._control_pool.shutdown(wait=False)
         server._pool.shutdown(wait=False)
+
+
+def test_default_config_path_is_install_dir():
+    """配置文件默认放连接器安装目录（与 mcp.toml.example 同级）。"""
+    expected = Path(entry.__file__).resolve().parents[2] / "mcp.toml"
+    assert Path(entry.default_config_path()) == expected

@@ -1,14 +1,16 @@
 """rkllm-mcp 命令入口：纯环境变量可启动（WorkBuddy mcp.json 的 env 方式）。
 
 用法：
-  rkllm-mcp                       # stdio，读 RKLLM_ENDPOINT / RKLLM_API_KEY
+  rkllm-mcp                       # stdio，默认读 <安装目录>/mcp.toml
   rkllm-mcp --transport stdio     # 显式
   rkllm-mcp ask "把这段改成公文体"  # 排障 CLI，输出纯文本
 
-配置（mcp.toml / 环境变量）覆盖 80 键表的 [mcp] 组。与本进程相关的键都在
-default_cfg 里；其中 `enabled` / `transport` / `http_path` /
-`allow_remote_origin` 属于"模式选择"，在 main() 里判定——不实现的模式显式
-拒绝并说明，而不是静默按 stdio 跑。
+配置优先级：内置默认 < `<连接器安装目录>/mcp.toml` < RKLLM_* 环境变量
+（可用 RKLLM_MCP_CONFIG 显式覆盖配置文件路径）。配置文件与 `mcp.toml.example`
+同级，跟着连接器安装目录走，不放到注册文件或共享目录里。
+
+其中 `enabled` / `transport` / `http_path` / `allow_remote_origin` 属于"模式选择"，
+在 main() 里判定——不实现的模式显式拒绝并说明，而不是静默按 stdio 跑。
 """
 
 from __future__ import annotations
@@ -16,12 +18,22 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from .backend import BackendError, HttpBackend
 from .stdio import StdioServer
 
 DEFAULT_PROTOCOL_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18",
                              "2024-11-05")
+
+
+def default_config_path() -> str:
+    """连接器安装目录下的 mcp.toml（与 mcp.toml.example 同级）。
+
+    `rkllm/mcp/__main__.py` 的上两级就是安装根目录；repo 内则是
+    `本地模型连接器/mcp.toml`。配置跟着安装走，key 不进注册文件。
+    """
+    return str(Path(__file__).resolve().parents[2] / "mcp.toml")
 
 
 def default_cfg(endpoint: str, api_key: str) -> dict:
@@ -59,12 +71,11 @@ def default_cfg(endpoint: str, api_key: str) -> dict:
 
 
 def load_cfg() -> dict:
-    """环境变量 + 可选 TOML 覆盖。TOML 只覆盖已知键（未知键忽略）。"""
+    """环境变量 + 安装目录 mcp.toml 覆盖（TOML 只覆盖已知键）。"""
     endpoint = os.environ.get("RKLLM_ENDPOINT", "http://127.0.0.1:8080/v1")
     api_key = os.environ.get("RKLLM_API_KEY", "")
     cfg = default_cfg(endpoint, api_key)
-    toml_path = os.environ.get("RKLLM_MCP_CONFIG",
-                               os.path.expanduser("~/.config/rkllm/mcp.toml"))
+    toml_path = os.environ.get("RKLLM_MCP_CONFIG") or default_config_path()
     if os.path.isfile(toml_path):
         try:
             import tomllib
