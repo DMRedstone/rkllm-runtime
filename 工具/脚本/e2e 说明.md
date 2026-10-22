@@ -2,7 +2,7 @@
 
 ## 一、定位
 
-`e2e.sh` 是 `rsync-backup.sh` 的端到端场景测试（E1–E11，脚本内 1–13 节，101 项断言）：生成「仅配置不同」的被测副本，跑完整主流程，验证从启动自检到快照落盘的整条状态机。
+`e2e.sh` 是 `rsync-backup.sh` 的端到端场景测试（E1–E12，脚本内 1–13 节，101 项断言）：生成「仅配置不同」的被测副本，跑完整主流程，验证从启动自检到快照落盘的整条状态机。
 
 ## 二、运行方式
 
@@ -16,9 +16,10 @@ bash e2e.sh [FROM] [TO]    # 场景编号 1..13，默认 1..99 全量
 
 ## 三、测试机制
 
-- 副本生成：`gen_copy` 用 awk 对被测脚本做 1:1 行替换，只改配置区（`BACKUP_BASE`/`LOG`/`LOCK`/`SOURCES`/`REQUIRE_ROOT` 等），行数不变；附加 `sed` 覆盖指定键值。双重自证：副本与原件行数一致 + 函数区（144–705 行）逐字节一致——逻辑零改动，差异行只涉及配置区。
+- 副本生成：`gen_copy` 用 awk 对被测脚本做 1:1 行替换，只改配置区（`BACKUP_BASE`/`LOG`/`LOCK`/`SOURCES`/`REQUIRE_ROOT` 等），行数不变；附加 `sed` 覆盖指定键值。双重自证：副本与原件行数一致 + 函数区（按 `# 基础工具函数` 标记动态定位，非写死行号）逐字节一致——逻辑零改动，差异行只涉及配置区。
 
-- mock 注入：把 `bin/`（mock-rsync、mock-flock、mock-mountpoint）置 PATH 首位。本机 MSYS2 无真实 rsync/flock/mountpoint，正好覆盖脚本自身的回退分支（无 ionice 时退化为仅 nice）。
+- mock 注入：把 mock（mock-rsync、mock-flock、mock-mountpoint）复制到沙箱 `bin/` 并置 PATH 首位，注入后自证三者可执行。本机 MSYS2 无真实 rsync/flock/mountpoint，正好覆盖脚本自身的回退分支（无 ionice 时退化为仅 nice）。
+- 2026-10-22 前此处用 `ln -sf` 建软链，但 Git Bash 的 `ln -s` 会静默失败（exit 0 却不产生文件），导致 PATH 首位为空、被测副本报「缺少命令: rsync」而全量失败；已改为复制。
 
 - 沙箱：固定在 `/tmp/rsync-test-sb`（back/log/lock/src/bin）。注意用 MSYS 风格路径——MSYS bash 的 `command -v` 不解析 Windows 风格 PATH 项，否则启动自检误报「缺少命令」。
 
@@ -26,7 +27,7 @@ bash e2e.sh [FROM] [TO]    # 场景编号 1..13，默认 1..99 全量
 
 ## 四、覆盖场景
 
-- E1 首次完整备份：退出码 0、每源 1 份快照、argv 含 `-aHAX`/`--delete`/排除规则、首跑无 `--link-dest`、排除目录不落盘。
+- E1 首次完整备份：退出码 0、每源 1 份快照、argv 含 `-aHAX`/`--delete`/排除规则、首跑无 `--link-dest`、`.complete` 标记与文件完整性；同节内以 `E12.x` 编号验证排除规则落地（`.cache/`、`lost+found/`、`*.tmp` 均不落盘）。
 
 - E2 二次运行硬链接去重：未改动文件 nlink=2、两代同 inode、argv 出现 `--link-dest` 且指向上一代。
 
@@ -62,4 +63,4 @@ bash e2e.sh [FROM] [TO]    # 场景编号 1..13，默认 1..99 全量
 
 - mock rsync 只保证状态机与参数构造；真实传输语义（权限/ACL/xattr）需在 Linux 目标机验证。
 
-- 被测脚本函数区行号变动时，`gen_copy` 自证与函数区 diff 的行号需同步修改。
+- 函数区起点按 `# 基础工具函数` 标记动态定位，被测脚本增删函数不影响自证；但若该标记被删除或改名，脚本会 FATAL 退出，需同步恢复标记。
