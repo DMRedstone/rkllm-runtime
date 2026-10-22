@@ -1,0 +1,16 @@
+# ~/.config/rkllm/mcp.toml - rkllm-mcp 客户端配置
+# 优先级：内置默认 < 本文件 < RKLLM_* 环境变量
+# 完整键表：见板端 `rkllm config docs` 的 [mcp] 组
+
+[mcp]
+# 板端 OpenAI 兼容端点（也可用 RKLLM_ENDPOINT 环境变量）
+target_endpoint = "http://127.0.0.1:8080/v1"
+# 板端 server.api_key（留空表示板端未启用鉴权）
+target_api_key = ""
+# 单次 HTTP 读超时（秒）
+target_timeout_s = 120
+# 超过此秒数转 job；必须 < 60（客户端工具硬超时）
+task_threshold_s = 45
+# 工具结果与输入上限（字符）
+max_result_chars = 20000
+max_input_chars = 12000

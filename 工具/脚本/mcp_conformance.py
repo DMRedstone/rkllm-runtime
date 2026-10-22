@@ -34,7 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SRC = ROOT / "输入" / "rkllm-runtime-1.3.1" / "src"
+CONNECTOR = ROOT / "本地模型连接器"        # 客户端独立源码包（非服务端 src/）
 
 VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2024-11-05")
 TOOLS = ("ask", "chat", "extract", "batch", "status", "job")
@@ -113,7 +113,7 @@ def start_backend(delay: float = 0.0) -> tuple[ThreadingHTTPServer, int]:
 class Connector:
     def __init__(self, port: int, extra_env: dict | None = None):
         env = dict(os.environ)
-        env.update({"PYTHONPATH": str(SRC),
+        env.update({"PYTHONPATH": str(CONNECTOR),
                     # Windows 下子进程 stdio 默认是 ANSI（cp936），父进程按 UTF-8
                     # 读会 UnicodeDecodeError；显式钉死 UTF-8，跨平台行为一致。
                     "PYTHONIOENCODING": "utf-8",

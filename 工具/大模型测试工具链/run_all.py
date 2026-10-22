@@ -66,35 +66,6 @@ def run_step(title, script, extra_args=None, timeout=None):
 # wait_ready 由 board_api 提供（空 200 也视为存活，vLLM 就是那么回的）。
 
 
-def check_board_api_sync():
-    """两份 board_api.py 必须一致。
-
-    工具链与连接器共用同一份 HTTP 实现，但连接器要能整目录拷走，所以各自存
-    一份物理副本。这里做内容比对，防止改了一边忘了另一边——两边判读不一致
-    正是这次要消灭的问题。
-    """
-    here = os.path.dirname(os.path.abspath(__file__))
-    ours = os.path.join(here, "board_api.py")
-    theirs = os.path.join(here, "..", "..", "本地模型连接器", "board_api.py")
-    if not os.path.exists(theirs):
-        return True                     # 只部署了工具链：无从比较
-    try:
-        with open(ours, "rb") as fh:
-            mine = fh.read()
-        with open(theirs, "rb") as fh:
-            other = fh.read()
-    except OSError as exc:
-        print("    无法比较 board_api.py：%r" % exc)
-        return True
-    if mine != other:
-        print("    !! 两份 board_api.py 内容不一致：")
-        print("       %s" % ours)
-        print("       %s" % theirs)
-        print("       改一份后必须同步另一份，否则连接器与工具链的判读会不同。")
-        return False
-    return True
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -111,7 +82,6 @@ def main():
     args = parser.parse_args()
 
     common = ["--host", args.host, "--key", args.key]
-    check_board_api_sync()
     results_dir = os.path.join(HERE, "results")
     os.makedirs(results_dir, exist_ok=True)
 

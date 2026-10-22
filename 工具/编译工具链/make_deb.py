@@ -79,8 +79,8 @@ DEPEND_TEMPLATE = ("libc6 (>= 2.29), libgomp1, libstdc++6, "
 # The API server unit keeps a fixed name independent of --package so that
 # operators always find it under the same name.
 SERVER_UNIT = "rkllm-server.service"
-# New-stack python sources. The MCP client is installed from this same tree as
-# plain .py files (no packaging step, no wheel) - single implementation.
+# New-stack python sources (server only). The MCP connector is client-side
+# source kept in the repo root 本地模型连接器/ and is NOT packaged into the deb.
 SRC_TREE = ROOT.parent / "输入" / "rkllm-runtime-1.3.1" / "src" / "rkllm"
 # The service configuration is a dpkg conffile: dpkg keeps local edits across an
 # upgrade instead of overwriting them with the shipped template. Its text is
@@ -454,8 +454,8 @@ def stage(ctx: BuildContext, source_tarball: Path) -> tuple[list[Shipped], dict]
     # --- service stack (2026-10-21, apt route) ------------------------------
     # Sources ship as plain .py under /usr/lib/rkllm/current: small tree, the
     # board operator can read the installed file, and dpkg upgrade/rollback
-    # semantics stay untouched. The MCP client is installed from this same
-    # tree as plain .py files - single implementation, no second artifact.
+    # semantics stay untouched. The MCP connector is client-side source
+    # (repo root 本地模型连接器/) and is deliberately not part of this deb.
     #
     # 注意：只有一套入口。/usr/bin/rkllm 是 launcher（把本目录挂进 sys.path
     # 后调 rkllm.cli），"serve" 子命令在本目录内实现；systemd 单元仍是
@@ -467,7 +467,7 @@ def stage(ctx: BuildContext, source_tarball: Path) -> tuple[list[Shipped], dict]
             continue
         rel = path.relative_to(SRC_TREE).as_posix()
         add(f"{new_pkg}/{rel}", path.read_bytes(), FILE_MODE,
-            f"src/rkllm/{rel}", "新栈模块树(FastAPI 服务端/worker/agent/mcp)")
+            f"src/rkllm/{rel}", "新栈模块树(FastAPI 服务端/worker/agent)")
 
     items = sorted(files.values(), key=lambda f: f.dest)
     return items, {"dropped": classifier.dropped, "dropped_bytes": classifier.dropped_bytes}

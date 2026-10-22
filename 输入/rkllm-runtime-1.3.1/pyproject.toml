@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rkllm-runtime"
 version = "1.4.0.dev0"
-description = "RKLLM board-side model service (OpenAI subset + MCP connector)"
+description = "RKLLM board-side model service (OpenAI subset)"
 requires-python = ">=3.13"
 license = { text = "MIT" }
 

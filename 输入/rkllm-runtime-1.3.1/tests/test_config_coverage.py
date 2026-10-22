@@ -24,6 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from rkllm.config import SCHEMA  # noqa: E402
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "rkllm"
+# MCP 连接器已移到根目录独立源码包（客户端交付），配置读取点在那边
+CONNECTOR_MCP = (Path(__file__).resolve().parents[3]
+                 / "本地模型连接器" / "rkllm" / "mcp")
 
 
 def _corpus(*dirs: str) -> str:
@@ -32,6 +35,13 @@ def _corpus(*dirs: str) -> str:
         base = SRC if d == "." else SRC / d
         files.extend(p for p in base.rglob("*.py") if p.name != "config.py")
     return "\n".join(p.read_text(encoding="utf-8") for p in files)
+
+
+def _connector_corpus() -> str:
+    if not CONNECTOR_MCP.is_dir():
+        return ""
+    return "\n".join(p.read_text(encoding="utf-8")
+                     for p in CONNECTOR_MCP.rglob("*.py"))
 
 
 def _has_reader(key, whole: str, scoped: str) -> bool:
@@ -52,7 +62,7 @@ def _has_reader(key, whole: str, scoped: str) -> bool:
 
 def test_every_key_has_a_reader():
     whole = _corpus(".")
-    mcp_scope = _corpus("mcp")
+    mcp_scope = _connector_corpus()
     missing = [k.full for k in SCHEMA if not _has_reader(k, whole, mcp_scope)]
     assert missing == [], "配置键没有读取点（键表承诺了却不生效）：%s" % missing
 
