@@ -32,9 +32,10 @@ def test_schema_rejects_bad_temperature():
 
 
 def test_schema_rejects_extra_fields():
+    # caps 声明过的参数（如 modalities）先接受再交给策略；真正未知的字段仍拒绝
     with pytest.raises(Exception):
         ChatCompletionRequest(messages=[{"role": "user", "content": "x"}],
-                              modalities=["audio"])
+                              totally_unknown_field=True)
 
 
 def test_caps_reject_and_warn_paths():

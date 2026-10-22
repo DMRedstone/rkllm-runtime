@@ -31,7 +31,20 @@ class ChatCompletionRequest(BaseModel):
     response_format: dict | None = None
     reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
     enable_thinking: bool | None = None
-    # ignored 档（caps 剥离后进不了这里，此处仅为文档可见性）
+    # ignored 档：必须能进 schema，才能被 caps 剥离；否则 pydantic 先 422，
+    # 与「新 SDK 默认字段不能打挂服务」的 caps 口径矛盾（DSH 发送 store 即中招）。
+    user: str | None = None
+    metadata: dict | None = None
+    store: bool | None = None
+    service_tier: str | None = None
+    verbosity: str | None = None
+    # unsupported 档：同样先接受，交给 caps 按 param_policy 返回 400/警告
+    top_logprobs: int | None = None
+    logit_bias: dict | None = None
+    modalities: list[str] | None = None
+    audio: dict | None = None
+    prediction: dict | None = None
+    # ignored 档（caps 剥离后进不了业务逻辑）
     n: int | None = None
     seed: int | None = None
     logprobs: bool | None = None
@@ -57,6 +70,14 @@ class CompletionRequest(BaseModel):
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
     stop: str | list[str] | None = None
+    # 与 chat 同一套 ignored/unsupported 兼容字段
+    user: str | None = None
+    metadata: dict | None = None
+    store: bool | None = None
+    service_tier: str | None = None
+    verbosity: str | None = None
+    logit_bias: dict | None = None
+    prediction: dict | None = None
 
     model_config = {"extra": "forbid"}
 
