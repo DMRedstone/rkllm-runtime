@@ -61,6 +61,8 @@ def default_cfg(endpoint: str, api_key: str) -> dict:
         "progress_interval_s": 5,
         "extract_retries": 2,
         "session_max_messages": 0,       # 0=不限制；>0 时裁剪会话历史
+        "session_max_count": 256,        # 保留的会话数上限
+        "session_ttl_s": 1800,           # 会话空闲过期（秒）；0=不过期
         # -- 目标 ----------------------------------------------------------
         "target_timeout_s": 120,
         "target_endpoint": endpoint,

@@ -11,17 +11,10 @@
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from typing import Any, Iterator
 
 __all__ = ["ToolCallParser", "PARSERS", "build_tools_prefix", "detect_parser"]
-
-_CALL_RE = {
-    "qwen": re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S),
-    "hermes": re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S),
-    "deepseek": re.compile(r"<\|tool▁calls▁begin\|>.*?<\|tool▁call▁begin\|>.*?function<\|tool▁sep\|>(\{.*?\})<\|tool▁call▁end\|>", re.S),
-}
 
 # 提示词前缀（设计 §6.4(1)；按 parser 家族微调闭合标记）
 _TOOLS_PREFIX = (

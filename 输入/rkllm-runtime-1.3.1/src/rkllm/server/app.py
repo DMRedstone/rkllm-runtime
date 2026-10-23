@@ -1,20 +1,23 @@
 """FastAPI 组装 + 优雅退出（改造设计 §6.2 / D11）。
 
-中间件实际顺序（**由外到内**）：CORS → 根路径改写 → 请求体上限 → 鉴权。
+中间件实际顺序（**由外到内**）：
+request_id → CORS → 根路径改写 → 请求体上限 → 鉴权。
 
 注意方向：`app.middleware("http")` 内部是 `add_middleware`，而它是
-`insert(0)`——**后注册的在更外层**，所以执行顺序与本文件里注册的顺序相反。
+`insert(0)`——**后注册的在更外层**，所以执行顺序与本文件里注册的顺序相反
+（本文件注册顺序：鉴权 → 体限 → 根路径改写 → CORS → request_id）。
 
-1. CORS（最后注册，最外层）：OPTIONS 预检必须在鉴权之前放行——浏览器的
-   预检请求不带 Authorization，若被鉴权拦下，跨域客户端整体不可用；
-2. 根路径改写 root_alias：把 `/chat/completions` 等精确路径改写到 `/v1`，
+1. request_id（最后注册，最外层）：生成/透传请求 id，预检与被拒请求也有 id；
+2. CORS：OPTIONS 预检必须在鉴权之前放行——浏览器的预检请求不带
+   Authorization，若被鉴权拦下，跨域客户端整体不可用；
+3. 根路径改写 root_alias：把 `/chat/completions` 等精确路径改写到 `/v1`，
    后续鉴权与路由都看改写后的路径；
-3. 请求体上限（server.max_body_bytes）：含 chunked 的流式计数；
-4. 鉴权（N4，最内层）：默认拒绝，仅 `/ready` 豁免；api_key 为空时不启用。
+4. 请求体上限（server.max_body_bytes）：含 chunked 的流式计数；
+5. 鉴权（N4，最内层）：默认拒绝，仅 `/ready` 豁免；api_key 为空时不启用。
 
 取舍：体限在鉴权外层，未授权的超大 body 会先拿到 413 而不是 401。这是既有
 顺序的代价（把体限挪到鉴权内层需连同 root_alias 一起重排，而 CORS 必须
-留在最外层不能被挤动）。
+留在鉴权之外以保证预检放行）。
 
 运维端点 /metrics 的路径与开关来自 metrics.enabled / metrics.path。
 """
@@ -42,7 +45,7 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
     app.state.svc = svc
 
     if cfg is not None and svc is not None:
-        # -- 鉴权（最外层）--------------------------------------------------
+        # -- 鉴权（最内层）--------------------------------------------------
         auth = make_auth_middleware(cfg)
         if auth is not None:
             app.middleware("http")(auth)

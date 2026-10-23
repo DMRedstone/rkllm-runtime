@@ -181,3 +181,31 @@ def test_default_config_path_is_install_dir():
     """配置文件默认放连接器安装目录（与 mcp.toml.example 同级）。"""
     expected = Path(entry.__file__).resolve().parents[2] / "mcp.toml"
     assert Path(entry.default_config_path()) == expected
+
+
+def test_chat_session_expires_after_ttl():
+    """P2：空闲超过 session_ttl_s 的会话必须被剔除，不再带入上下文。"""
+    backend = _Backend()
+    handlers = build_handlers(backend, _cfg(session_ttl_s=0.05), JobTable(),
+                              sessions={}, sessions_lock=threading.Lock())
+    handlers["chat"]({"messages": [{"role": "user", "content": "第一问"}],
+                      "session": "s1"})
+    assert "第一问" in [m["content"] for m in backend.calls[-1]]
+    time.sleep(0.12)                     # 超过 TTL
+    handlers["chat"]({"messages": [{"role": "user", "content": "第二问"}],
+                      "session": "s1"})
+    last = [m["content"] for m in backend.calls[-1]]
+    assert "第一问" not in last, "过期会话仍被带入上下文"
+    assert "第二问" in last
+
+
+def test_batch_truncates_segment_count_as_valid_json():
+    """P2：段数超限不再 raise，改为合法 JSON 截断（truncated/total/processed）。"""
+    backend = _Backend()
+    handlers = build_handlers(backend, _cfg(batch_max_segments=2), JobTable())
+    result = handlers["batch"]({"segments": ["a", "b", "c", "d"]})
+    payload = json.loads(result["content"][0]["text"])   # 必须是合法 JSON
+    assert payload["truncated"] is True
+    assert payload["total"] == 4
+    assert payload["processed"] == 2
+    assert payload["results"] == ["回答", "回答"]

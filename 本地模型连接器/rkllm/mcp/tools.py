@@ -10,12 +10,14 @@
 - 所有 handler 接受 `should_cancel`（由 stdio 传入 job/取消标志），贯通到
   `Backend.chat(cancel_check=...)`——此前形参存在但无人传，取消永不生效；
 - `batch` 单段异常隔离（F8：单段失败不中断整批，返回等长数组）；
-- `extract` 增加 JSON Schema 校验（F6：提示 + 校验 + 重试，非受约束解码）。
+- `extract` 增加 JSON Schema 校验（F6：提示 + 校验 + 重试，非受约束解码）；
+- 会话空闲 TTL 剔除、batch 段数超限改为合法 JSON 截断（P2 收尾）。
 """
 from __future__ import annotations
 
 import json
 import threading
+import time
 from typing import Any, Callable
 
 from ..agent.json_schema import validate as validate_schema
@@ -173,6 +175,22 @@ def build_handlers(backend, cfg: dict, jobs, *,
     max_session_messages = int(cfg.get("session_max_messages", 20))
     session_locks: dict[str, threading.Lock] = {}
     max_sessions = int(cfg.get("session_max_count", 256) or 256)
+    # P2：会话空闲 TTL（秒），0=不过期。陈旧会话不回收会持续占用内存/上下文。
+    session_ttl_s = float(cfg.get("session_ttl_s", 0) or 0)
+    session_seen: dict[str, float] = {}
+
+    def _purge_expired_locked() -> None:
+        """剔除空闲超过 TTL 的会话（调用方须已持有 session_lock）。"""
+        if session_ttl_s <= 0:
+            return
+        now = time.monotonic()
+        for name, seen in list(session_seen.items()):
+            if now - seen > session_ttl_s:
+                session_store.pop(name, None)
+                session_seen.pop(name, None)
+        # 外部注入但无时间戳的会话按当前时刻补记，避免永不清理
+        for name in session_store:
+            session_seen.setdefault(name, now)
 
     def _session_lock(name: str) -> "threading.Lock":
         """同一 session 的读→推理→写回必须串行，否则并发丢上下文（P2）。"""
@@ -265,6 +283,7 @@ def build_handlers(backend, cfg: dict, jobs, *,
         # 各自读到同一历史、互相覆盖，丢一轮上下文。不同 session 互不阻塞。
         with _session_lock(session):
             with session_lock:
+                _purge_expired_locked()
                 history = list(session_store.get(session, []))
             base = history + clean
             out = _ask(base)
@@ -273,12 +292,15 @@ def build_handlers(backend, cfg: dict, jobs, *,
                 if (session not in session_store
                         and len(session_store) >= max_sessions):
                     try:
-                        session_store.pop(next(iter(session_store)))
+                        evicted = next(iter(session_store))
+                        session_store.pop(evicted)
+                        session_seen.pop(evicted, None)
                     except (StopIteration, KeyError):
                         pass
                 session_store[session] = (
                     base + [{"role": "assistant", "content": out["text"]}]
                 )[-max_session_messages:]
+                session_seen[session] = time.monotonic()
         return {"content": [{"type": "text", "text": _clip_result(out["text"])}]}
 
     _try_json = _extract_json        # 保持内层调用点不变
@@ -321,13 +343,17 @@ def build_handlers(backend, cfg: dict, jobs, *,
         segments = params.get("segments") or []
         if not isinstance(segments, list) or not segments:
             raise ValueError("segments 不能为空")
-        if len(segments) > cfg["batch_max_segments"]:
-            raise ValueError("segments 超过上限 %d" % cfg["batch_max_segments"])
+        # P2：段数超限不再 raise（上游未必捕获，可能破坏 JSON-RPC 帧），
+        # 改为只处理前 batch_max_segments 段，并按合法 JSON 标记 truncated。
+        max_segments = int(cfg["batch_max_segments"])
+        total_segments = len(segments)
+        truncated = total_segments > max_segments
+        work = segments[:max_segments] if truncated else segments
         mode = params.get("mode")
         system = str(params.get("system", ""))
         results: list[Any] = []
         check = _as_check(should_cancel)
-        for seg in segments:
+        for seg in work:
             if check is not None and check():
                 results.append({"error": "cancelled"})
                 continue
@@ -349,13 +375,18 @@ def build_handlers(backend, cfg: dict, jobs, *,
         # truncated 标记的合法 JSON，并尽量保留能放下的完整结果项。
         payload = json.dumps(results, ensure_ascii=False)
         limit = int(cfg.get("max_result_chars", 20000))
+        kept = results
         if len(payload) > limit:
-            kept: list[Any] = []
+            truncated = True
+            kept = []
             for item in results:
                 if len(json.dumps(kept + [item], ensure_ascii=False)) > limit:
                     break
                 kept.append(item)
-            payload = json.dumps({"truncated": True, "total": len(results),
+        if truncated:
+            payload = json.dumps({"truncated": True,
+                                  "total": total_segments,
+                                  "processed": len(results),
                                   "results": kept}, ensure_ascii=False)
         return {"content": [{"type": "text", "text": payload}]}
 
