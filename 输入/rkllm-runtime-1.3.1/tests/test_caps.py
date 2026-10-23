@@ -28,9 +28,11 @@ def test_param_tier():
 
 
 def test_check_reject_semantic_key_even_in_warn():
-    # tool_choice 是声明为恒 reject 的语义关键项：必须真的拦（审计 P2-8）
+    # P1-15：auto/none 无强制语义须放行（新 SDK 默认发 auto）；强制模式仍 reject
     reject, warn = check_request_params({"tool_choice": "auto"}, policy="warn")
-    assert reject == ["tool_choice"] and not warn
+    assert not reject and not warn
+    reject, _ = check_request_params({"tool_choice": "required"}, policy="warn")
+    assert reject == ["tool_choice"]
     # json_schema：非流式是 emulated（提示+校验+重试），放行
     reject, _ = check_request_params(
         {"response_format": {"type": "json_schema"}}, policy="warn")

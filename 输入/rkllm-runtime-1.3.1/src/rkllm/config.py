@@ -315,6 +315,9 @@ def _coerce(key: Key, raw: Any, origin: str, errors: list[str]) -> Any:
             if isinstance(raw, bool):
                 raise ValueError("需为数值")
             val = float(raw)
+            # P1-5：NaN/Inf 会绕过 min/max（nan<x 恒为 False），显式拒绝
+            if val != val or val in (float("inf"), float("-inf")):
+                raise ValueError("需为有限数值（不接受 NaN/Inf）")
             if key.min_v is not None and val < key.min_v:
                 raise ValueError(f"需 ≥ {key.min_v}")
             if key.max_v is not None and val > key.max_v:

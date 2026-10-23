@@ -71,7 +71,13 @@ class HttpBackend:
         usage = None
         finish_reason = "stop"
         try:
+            import time as _time
+            _start = _time.monotonic()
             for raw in resp:
+                # P2：urlopen(timeout=) 只是单次 socket 超时；慢速滴流可无限挂住
+                # ——这里加总 deadline 兜底（finally 负责 close）。
+                if _time.monotonic() - _start > self.timeout_s:
+                    raise BackendError("板端响应超过总超时 %ss" % self.timeout_s)
                 line = raw.decode("utf-8", "replace").strip()
                 if not line.startswith("data:"):
                     continue
@@ -99,6 +105,11 @@ class HttpBackend:
                     except OSError:
                         pass
                     raise BackendError("任务已取消", kind="cancelled")
+                err = chunk.get("error")
+                if err:
+                    # P2：板端中途错误的帧没有 choices，旧逻辑会静默吞成假成功
+                    msg = err.get("message") if isinstance(err, dict) else err
+                    raise BackendError("板端流中错误：%s" % str(msg)[:200])
                 choices = chunk.get("choices") or [{}]
                 choice = choices[0]
                 if choice.get("finish_reason"):

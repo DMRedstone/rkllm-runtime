@@ -31,24 +31,31 @@ def _cache_stats(cfg) -> dict:
         return {"enabled": False, "hits": 0, "misses": 0, "bytes": 0}
     directory = cfg.cache.dir
     stats = {"enabled": True, "hits": 0, "misses": 0, "bytes": 0}
+    bytes_from_stats = None
     try:
         with open(os.path.join(directory, "stats.json"), "r",
                   encoding="utf-8") as fh:
             data = json.load(fh)
         stats["hits"] = int(data.get("hits", 0))
         stats["misses"] = int(data.get("misses", 0))
+        if "bytes" in data:
+            bytes_from_stats = int(data["bytes"])
     except (OSError, ValueError):
         pass
-    total = 0
-    try:
-        for name in os.listdir(directory):
-            try:
-                total += os.path.getsize(os.path.join(directory, name))
-            except OSError:
-                continue
-    except OSError:
-        pass
-    stats["bytes"] = total
+    if bytes_from_stats is not None:
+        # 效率：worker 已把 bytes 落盘，避免每次 /metrics 都 listdir+逐文件 getsize
+        stats["bytes"] = bytes_from_stats
+    else:
+        total = 0
+        try:
+            for name in os.listdir(directory):
+                try:
+                    total += os.path.getsize(os.path.join(directory, name))
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        stats["bytes"] = total
     return stats
 
 

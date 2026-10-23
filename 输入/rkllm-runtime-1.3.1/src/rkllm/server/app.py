@@ -105,6 +105,20 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
                         {"error": {"type": "invalid_request_error",
                                    "message": "invalid Content-Length"}},
                         status_code=400)
+            elif request.method in ("POST", "PUT", "PATCH"):
+                # P2：chunked / 无 Content-Length 时旧逻辑直接放行，可绕过上限。
+                # 这里流式读入并计数字节，超限即 413；并把已读 body 缓存下来，
+                # 供下游 FastAPI 解析（设置 _body 后 body() 直接返回缓存）。
+                body = bytearray()
+                async for chunk in request.stream():
+                    body.extend(chunk)
+                    if len(body) > max_body:
+                        return JSONResponse(
+                            {"error": {"type": "invalid_request_error",
+                                       "message": "request body exceeds %d bytes"
+                                                  % max_body}},
+                            status_code=413)
+                request._body = bytes(body)
             return await call_next(request)
 
         app.middleware("http")(body_limit)
@@ -197,6 +211,7 @@ def _render_metrics(request: Request) -> str:
     from .routes.ops import _cache_stats      # 与 /health 共用同一份统计
     m = svc.queue.metrics
     sup = svc.supervisor.metrics if svc.supervisor else {}
+    cache = _cache_stats(svc.cfg)          # 只读一次，避免 /metrics 双次统计
     lines = [
         "# TYPE rkllm_requests_total counter",
         "rkllm_requests_total %d" % m["requests_total"],
@@ -211,9 +226,9 @@ def _render_metrics(request: Request) -> str:
         "# TYPE rkllm_worker_restarts_total counter",
         "rkllm_worker_restarts_total %d" % sup.get("worker_restarts_total", 0),
         "# TYPE rkllm_cache_hits_total counter",
-        "rkllm_cache_hits_total %d" % _cache_stats(svc.cfg)["hits"],
+        "rkllm_cache_hits_total %d" % cache["hits"],
         "# TYPE rkllm_cache_bytes gauge",
-        "rkllm_cache_bytes %d" % _cache_stats(svc.cfg)["bytes"],
+        "rkllm_cache_bytes %d" % cache["bytes"],
         "# TYPE rkllm_worker_state gauge",
         'rkllm_worker_state{state="%s"} 1' % (
             svc.supervisor.state if svc.supervisor else "none"),

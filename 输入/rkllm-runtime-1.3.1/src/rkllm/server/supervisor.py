@@ -80,6 +80,11 @@ class WorkerClient:
             if not frame:
                 raise WorkerDown("worker closed connection")
             op = frame.get("op")
+            fid = frame.get("id")
+            # P1-9：单 socket FIFO 上可能残留上一请求的帧；只处理本请求的帧，
+            # 否则会把残留 end 当成当前请求完成而立即返回空响应。
+            if fid is not None and fid != req_id:
+                continue
             if op == "token":
                 yield frame["text"]
             elif op == "end":
@@ -110,10 +115,12 @@ class Supervisor:
     def __init__(self, worker_args: list[str], *, transport: str = "auto",
                  load_timeout_s: int = 300, restart_backoff_s: int = 5,
                  restart_backoff_max_s: int = 120, restart_max_per_hour: int = 3,
-                 health_interval_s: int = 10):
+                 health_interval_s: int = 10, request_timeout_s: int = 900):
         self.worker_args = worker_args
         self.transport = transport        # auto | unix | tcp
         self.load_timeout_s = load_timeout_s
+        # P1-10：推理期 socket 读超时与加载超时解耦（加载 300s，请求 900s）
+        self.request_timeout_s = request_timeout_s
         self.backoff_s = restart_backoff_s
         self.backoff_max_s = restart_backoff_max_s
         self.restart_max_per_hour = restart_max_per_hour
@@ -196,8 +203,16 @@ class Supervisor:
         self._client = WorkerClient(conn)
         # ready 帧从 UDS 连接收：read_frame 自带帧长上限校验，C 库日志再也无法
         # 伪装成协议帧。
-        ready = read_frame(self._client._rfile)
+        try:
+            ready = read_frame(self._client._rfile)
+        except (FrameError, OSError, ValueError) as exc:
+            # P2：就绪帧失败路径必须关闭连接，否则 fd 泄漏、重试时放大
+            self._client.close()
+            self._client = None
+            raise WorkerDown("worker ready frame failed: %s" % exc)
         if ready.get("op") != "ready":
+            self._client.close()
+            self._client = None
             raise WorkerDown("worker sent %r instead of ready" % ready)
         if ready.get("lib_sha256"):
             self.lib_fingerprint = {
@@ -206,6 +221,9 @@ class Supervisor:
                 "path": ready.get("lib_path"),
             }
         self.state = "ready"
+        # P1-10：加载完成，把读超时从 load_timeout 提升到请求超时，避免长 prefill
+        # （>300s 但 <900s 的合法请求）被误判 WorkerDown 而触发重启 + 503。
+        conn.settimeout(self.request_timeout_s)
 
     def _drain(self, which: str) -> None:
         """后台线程持续排空 worker 的 stdout/stderr（C 库日志），防管道死锁。
@@ -233,6 +251,29 @@ class Supervisor:
         """WorkerDown 时替代原来的 stderr.read()（那个会再次死锁）。"""
         return "".join(getattr(self, "_stderr_tail_buf", []))[-limit:]
 
+    def _start_health(self) -> None:
+        """P2：健康监测线程——消费 health_interval_s / _health_stop。
+
+        定期检查 worker 进程是否已死；发现后置 state=error，让下一次请求触发
+        自愈重启（此前这两个配置项定义了却无人消费）。
+        """
+        if getattr(self, "_health_thread", None) is not None:
+            return
+
+        def _loop() -> None:
+            while not self._health_stop.wait(max(1, self.health_interval_s)):
+                try:
+                    proc = self._proc
+                    if (self.state == "ready" and proc is not None
+                            and proc.poll() is not None):
+                        self.state = "error"
+                except Exception:
+                    pass
+
+        self._health_thread = threading.Thread(
+            target=_loop, daemon=True, name="rkllm-health")
+        self._health_thread.start()
+
     def start(self) -> None:
         with self._lock:
             try:
@@ -240,6 +281,7 @@ class Supervisor:
             except WorkerDown:
                 self.state = "error"
                 raise
+            self._start_health()
 
     def restart(self) -> None:
         """指数退避重启；超过每小时上限停止自愈（DoD：120 s 内恢复）。"""
@@ -252,7 +294,17 @@ class Supervisor:
         if self._client:
             self._client.close()
         if self._proc and self._proc.poll() is None:
-            self._proc.terminate()
+            # P1-8：terminate 后必须 wait，否则旧 worker 卡在 C 调用时会与新 worker
+            # 并存并争抢同一 NPU，且已 terminate 的进程成僵尸；超时则 kill 再 wait。
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
         delay = self._current_backoff
         self._current_backoff = min(self._current_backoff * 2, self.backoff_max_s)
         time.sleep(delay)
@@ -323,6 +375,9 @@ class LocalSupervisor:
     def __init__(self, engine, *, load_timeout_s: int = 300):
         self.engine = engine
         self.load_timeout_s = load_timeout_s
+        # P1-12：与 Supervisor 接口对齐，避免 shutdown() 引用不存在的属性而
+        # 在 engine.destroy() 之前 AttributeError 崩溃。
+        self._health_stop = threading.Event()
         self.state = "ready"          # 引擎在构造时就已加载完成
         self.metrics = {"worker_restarts_total": 0}
         self.lib_fingerprint = getattr(engine, "lib_fingerprint", None)

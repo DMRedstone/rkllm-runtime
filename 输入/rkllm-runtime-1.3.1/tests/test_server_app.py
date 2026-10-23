@@ -178,11 +178,16 @@ def test_chat_rejects_unsupported_param(client):
         "messages": [{"role": "user", "content": "x"}], "logprobs": True})
     assert r.status_code == 200
     assert r.headers.get("x-rkllm-unsupported") == "logprobs"
+    # P1-15：auto 无强制语义放行；强制模式（required）仍 400
     r2 = client.post("/v1/chat/completions", json={
         "messages": [{"role": "user", "content": "x"}],
         "tool_choice": "auto"})
-    assert r2.status_code == 400
-    assert r2.json()["error"]["code"] == "unsupported_parameter"
+    assert r2.status_code == 200
+    r3 = client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "x"}],
+        "tool_choice": "required"})
+    assert r3.status_code == 400
+    assert r3.json()["error"]["code"] == "unsupported_parameter"
 
 
 def test_chat_json_schema_non_stream_is_emulated():

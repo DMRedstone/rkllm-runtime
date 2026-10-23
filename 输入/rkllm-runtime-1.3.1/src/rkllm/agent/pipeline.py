@@ -26,8 +26,18 @@ class Pipeline:
         self.body = body
         self.chat = chat
         self.max_tokens = int(body.get("max_tokens") or 0) or None
+        # P1-14：reasoning_effort 真正接线——非 none 即开启思考（runtime 只有
+        # enable_thinking 布尔开关）；显式 enable_thinking 存在时优先。
+        _re = body.get("reasoning_effort")
         enable_thinking = bool(body.get("enable_thinking", False))
+        if _re is not None:
+            enable_thinking = (_re != "none")
+        self._enable_thinking = enable_thinking
         self._splitter = ReasoningSplitter(enabled=enable_thinking)
+        # P1-14：stop 序列真正接线（流式截断 + 命中 abort，见 _emit_text）
+        self._stop = self._norm_stop(body.get("stop"))
+        self._stop_hit = False
+        self._stopbuf = ""
         tools = body.get("tools") or None
         # tools_mode 只影响"是否把工具注入提示词"；native 已在 app 层降级为 prompt
         if tools and getattr(svc, "tools_mode", "prompt") == "off":
@@ -77,8 +87,7 @@ class Pipeline:
         import time as _time
         _t0 = _time.monotonic()
         stream = self.svc.supervisor.execute(
-            self._prompt, enable_thinking=bool(
-                self.body.get("enable_thinking", False)),
+            self._prompt, enable_thinking=self._enable_thinking,
             max_new_tokens=self.max_tokens,
             sampling=self.sampling(),
             # 多轮对话才值得写前缀缓存（单轮存了不会命中）
@@ -91,6 +100,13 @@ class Pipeline:
                 # TTFT 打点：supervisor 层返回首个 token 的耗时（N3 定位用）
                 self.svc.ttft_log(_time.monotonic() - _t0)
             yield from self._consume(token)
+            if self._stop_hit:
+                # stop 命中即终止生成并释放 NPU（不是丢弃后续 token 继续转）
+                try:
+                    self.svc.supervisor.abort()
+                except Exception:
+                    pass
+                break
         yield from self.drain()
 
     def sampling(self) -> dict | None:
@@ -108,24 +124,71 @@ class Pipeline:
                 merged[key] = value
         return merged or None
 
+    @staticmethod
+    def _norm_stop(stop) -> list[str]:
+        if stop is None:
+            return []
+        if isinstance(stop, str):
+            return [stop] if stop else []
+        return [s for s in stop if isinstance(s, str) and s]
+
+    def _emit_text(self, text: str, flush: bool = False) -> Iterator[str]:
+        """P1-14：真实 stop 序列处理。命中则截断并置 _stop_hit；未命中保留可能
+        构成 stop 前缀的尾巴，以捕获跨 chunk 的序列；flush=True 输出全部残留。"""
+        if self._stop_hit:
+            return
+        if not self._stop:
+            if text:
+                yield text
+            return
+        self._stopbuf += text
+        hit = None
+        for s in self._stop:
+            idx = self._stopbuf.find(s)
+            if idx >= 0 and (hit is None or idx < hit[0]):
+                hit = (idx, len(s))
+        if hit is not None:
+            emit = self._stopbuf[:hit[0]]
+            self._stopbuf = ""
+            self._stop_hit = True
+            if emit:
+                yield emit
+            return
+        if flush:
+            emit = self._stopbuf
+            self._stopbuf = ""
+            if emit:
+                yield emit
+            return
+        keep = 0
+        for s in self._stop:
+            for k in range(min(len(s) - 1, len(self._stopbuf)), 0, -1):
+                if self._stopbuf.endswith(s[:k]):
+                    keep = max(keep, k)
+                    break
+        if keep:
+            emit, self._stopbuf = self._stopbuf[:-keep], self._stopbuf[-keep:]
+        else:
+            emit, self._stopbuf = self._stopbuf, ""
+        if emit:
+            yield emit
+
     def _consume(self, token: str) -> Iterator[str | dict]:
         reasoning, content = self._splitter.feed(token)
         if reasoning:
             self._reasoning.append(reasoning)
         if content:
             yield from self._route_content(content)
-        else:
-            pass
 
     def _route_content(self, text: str) -> Iterator[str | dict]:
         if self._parser is None:
             self._content_before.append(text)
-            yield text
+            yield from self._emit_text(text)
             return
         for kind, payload in self._parser.feed(text):
             if kind == "content":
                 self._content_before.append(payload)
-                yield payload
+                yield from self._emit_text(payload)
             else:
                 yield {"tool_call": payload}
 
@@ -140,13 +203,15 @@ class Pipeline:
             for kind, payload in self._parser.finish():
                 if kind == "content":
                     self._content_before.append(payload)
-                    yield payload
+                    yield from self._emit_text(payload)
             calls = self._parser.tool_calls()
             if calls:
                 self._tool_calls = calls
                 yield {"tool_calls": calls}
             if self._parser.parse_failed:
                 yield {"parse_error": True}
+        # 输出可能被 stop 前缀判断扣住的尾巴
+        yield from self._emit_text("", flush=True)
 
     # -- 收尾视图 ------------------------------------------------------------
 
@@ -159,9 +224,9 @@ class Pipeline:
 
     def usage(self, result: dict | None = None) -> dict:
         text = "".join(self._content_before)
+        reasoning_chars = len("".join(self._reasoning))
         usage = {"prompt_tokens": max(1, len(self._prompt) // 2),
-                 "completion_tokens": max(1, (len(text) + len(self._reasoning)
-                                              and len(text)) // 2 or 1),
+                 "completion_tokens": max(1, (len(text) + reasoning_chars) // 2),
                  "total_tokens": 0}
         usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
         usage["estimated"] = True      # 无 tokenizer：估算并标注（设计 §4.3）

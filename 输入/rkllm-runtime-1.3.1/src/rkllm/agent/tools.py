@@ -64,8 +64,13 @@ class ToolCallParser:
         self._in_call = False
         self._calls: list[dict] = []
         self._parse_failed = False
-        self._open_tag = "<tool_call>"
-        self._close_tag = "</tool_call>"
+        # P1-16：按 parser 家族选用真实起止标记，而非一律 <tool_call>
+        _tags = {"qwen": ("<tool_call>", "</tool_call>"),
+                 "hermes": ("<tool_call>", "</tool_call>"),
+                 "deepseek": ("<|tool▁call▁begin|>", "<|tool▁call▁end|>"),
+                 "llama3": ("<|python_tag|>", "<|eom_id|>")}
+        self._open_tag, self._close_tag = _tags.get(
+            parser_name, ("<tool_call>", "</tool_call>"))
 
     # -- 事件 ---
 
@@ -108,22 +113,30 @@ class ToolCallParser:
                 self._buf = self._buf[end + len(self._close_tag):]
                 self._in_call = False
                 call = self._calls[-1]
-                try:
-                    parsed = json.loads(raw)
-                    call["function"]["name"] = parsed.get("name", "")
-                    args = parsed.get("arguments", {})
-                    call["function"]["arguments"] = args if isinstance(args, str) \
-                        else json.dumps(args, ensure_ascii=False)
-                except (json.JSONDecodeError, ValueError):
+                extracted = self._extract_call(raw)
+                if extracted is None:
                     self._parse_failed = True
                     yield "content", self._open_tag + raw + self._close_tag
                     self._calls.pop()
                     continue
+                name, args_str = extracted
+                call["function"]["name"] = name
+                call["function"]["arguments"] = args_str
                 yield "tool_call", call
 
     def finish(self) -> Iterator[tuple[str, Any]]:
-        """流结束：未闭合的 tool_call 块降级为文本（不吞内容）。"""
+        """流结束：未闭合块尝试解析（llama3 无闭合标记），否则降级为文本。"""
         if self._in_call and self._buf:
+            extracted = self._extract_call(self._buf)
+            if extracted is not None:
+                call = self._calls[-1]
+                name, args_str = extracted
+                call["function"]["name"] = name
+                call["function"]["arguments"] = args_str
+                self._buf = ""
+                self._in_call = False
+                yield "tool_call", call
+                return
             self._calls.pop()
             yield "content", self._open_tag + self._buf
             self._buf = ""
@@ -140,6 +153,39 @@ class ToolCallParser:
         """只返回解析出工具名的调用，且是 OpenAI 标准嵌套结构。"""
         return [c for c in self._calls
                 if (c.get("function") or {}).get("name")]
+
+    @staticmethod
+    def _extract_call(raw: str):
+        """从标签内文本提取 (name, arguments_json_str)；失败返回 None。
+
+        兼容：qwen/hermes 纯 JSON；deepseek 在 <|tool▁sep|> 后跟 JSON；
+        llama3 用 parameters 键而非 arguments。
+        """
+        text = raw.strip()
+        if "<|tool▁sep|>" in text:
+            text = text.rsplit("<|tool▁sep|>", 1)[-1].strip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            parsed = json.loads(text[start:end + 1])
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        name = parsed.get("name")
+        if name is None and isinstance(parsed.get("function"), dict):
+            name = parsed["function"].get("name")
+        if name is None:
+            return None
+        args = parsed.get("arguments")
+        if args is None:
+            args = parsed.get("parameters")
+        if args is None:
+            args = {}
+        return str(name), (args if isinstance(args, str)
+                           else json.dumps(args, ensure_ascii=False))
 
     @staticmethod
     def _hold(buf: str, tag: str) -> int:

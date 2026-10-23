@@ -61,19 +61,34 @@ def _env_flag(name: str, fallback: bool = False) -> bool:
 
 
 def _legacy_cli_overrides(args) -> dict:
-    """把旧 serve 命令行映射为配置键（命令行最高优先级）。"""
-    overrides: dict = {
-        "model.path": args.model,
-        "server.bind_host": args.host,
-        "server.port": args.port,
-        "model.context": args.context,
-        "model.threads": args.threads,
-        "queue.max_wait": args.max_queue,
-        "queue.wait_timeout_s": int(args.queue_timeout),
-        "model.keep_history": not args.no_history,
-        "model.freq_lock": not args.no_freq_lock,
-        "logging.level": "warning" if args.quiet else "info",
-    }
+    """把旧 serve 命令行映射为配置键（仅显式给出的参数才覆盖，P1-1）。
+
+    serve 的 argv 默认值全部为 None：未出现即不进入覆盖层，让配置文件与
+    RKLLM_* 环境变量（由 config.LEGACY_ENV_MAP 读取）真正生效。
+    """
+    overrides: dict = {"model.path": args.model}
+
+    def put(key: str, val) -> None:
+        if val is not None:
+            overrides[key] = val
+
+    put("server.bind_host", getattr(args, "host", None))
+    put("server.port", getattr(args, "port", None))
+    put("model.context", getattr(args, "context", None))
+    put("model.threads", getattr(args, "threads", None))
+    put("queue.max_wait", getattr(args, "max_queue", None))
+    qt = getattr(args, "queue_timeout", None)
+    if qt is not None:
+        overrides["queue.wait_timeout_s"] = int(qt)
+    nh = getattr(args, "no_history", None)
+    if nh is not None:
+        overrides["model.keep_history"] = not nh
+    nf = getattr(args, "no_freq_lock", None)
+    if nf is not None:
+        overrides["model.freq_lock"] = not nf
+    q = getattr(args, "quiet", None)
+    if q is not None:
+        overrides["logging.level"] = "warning" if q else "info"
     if getattr(args, "max_new_tokens", None):
         overrides["model.max_tokens"] = args.max_new_tokens
     if getattr(args, "api_key", None):
@@ -298,7 +313,8 @@ def _cmd_run(args) -> int:
     engine = _make_engine(args)
     sampling = _sampling_from_args(args) or None
     try:
-        for token in engine.stream(" ".join(args.text), sampling=sampling):
+        for token in engine.stream(" ".join(args.text), sampling=sampling,
+                                   max_new_tokens=getattr(args, "max_new_tokens", None)):
             sys.stdout.write(token)
             sys.stdout.flush()
         sys.stdout.write("\n")
@@ -317,7 +333,8 @@ def _cmd_chat(args) -> int:
             line = line.strip()
             if not line:
                 continue
-            for token in engine.stream(line, sampling=sampling):
+            for token in engine.stream(line, sampling=sampling,
+                                       max_new_tokens=getattr(args, "max_new_tokens", None)):
                 sys.stdout.write(token)
                 sys.stdout.flush()
             sys.stdout.write("\n")
@@ -483,9 +500,15 @@ def _cmd_config(args) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _add_engine_args(parser, env: bool = False) -> None:
-    """chat/run/serve 共享的推理参数（与 1.3.1-15 同名同义）。"""
+def _add_engine_args(parser, env: bool = False, defer: bool = False) -> None:
+    """chat/run/serve 共享的推理参数（与 1.3.1-15 同名同义）。
+
+    defer=True（serve）：argv 默认置 None，交由配置层（文件/env）决定；只有
+    命令行显式给出才进入 cli 覆盖层，避免默认值击穿 file/env（P1-1）。
+    """
     def default(name, kind, fallback):
+        if defer:
+            return None
         return _env_default(name, kind, fallback) if env else fallback
 
     parser.add_argument("--context", type=int, default=default("CONTEXT", int, 4096))
@@ -496,12 +519,14 @@ def _add_engine_args(parser, env: bool = False) -> None:
                         choices=("auto", "rk3588", "rk3576", "rk3562", "rv1126b"))
     parser.add_argument("--model-dir", action="append",
                         default=(default("MODEL_DIR", str, "") or "").split(":")
-                        if env and default("MODEL_DIR", str, "") else [])
+                        if (env and not defer and default("MODEL_DIR", str, "")) else [])
     parser.add_argument("--lib", default=None)
     parser.add_argument("--no-freq-lock", action="store_true",
-                        default=_env_flag("NO_FREQ_LOCK") if env else False)
+                        default=None if defer else
+                        (_env_flag("NO_FREQ_LOCK") if env else False))
     parser.add_argument("--quiet", "-q", action="store_true",
-                        default=_env_flag("QUIET") if env else False)
+                        default=None if defer else
+                        (_env_flag("QUIET") if env else False))
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--fake-engine", action="store_true")
 
@@ -533,19 +558,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve = sub.add_parser("serve", help="启动 OpenAI 兼容 HTTP 服务")
     serve.add_argument("model", help="模型名或 .rkllm 路径")
-    serve.add_argument("--host", default=_env_default("HOST", str, "127.0.0.1"))
-    serve.add_argument("--port", type=int,
-                       default=_env_default("PORT", int, 8080))
+    # P1-1：serve 的 argv 默认全部置 None，交由配置层（文件/env）决定；仅显式
+    # 给出才进入 cli 覆盖层，避免 argparse 默认值击穿 file/env 两级。
+    serve.add_argument("--host", default=None)
+    serve.add_argument("--port", type=int, default=None)
     serve.add_argument("--api-key", dest="api_key",
                        default=_env_default("API_KEY", str, "") or None)
-    serve.add_argument("--max-queue", dest="max_queue", type=int,
-                       default=_env_default("MAX_QUEUE", int, 32))
+    serve.add_argument("--max-queue", dest="max_queue", type=int, default=None)
     serve.add_argument("--queue-timeout", dest="queue_timeout", type=float,
-                       default=_env_default("QUEUE_TIMEOUT", float, 600.0))
+                       default=None)
     serve.add_argument("--system", default=_env_default("SYSTEM", str, "") or None)
-    serve.add_argument("--no-history", action="store_true",
-                       default=_env_flag("NO_HISTORY"))
-    _add_engine_args(serve, env=True)
+    serve.add_argument("--no-history", action="store_true", default=None)
+    _add_engine_args(serve, defer=True)
     _add_sampling_args(serve, env=True)
     serve.set_defaults(func=_cmd_serve)
 

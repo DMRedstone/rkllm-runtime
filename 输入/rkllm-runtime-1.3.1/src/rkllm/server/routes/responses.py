@@ -135,11 +135,20 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
     def pump() -> None:
         try:
             for item in svc.queue.run(lambda: pipe.iter_tokens()):
-                items.put(item)
+                try:
+                    items.put(item, timeout=5)
+                except queue_mod.Full:
+                    break                 # 消费者已消失，别再攒（P0-3，对齐 openai）
         except BaseException as exc:
-            items.put(exc)
+            try:
+                items.put(exc, timeout=1)
+            except queue_mod.Full:
+                pass
         finally:
-            items.put(_STREAM_DONE)
+            try:
+                items.put(_STREAM_DONE, timeout=1)
+            except queue_mod.Full:
+                pass
 
     threading.Thread(target=pump, daemon=True, name="responses-pump").start()
 

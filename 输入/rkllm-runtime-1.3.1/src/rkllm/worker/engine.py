@@ -303,28 +303,34 @@ class RealEngine:
                     raise RKLLMError(str(item))
                 yield item
         finally:
+            timed_out = False
             try:
+                thread.join(timeout=STREAM_JOIN_TIMEOUT_S)
+            except Exception:
+                timed_out = True
+                self._destroyed = True
+            if thread.is_alive():
+                timed_out = True
+                self._destroyed = True
                 try:
-                    thread.join(timeout=STREAM_JOIN_TIMEOUT_S)
-                    if thread.is_alive():
-                        self._destroyed = True
-                        try:
-                            sys.stderr.write(
-                                "[rkllm] inference thread did not exit within %ds; "
-                                "marking the engine unusable\n"
-                                % STREAM_JOIN_TIMEOUT_S)
-                            sys.stderr.flush()
-                        except (OSError, ValueError):
-                            pass
-                except Exception:
-                    self._destroyed = True
-            finally:
-                with self._sink_lock:
-                    self._sink = None
+                    sys.stderr.write(
+                        "[rkllm] inference thread did not exit within %ds; "
+                        "marking the engine unusable\n"
+                        % STREAM_JOIN_TIMEOUT_S)
+                    sys.stderr.flush()
+                except (OSError, ValueError):
+                    pass
+            with self._sink_lock:
+                self._sink = None
+            if not timed_out:
+                # 正常收尾：线程已退出，缓冲与指针可安全释放
                 self._run_keep = []
                 self._infer.sampling_params = None
                 self._infer.prompt_cache_params = None
                 self._infer.max_new_tokens = 0
+            # P1-6：超时/线程仍存活时，prompt_input 的唯一强引用在 _run_keep，
+            # 采样/缓存 ctypes 指针也仍被 rkllm_run 使用——此时一律不清理，
+            # 避免 use-after-free；引擎已标记 destroyed，进程退出时统一释放。
 
     def last_perf(self):
         return self._last_perf

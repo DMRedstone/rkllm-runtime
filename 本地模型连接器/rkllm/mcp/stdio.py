@@ -59,6 +59,8 @@ class StdioServer:
         self.jobs = JobTable(ttl_s=cfg.get("job_ttl_s", 600),
                              max_jobs=cfg.get("job_max", 8))
         self._write_lock = threading.Lock()
+        # O-3：协议输出走私有 fd（serve_forever 里 dup 出来），None 时回退 sys.stdout
+        self._out = None
         self._inflight: dict[str, Any] = {}     # request_id -> Job | CancelFlag
         self._lock = threading.Lock()
         self._sessions: dict[str, list[dict]] = {}
@@ -71,6 +73,10 @@ class StdioServer:
                                         thread_name_prefix="mcp-call")
         self._control_pool = ThreadPoolExecutor(max_workers=2,
                                                 thread_name_prefix="mcp-ctl")
+        # P2：推理并发统一闸门——同步工具走 _pool，异步 job 用裸线程会绕过
+        # _pool 的 max_concurrent，job_max=8 时 8 路推理同打板端。用同一信号量
+        # 把同步与异步都限制在 max_concurrent。
+        self._infer_sem = threading.Semaphore(workers)
         self._handlers = tools_mod.build_handlers(
             backend, cfg, self.jobs,
             extract_retries=cfg.get("extract_retries", 2),
@@ -94,8 +100,9 @@ class StdioServer:
 
     def _send(self, obj: dict) -> None:
         with self._write_lock:
-            sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
-            sys.stdout.flush()
+            handle = self._out if self._out is not None else sys.stdout
+            handle.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            handle.flush()
 
     def _notify_progress(self, progress_token, progress: float,
                          total: float | None = None) -> None:
@@ -202,7 +209,8 @@ class StdioServer:
                 with self._lock:
                     self._inflight[key] = flag
         try:
-            result = handler(arguments, should_cancel=flag.is_set)
+            with self._infer_sem:
+                result = handler(arguments, should_cancel=flag.is_set)
             if flag.is_set():
                 return {"content": [{"type": "text", "text": "任务已取消"}],
                         "isError": True}
@@ -271,7 +279,8 @@ class StdioServer:
                         job.cancel()
                         return True
                     return job.cancel_requested
-                result = handler(arguments, should_cancel=_should_cancel)
+                with self._infer_sem:
+                    result = handler(arguments, should_cancel=_should_cancel)
                 if job.cancel_requested:
                     job.cancel()          # batch 等吞掉 Cancelled 时仍要记取消
                     return
@@ -321,6 +330,27 @@ class StdioServer:
     # -- 主循环 ---------------------------------------------------------------
 
     def serve_forever(self) -> None:
+        # O-3：fd 隔离（对齐 Python SDK stdio_server 的 _claim_fd）。
+        # 协议走 dup 出的私有 fd；把 fd 0/1 重定向到空设备/stderr，此后
+        # print()、子进程输出、C 库日志都无法污染 JSON-RPC 线。
+        try:
+            import os
+            # 仅在真实 fd 0/1 上隔离；测试注入 StringIO 等非 fd 流时跳过，
+            # 回退 sys.stdin/sys.stdout（行为与改动前一致）。
+            if sys.stdin.fileno() != 0 or sys.stdout.fileno() != 1:
+                raise OSError("stdio not bound to real fd 0/1")
+            rfd = os.dup(0)
+            wfd = os.dup(1)
+            devnull = os.open(os.devnull, os.O_RDONLY)
+            os.dup2(devnull, 0)
+            os.close(devnull)
+            os.dup2(2, 1)
+            sys.stdin = os.fdopen(rfd, "r", encoding="utf-8", newline="")
+            self._out = os.fdopen(wfd, "w", encoding="utf-8",
+                                  newline="\n", buffering=1)
+            sys.stdout = sys.stderr          # print() 不再进协议线
+        except (OSError, ValueError, AttributeError):
+            self._out = None
         reader = threading.Thread(target=self._read_loop, daemon=True,
                                   name="mcp-reader")
         reader.start()
@@ -333,40 +363,62 @@ class StdioServer:
 
     def _read_loop(self) -> None:
         for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            if len(line.encode("utf-8", "ignore")) > MAX_MESSAGE_BYTES:
-                self._send({"jsonrpc": "2.0", "id": None,
-                            "error": {"code": PARSE_ERROR,
-                                      "message": "message too large"}})
-                continue
-            if self._protocol_version is None:
+            try:
+                self._read_line(line)
+            except Exception as exc:          # P0-1：单条畸形消息不得杀死 reader 线程
                 try:
-                    first = json.loads(line)
+                    self._send({"jsonrpc": "2.0", "id": None,
+                                "error": {"code": -32603,
+                                          "message": "internal error: %s"
+                                                     % str(exc)[:200]}})
+                except Exception:
+                    pass
+
+    def _read_line(self, line: str) -> None:
+        line = line.strip()
+        if not line:
+            return
+        if len(line.encode("utf-8", "ignore")) > MAX_MESSAGE_BYTES:
+            self._send({"jsonrpc": "2.0", "id": None,
+                        "error": {"code": PARSE_ERROR,
+                                  "message": "message too large"}})
+            return
+        if self._protocol_version is None:
+            try:
+                first = json.loads(line)
+            except json.JSONDecodeError:
+                first = None
+            # 首包必须是 JSON 对象；数组/null/数字是合法 JSON 但不是对象（P0-1）
+            if isinstance(first, dict):
+                try:
                     self._protocol_version = detect_protocol(
                         first, self.cfg.get("protocol_versions") or None)
                     self.dispatcher = self._build_dispatcher()
                     self._log_first_connect(first)
-                except json.JSONDecodeError:
+                except Exception:
                     pass
-            # tools/call 交给线程：reader 必须随时可读，才能收到 cancelled。
-            # status/job 走控制池，长同步 ask 占住推理池时它们仍能秒回。
-            # 入池前先把 CancelFlag 预注册到 in-flight：排队期间收到
-            # notifications/cancelled 也能生效（审计 P2-4）。
-            route, request_id = self._tool_route(line)
-            if route in ("control", "work"):
-                flag = CancelFlag()
-                if request_id is not None:
-                    with self._lock:
-                        self._inflight[str(request_id)] = flag
-                pool = (self._control_pool if route == "control"
-                        else self._pool)
-                pool.submit(self._handle_and_send, line, flag)
-                continue
-            response = self.dispatcher.handle_message(line)
-            if response is not None:
-                self._send(response)
+        if self.dispatcher is None:
+            self._send({"jsonrpc": "2.0", "id": None,
+                        "error": {"code": -32600,
+                                  "message": "expected initialize"}})
+            return
+        # tools/call 交给线程：reader 必须随时可读，才能收到 cancelled。
+        # status/job 走控制池，长同步 ask 占住推理池时它们仍能秒回。
+        # 入池前先把 CancelFlag 预注册到 in-flight：排队期间收到
+        # notifications/cancelled 也能生效（审计 P2-4）。
+        route, request_id = self._tool_route(line)
+        if route in ("control", "work"):
+            flag = CancelFlag()
+            if request_id is not None:
+                with self._lock:
+                    self._inflight[str(request_id)] = flag
+            pool = (self._control_pool if route == "control"
+                    else self._pool)
+            pool.submit(self._handle_and_send, line, flag, request_id)
+            return
+        response = self.dispatcher.handle_message(line)
+        if response is not None:
+            self._send(response)
 
     def _tool_route(self, line: str) -> tuple[str | None, str | None]:
         """tools/call 分流：status/job → control，其余推理工具 → work。
@@ -380,13 +432,15 @@ class StdioServer:
         if not (isinstance(msg, dict) and msg.get("method") == "tools/call"
                 and msg.get("id") is not None):
             return None, None
-        name = str((msg.get("params") or {}).get("name", ""))
+        params = msg.get("params")
+        name = str(params.get("name", "")) if isinstance(params, dict) else ""
         prefix = self.cfg.get("tool_prefix", "")
         short = name[len(prefix):] if prefix and name.startswith(prefix) else name
         route = "control" if short in ("status", "job") else "work"
         return route, msg.get("id")
 
-    def _handle_and_send(self, line: str, _flag: CancelFlag | None = None) -> None:
+    def _handle_and_send(self, line: str, _flag: CancelFlag | None = None,
+                         request_id=None) -> None:
         # _flag 由 reader 预注册；具体取消检查在 _tools_call/_run_as_job 中
         # 通过 request_id 从 self._inflight 复用，这里不直接使用。
         try:
@@ -394,6 +448,16 @@ class StdioServer:
         except Exception as exc:              # 兜底：工作线程异常不能静默
             response = {"jsonrpc": "2.0", "id": None,
                         "error": {"code": -32603, "message": str(exc)[:300]}}
+        # P2：dispatcher 层拒绝（未知工具/非法参数）根本没进 _tools_call/
+        # _run_as_job，预注册的 _inflight 条目无人清理 → 长跑无界增长。
+        # 仅当条目仍是当初预注册的 flag（未被 Job 接管）且响应为错误时清，
+        # 避免误删异步 Job 的取消映射。
+        if request_id is not None and isinstance(response, dict) \
+                and response.get("error"):
+            key = str(request_id)
+            with self._lock:
+                if self._inflight.get(key) is _flag:
+                    self._inflight.pop(key, None)
         if response is not None:
             self._send(response)
 

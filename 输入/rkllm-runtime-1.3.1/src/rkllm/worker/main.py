@@ -202,8 +202,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--delay", type=float, default=0.0,
                         help="fake 引擎每 token 延迟（压测/演示）")
     args = parser.parse_args(argv)
+    # P2：命令行范围校验，避免 --context=-1 / --max-tokens=0 直达 C 结构体
+    if args.context <= 0 or args.max_tokens <= 0 or args.threads <= 0:
+        parser.error("--context/--max-tokens/--threads 必须为正整数")
     engine = build_engine(args)
-    Worker(engine).serve_forever(args.address, tcp=args.tcp)
+    try:
+        Worker(engine).serve_forever(args.address, tcp=args.tcp)
+    finally:
+        # P1-7：任何退出路径都释放 NPU / dma-buf（与 cli / LocalSupervisor 对齐）
+        try:
+            engine.destroy()
+        except Exception:
+            pass
     return 0
 
 

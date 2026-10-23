@@ -177,6 +177,17 @@ def build_handlers(backend, cfg: dict, jobs, *,
     session_store = sessions if sessions is not None else {}
     session_lock = sessions_lock or threading.Lock()
     max_session_messages = int(cfg.get("session_max_messages", 20))
+    session_locks: dict[str, threading.Lock] = {}
+    max_sessions = int(cfg.get("session_max_count", 256) or 256)
+
+    def _session_lock(name: str) -> "threading.Lock":
+        """同一 session 的读→推理→写回必须串行，否则并发丢上下文（P2）。"""
+        with session_lock:
+            lk = session_locks.get(name)
+            if lk is None:
+                lk = threading.Lock()
+                session_locks[name] = lk
+            return lk
 
     def _validate_input(text: str) -> str:
         if len(text) > input_limit:
@@ -237,26 +248,43 @@ def build_handlers(backend, cfg: dict, jobs, *,
         session = str(params.get("session") or "").strip()
         if session and len(session) > 128:
             raise ValueError("session 过长（最多 128 字符）")
-        if session:
+
+        def _ask(base: list[dict]) -> dict:
+            request = ([{"role": "system", "content": system}]
+                       if system else []) + base
+            try:
+                return backend.chat(request,
+                                    max_tokens=cfg["default_max_tokens"],
+                                    temperature=cfg["default_temperature"],
+                                    cancel_check=_as_check(should_cancel))
+            except BackendError as exc:
+                if getattr(exc, "kind", "") == "cancelled":
+                    raise Cancelled() from exc
+                raise
+
+        if not session:
+            out = _ask(clean)
+            return {"content": [{"type": "text",
+                                 "text": _clip_result(out["text"])}]}
+
+        # P2：同一 session 的「读历史 → 推理 → 写回」必须串行，否则并发请求
+        # 各自读到同一历史、互相覆盖，丢一轮上下文。不同 session 互不阻塞。
+        with _session_lock(session):
             with session_lock:
                 history = list(session_store.get(session, []))
             base = history + clean
-        else:
-            base = clean
-        request = ([{"role": "system", "content": system}] if system else []) + base
-        try:
-            out = backend.chat(request, max_tokens=cfg["default_max_tokens"],
-                               temperature=cfg["default_temperature"],
-                               cancel_check=_as_check(should_cancel))
-        except BackendError as exc:
-            if getattr(exc, "kind", "") == "cancelled":
-                raise Cancelled() from exc
-            raise
-        if session:
+            out = _ask(base)
             with session_lock:
-                session_store[session] = (base + [{"role": "assistant",
-                                                   "content": out["text"]}]
-                                          )[-max_session_messages:]
+                # 会话数上限：超限时逐出最早插入的（dict 保序），防无界增长
+                if (session not in session_store
+                        and len(session_store) >= max_sessions):
+                    try:
+                        session_store.pop(next(iter(session_store)))
+                    except (StopIteration, KeyError):
+                        pass
+                session_store[session] = (
+                    base + [{"role": "assistant", "content": out["text"]}]
+                )[-max_session_messages:]
         return {"content": [{"type": "text", "text": _clip_result(out["text"])}]}
 
     _try_json = _extract_json        # 保持内层调用点不变
@@ -323,9 +351,19 @@ def build_handlers(backend, cfg: dict, jobs, *,
                 results.append({"error": "cancelled"})
             except Exception as exc:      # F8：单段失败不中断整批
                 results.append({"error": str(exc)[:200]})
-        return {"content": [{"type": "text",
-                             "text": _clip_result(json.dumps(results,
-                                                             ensure_ascii=False))}]}
+        # P2：对整体 json.dumps 做字符串裁剪会得到非法 JSON；超限时返回带
+        # truncated 标记的合法 JSON，并尽量保留能放下的完整结果项。
+        payload = json.dumps(results, ensure_ascii=False)
+        limit = int(cfg.get("max_result_chars", 20000))
+        if len(payload) > limit:
+            kept: list[Any] = []
+            for item in results:
+                if len(json.dumps(kept + [item], ensure_ascii=False)) > limit:
+                    break
+                kept.append(item)
+            payload = json.dumps({"truncated": True, "total": len(results),
+                                  "results": kept}, ensure_ascii=False)
+        return {"content": [{"type": "text", "text": payload}]}
 
     def status(params: dict, should_cancel=None) -> dict:
         info = backend.status()

@@ -142,8 +142,14 @@ def check_request_params(body: dict[str, Any], *,
         reject.append("n>1")
     # tool_choice 与 json_schema 同属语义关键项：_ALWAYS_REJECT 声明为恒 reject，
     # 就必须真的拦——旧实现只在注释里拒绝、代码里静默忽略（审计 P2-8）。
-    if body.get("tool_choice") is not None:
-        reject.append("tool_choice")
+    tc = body.get("tool_choice")
+    if tc is not None:
+        # P1-15：只拒绝"强制指定"模式；auto/none 无强制语义，放行（新 SDK 默认
+        # 发 tool_choice="auto"，一律 400 会打挂 langchain-openai / Agents SDK）。
+        if isinstance(tc, str) and tc in ("auto", "none"):
+            pass
+        else:
+            reject.append("tool_choice")
     for name in ("seed", "logprobs", "top_logprobs", "logit_bias",
                  "modalities", "audio", "prediction"):
         if name in body and body[name] not in (None, False, []):

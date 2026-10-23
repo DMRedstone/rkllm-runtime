@@ -94,17 +94,46 @@ def load_cfg() -> dict:
         except (OSError, ValueError):
             pass
     # 环境变量最终覆盖 TOML（RKLLM_MCP_* 或兼容名 RKLLM_ENDPOINT / RKLLM_API_KEY）
-    for key in cfg:
+    for key in list(cfg.keys()):
         env_key = "RKLLM_MCP_" + key.upper()
         if env_key in os.environ:
-            cfg[key] = os.environ[env_key]
+            val = os.environ[env_key]
+            cfg[key] = val
+            # P1-3：target_* 与内部键任一被 env 覆盖都双写，避免 build_server 读旧值
+            if key in ("endpoint", "target_endpoint"):
+                cfg["endpoint"] = cfg["target_endpoint"] = val
+            elif key in ("api_key", "target_api_key"):
+                cfg["api_key"] = cfg["target_api_key"] = val
     if "RKLLM_ENDPOINT" in os.environ:
-        cfg["endpoint"] = os.environ["RKLLM_ENDPOINT"]
-        cfg["target_endpoint"] = cfg["endpoint"]
+        cfg["endpoint"] = cfg["target_endpoint"] = os.environ["RKLLM_ENDPOINT"]
     if "RKLLM_API_KEY" in os.environ:
-        cfg["api_key"] = os.environ["RKLLM_API_KEY"]
-        cfg["target_api_key"] = cfg["api_key"]
+        cfg["api_key"] = cfg["target_api_key"] = os.environ["RKLLM_API_KEY"]
+    # P1-4：TOML/env 值都是字符串，按 schema 类型归一化，避免 "45" 直达比较逻辑
+    _coerce_cfg_types(cfg)
     return cfg
+
+
+def _coerce_cfg_types(cfg: dict) -> None:
+    """P1-4：按 default_cfg 的类型模板归一化；不合法值回退默认（绝不带坏类型）。"""
+    for key, default in default_cfg("", "").items():
+        if key not in cfg:
+            continue
+        val = cfg[key]
+        try:
+            if isinstance(default, bool):
+                if not isinstance(val, bool):
+                    cfg[key] = str(val).strip().lower() in ("1", "true", "yes", "on")
+            elif isinstance(default, int):
+                cfg[key] = int(val)
+            elif isinstance(default, float):
+                cfg[key] = float(val)
+            elif isinstance(default, list):
+                if isinstance(val, str):
+                    cfg[key] = [s.strip() for s in val.split(",") if s.strip()]
+            else:
+                cfg[key] = str(val)
+        except (TypeError, ValueError):
+            cfg[key] = default
 
 
 def build_server(cfg: dict | None = None) -> StdioServer:

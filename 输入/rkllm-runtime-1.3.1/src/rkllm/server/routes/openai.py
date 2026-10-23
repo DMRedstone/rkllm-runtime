@@ -110,12 +110,13 @@ def chat_completions(body: ChatCompletionRequest, request: Request):
         spec = rf.get("json_schema") or {}
         schema = spec.get("schema") if isinstance(spec, dict) else None
 
-    try:
-        pipe = _pipeline(svc, {**raw, "max_tokens": max_tokens}, chat=True)
-    except ValueError as exc:
-        return _http_error(400, "invalid_request_error", str(exc))
-
     if streaming:
+        # 效率：仅流式路径构造 Pipeline；非流式交给 _run_blocking_checked 自行
+        # 构建，避免重复做一次全量 prompt 构建（原实现两条路径各建一次）。
+        try:
+            pipe = _pipeline(svc, {**raw, "max_tokens": max_tokens}, chat=True)
+        except ValueError as exc:
+            return _http_error(400, "invalid_request_error", str(exc))
         return StreamingResponse(
             _stream_chat(request, svc, pipe, raw),
             media_type="text/event-stream",
@@ -217,11 +218,13 @@ def _stream_chat(request: Request, svc, pipe: Pipeline, raw: dict):
     items: queue_mod.Queue = queue_mod.Queue(maxsize=512)
 
     def pump() -> None:
+        truncated = False
         try:
             for item in svc.queue.run(lambda: pipe.iter_tokens()):
                 try:
                     items.put(item, timeout=5)
                 except queue_mod.Full:
+                    truncated = True
                     break                 # 消费者已消失，别再攒
         except BaseException as exc:      # 交给生成器决定如何呈现
             try:
@@ -229,6 +232,13 @@ def _stream_chat(request: Request, svc, pipe: Pipeline, raw: dict):
             except queue_mod.Full:
                 pass
         finally:
+            if truncated:
+                # P2：显式告知生成器发生了截断，收尾改用 finish_reason=length，
+                # 而不是让客户端把被截断的响应当成完整 stop。
+                try:
+                    items.put({"truncated": True}, timeout=1)
+                except queue_mod.Full:
+                    pass
             try:
                 items.put(_STREAM_DONE, timeout=1)
             except queue_mod.Full:
@@ -247,6 +257,7 @@ def _stream_chat(request: Request, svc, pipe: Pipeline, raw: dict):
     async def generate():
         yield session.first_frame()
         finished = False
+        truncated = False
         last_emit = time.monotonic()
         stop_watch = asyncio.Event()
 
@@ -290,13 +301,15 @@ def _stream_chat(request: Request, svc, pipe: Pipeline, raw: dict):
                     finished = True
                     return
                 if isinstance(item, dict):
+                    if item.get("truncated"):
+                        truncated = True
                     continue                    # 管线元数据（tool_calls 等）
                 yield session.delta_frame(content=item)
                 last_emit = time.monotonic()
 
             for frame in pipe.trailing_frames(session):
                 yield frame
-            yield session.finish_frame(pipe.finish_reason())
+            yield session.finish_frame("length" if truncated else pipe.finish_reason())
             want_usage = svc.include_usage_default or bool(
                 (raw.get("stream_options") or {}).get("include_usage"))
             if want_usage:

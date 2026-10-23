@@ -55,25 +55,40 @@ class InferenceQueue:
 
     def run(self, submit: Callable[[], Iterator[str]], *,
             cancelled: Callable[[], bool] | None = None) -> Iterator[str]:
-        """排队 → 拿槽 → 执行；submit() 返回 token 迭代器（由 worker 客户端给）。"""
-        with self._lock:
-            if self._waiting >= self.max_wait:
-                self.metrics["rejected_total"] += 1
-                raise QueueBusy(self.busy_retry_after_s)
-            self._waiting += 1
-            self.metrics["requests_total"] += 1
+        """排队 → 拿槽 → 执行；submit() 返回 token 迭代器（由 worker 客户端给）。
+
+        max_wait<=0 表示「不排队」：仅在槽立即空闲时放行，否则立即 503（P1-2）。
+        """
         acquired = False
-        try:
-            deadline = time.monotonic() + self.wait_timeout_s
-            while True:
-                if cancelled and cancelled():
-                    raise QueueTimeout("cancelled while waiting")
-                if self._slot.acquire(timeout=0.5):
-                    acquired = True
-                    break
-                if time.monotonic() > deadline:
+        waiting_counted = False
+        with self._lock:
+            if self.max_wait <= 0:
+                # 不排队模式：非阻塞抢槽，抢不到立即 503（旧实现 0>=0 恒真→全线 503）
+                if not self._slot.acquire(blocking=False):
                     self.metrics["rejected_total"] += 1
-                    raise QueueTimeout("queue wait timeout %ds" % self.wait_timeout_s)
+                    raise QueueBusy(self.busy_retry_after_s)
+                acquired = True
+                self.metrics["requests_total"] += 1
+            else:
+                if self._waiting >= self.max_wait:
+                    self.metrics["rejected_total"] += 1
+                    raise QueueBusy(self.busy_retry_after_s)
+                self._waiting += 1
+                waiting_counted = True
+                self.metrics["requests_total"] += 1
+        try:
+            if not acquired:
+                deadline = time.monotonic() + self.wait_timeout_s
+                while True:
+                    if cancelled and cancelled():
+                        raise QueueTimeout("cancelled while waiting")
+                    if self._slot.acquire(timeout=0.5):
+                        acquired = True
+                        break
+                    if time.monotonic() > deadline:
+                        self.metrics["rejected_total"] += 1
+                        raise QueueTimeout("queue wait timeout %ds"
+                                           % self.wait_timeout_s)
             start = time.monotonic()
             try:
                 for token in submit():
@@ -85,5 +100,6 @@ class InferenceQueue:
             finally:
                 self._slot.release()
         finally:
-            with self._lock:
-                self._waiting -= 1
+            if waiting_counted:
+                with self._lock:
+                    self._waiting -= 1
