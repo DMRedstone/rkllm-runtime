@@ -35,14 +35,22 @@ rkllm \- run .rkllm models on Rockchip NPUs: local chat, one\-shot inference and
 .B rkllm
 .B selftest
 .RI [ options ]
+.br
+.B rkllm
+.B config
+.I action
+.RI [ options ]
 .SH DESCRIPTION
 .B rkllm
 is the command line front end for the RKLLM runtime that ships in the
 .B rkllm\-runtime
-package. It drives
+package. It starts a small FastAPI service plus an inference worker subprocess
+that talks to
 .I librkllmrt.so
-directly through ctypes and needs no compiler on the board and no Python
-package from PyPI: it is written against the Python standard library only.
+over a Unix\-domain socket frame protocol, and needs no compiler on the board
+and no Python package from PyPI: it is written against the Python standard
+library only; the server dependencies (fastapi, uvicorn, pydantic) are
+installed through the package manager.
 .PP
 The runtime only executes
 .I .rkllm
@@ -108,6 +116,15 @@ End\-to\-end self test that needs no model and no NPU. It exercises argument
 handling, model resolution, the HTTP layer, streaming, authentication and queue
 behaviour against a built\-in stand\-in engine. Checks that require the real
 library and the NPU are reported as SKIP, not FAIL, when they are unavailable.
+.TP
+.B config
+.I action
+Inspect and manage the runtime configuration table (the 80\-key TOML at
+.IR /etc/rkllm/rkllm.toml ).
+.I action
+is one of
+.IR show " (print the effective configuration), " validate " (check a config file against the schema), " docs " (render the configuration reference) or " init " (write a populated example file). Common flags:
+.BR \-\-config " path, " \-\-json ", " \-\-board ", " \-\-client ", " \-\-path " and " \-\-force .
 .SH OPTIONS
 Options may be given after the command in any order.
 .SS Options common to chat, run and serve
@@ -157,6 +174,12 @@ Default 0.8.
 .TP
 .BI \-\-repeat\-penalty " r"
 Default 1.1.
+.TP
+.BI \-\-presence\-penalty " p"
+Default 0.0 (disabled).
+.TP
+.BI \-\-frequency\-penalty " f"
+Default 0.0 (disabled).
 .SS Additional options for chat and run
 .TP
 .BI \-\-system " prompt"
@@ -236,6 +259,14 @@ Streaming responses use server\-sent events and end with
 .TP
 .B POST /v1/reset
 Forget the conversation context.
+.TP
+.B GET /v1/capabilities
+Model and server capability matrix: supported parameters, features and limits.
+.TP
+.B POST /v1/responses
+OpenAI Responses API endpoint: stateful conversations and tool use. Like
+.IR /v1/chat/completions ,
+but conversation state is kept server\-side.
 .PP
 The same endpoints are also accepted without the
 .I /v1
@@ -320,8 +351,8 @@ Interactive chat:
 .PP
 .nf
 .RS 4
-rkllm chat qwen2.5\-1.5b
-rkllm chat /data/models/qwen2.5\-1.5b.rkllm
+rkllm chat qwen3.5\-4b_w8a8_rk3588
+rkllm chat /data/models/qwen3.5\-4b_w8a8_rk3588.rkllm
 .RE
 .fi
 .PP
@@ -329,7 +360,7 @@ One\-shot, suitable for scripts:
 .PP
 .nf
 .RS 4
-rkllm run qwen2.5\-1.5b "Summarise this text in one line."
+rkllm run qwen3.5\-4b_w8a8_rk3588 "Summarise this text in one line."
 .RE
 .fi
 .PP
@@ -337,7 +368,7 @@ API server with an API key, then a request from another terminal:
 .PP
 .nf
 .RS 4
-RKLLM_API_KEY=sekret rkllm serve /data/models/qwen2.5\-1.5b.rkllm \-\-host 0.0.0.0 \-\-port 8080
+RKLLM_API_KEY=sekret rkllm serve /data/models/qwen3.5\-4b_w8a8_rk3588.rkllm \-\-host 0.0.0.0 \-\-port 8080
 curl http://127.0.0.1:8080/v1/chat/completions \\
   \-H 'Content\-Type: application/json' \\
   \-H 'Authorization: Bearer sekret' \\

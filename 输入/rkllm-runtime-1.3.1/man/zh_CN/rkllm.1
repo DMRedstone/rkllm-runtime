@@ -29,13 +29,17 @@ rkllm \- 在瑞芯微 NPU 上运行 .rkllm 模型：本地对话、单次推理�
 .br
 .B rkllm selftest
 .RI [ 选项 ]
+.br
+.B rkllm config
+.I 动作
+.RI [ 选项 ]
 .SH 描述
 .B rkllm
 是本包（
 .BR rkllm\-runtime ）
-所附 RKLLM 运行时的命令行前端。它通过 ctypes 直接调用
-.IR librkllmrt.so ，
-板上无需任何编译器，也无需从 PyPI 安装任何 Python 包——整个脚本只使用 Python 标准库。
+所附 RKLLM 运行时的命令行前端。它会启动一个轻量 FastAPI 服务，以及一个通过 Unix 域套接字帧协议与
+.IR librkllmrt.so
+通信的推理子进程；板上无需任何编译器，也无需从 PyPI 安装任何 Python 包——整个脚本只使用 Python 标准库，服务所需的依赖（fastapi、uvicorn、pydantic）由包管理器安装。
 .PP
 运行时只能执行
 .I .rkllm
@@ -89,6 +93,17 @@ NPU 通过内核驱动
 .B selftest
 无需模型、无需 NPU 的端到端自检：用内置的替身引擎跑通参数处理、模型解析、HTTP 层、
 流式输出、鉴权与排队行为。需要真实库和 NPU 的检查项在缺硬件时显示为 SKIP 而不是 FAIL。
+.TP
+.B config
+.I 动作
+查看与管理运行时配置表（位于
+.IR /etc/rkllm/rkllm.toml
+的 80 键 TOML）。
+.I 动作
+为下列之一：
+.IR show （打印生效配置）、 validate （按 schema 校验配置文件）、 docs （渲染配置说明）、 init （写出一份带示例值的配置文件）。
+常用标志：
+.BR \-\-config " 路径、 " \-\-json "、 " \-\-board "、 " \-\-client "、 " \-\-path "、 " \-\-force 。
 .SH 选项
 选项写在子命令之后，顺序任意。
 .SS chat、run、serve 共有选项
@@ -139,6 +154,12 @@ NPU 通过内核驱动
 .TP
 .BI \-\-repeat\-penalty " r"
 默认 1.1。
+.TP
+.BI \-\-presence\-penalty " p"
+默认 0.0（关闭）。
+.TP
+.BI \-\-frequency\-penalty " f"
+默认 0.0（关闭）。
 .SS chat 与 run 额外选项
 .TP
 .BI \-\-system " 提示词"
@@ -215,6 +236,14 @@ OpenAI 格式的模型列表。
 .TP
 .B POST /v1/reset
 清空对话上下文。
+.TP
+.B GET /v1/capabilities
+模型与服务的能力矩阵：支持的参数、特性与限制。
+.TP
+.B POST /v1/responses
+OpenAI Responses API 端点：带状态的会话与工具调用。与
+.IR /v1/chat/completions
+类似，但会话状态由服务端保存。
 .PP
 上述端点**同时接受不带
 .I /v1
@@ -289,8 +318,8 @@ systemd 单元的配置，同时是本包的
 .PP
 .nf
 .RS 4
-rkllm chat qwen2.5\-1.5b
-rkllm chat /data/models/qwen2.5\-1.5b.rkllm
+rkllm chat qwen3.5\-4b_w8a8_rk3588
+rkllm chat /data/models/qwen3.5\-4b_w8a8_rk3588.rkllm
 .RE
 .fi
 .PP
@@ -298,7 +327,7 @@ rkllm chat /data/models/qwen2.5\-1.5b.rkllm
 .PP
 .nf
 .RS 4
-rkllm run qwen2.5\-1.5b "用一句话概括这段文字。"
+rkllm run qwen3.5\-4b_w8a8_rk3588 "用一句话概括这段文字。"
 .RE
 .fi
 .PP
@@ -306,7 +335,7 @@ rkllm run qwen2.5\-1.5b "用一句话概括这段文字。"
 .PP
 .nf
 .RS 4
-RKLLM_API_KEY=我的密钥 rkllm serve /data/models/qwen2.5\-1.5b.rkllm \-\-host 0.0.0.0 \-\-port 8080
+RKLLM_API_KEY=我的密钥 rkllm serve /data/models/qwen3.5\-4b_w8a8_rk3588.rkllm \-\-host 0.0.0.0 \-\-port 8080
 curl http://127.0.0.1:8080/v1/chat/completions \\
   \-H 'Content\-Type: application/json' \\
   \-H 'Authorization: Bearer 我的密钥' \\
