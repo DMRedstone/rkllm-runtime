@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from .. import caps
 
-__all__ = ["ChatCompletionRequest", "CompletionRequest", "ModelObject"]
+__all__ = ["ChatCompletionRequest", "CompletionRequest"]
 
 
 class ChatCompletionRequest(BaseModel):
@@ -80,10 +80,3 @@ class CompletionRequest(BaseModel):
     prediction: dict | None = None
 
     model_config = {"extra": "forbid"}
-
-
-class ModelObject(BaseModel):
-    id: str
-    object: str = "model"
-    owned_by: str = "rkllm-runtime"
-    context_len: int = 4096

@@ -22,7 +22,9 @@ import socket
 import sys
 import threading
 
-from .frames import read_frame, write_frame, FrameError
+from .frames import (OP_ABORT, OP_END, OP_ERROR, OP_PING, OP_READY, OP_RUN,
+                     OP_SHUTDOWN, OP_STATE, OP_TOKEN, PROTOCOL_VERSION,
+                     FrameError, read_frame, write_frame)
 
 
 class Worker:
@@ -64,20 +66,20 @@ class Worker:
                         max_new_tokens=params.get("max_new_tokens"),
                         cache_hint=bool(params.get("cache_hint", True))):
                     if self._abort_requested.is_set():
-                        self._send(wfile, {"op": "end", "id": req_id,
+                        self._send(wfile, {"op": OP_END, "id": req_id,
                                            "aborted": True})
                         break
-                    self._send(wfile, {"op": "token", "id": req_id,
+                    self._send(wfile, {"op": OP_TOKEN, "id": req_id,
                                        "text": token})
                 else:
                     perf = self.engine.last_perf()
-                    body: dict = {"op": "end", "id": req_id}
+                    body: dict = {"op": OP_END, "id": req_id}
                     if perf:
                         body["perf"] = {"prefill_tokens": perf[0],
                                         "generate_tokens": perf[1]}
                     self._send(wfile, body)
             except Exception as exc:             # 推理失败不拖垮 worker
-                self._send(wfile, {"op": "error", "id": req_id,
+                self._send(wfile, {"op": OP_ERROR, "id": req_id,
                                    "message": str(exc)[:500]})
 
     # -- 读线程（唯一读方） ---------------------------------------------------
@@ -90,23 +92,23 @@ class Worker:
                 if not frame:
                     break                        # EOF
                 op = frame.get("op")
-                if op == "run":
+                if op == OP_RUN:
                     try:
                         self._run_queue.put_nowait(frame)
                     except queue.Full:
-                        self._send(wfile, {"op": "error",
+                        self._send(wfile, {"op": OP_ERROR,
                                            "id": frame.get("id", ""),
                                            "message": "busy",
                                            "busy": True})
-                elif op == "abort":
+                elif op == OP_ABORT:
                     self._abort_requested.set()
                     try:
                         self.engine.abort()
                     except Exception:
                         pass
-                elif op == "ping":
-                    self._send(wfile, {"op": "state", "state": "ready"})
-                elif op == "shutdown":
+                elif op == OP_PING:
+                    self._send(wfile, {"op": OP_STATE, "state": "ready"})
+                elif op == OP_SHUTDOWN:
                     self._shutdown.set()
                     break
         except (FrameError, OSError, ValueError):
@@ -151,7 +153,7 @@ class Worker:
                 # 会污染 stdout 管道（真机首测：帧头被日志字节覆盖，supervisor
                 # 解析出 1.2 GB 假长度后永久阻塞）。stdout 从此只承载 C 库日志，
                 # 由 supervisor 的排水线程丢弃。
-                ready = {"op": "ready"}
+                ready = {"op": OP_READY, "v": PROTOCOL_VERSION}
                 fingerprint = getattr(self.engine, "lib_fingerprint", None)
                 if fingerprint:
                     # D10：库指纹由真正 dlopen 的 worker 提供，server 不重复加载

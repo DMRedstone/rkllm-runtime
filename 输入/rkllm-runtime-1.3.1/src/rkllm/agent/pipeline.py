@@ -12,6 +12,7 @@ import json
 from typing import Iterator
 
 from .conversation import build_prompt
+from .gateway import InferenceGateway
 from .reasoning import ReasoningSplitter
 from .tools import ToolCallParser, build_tools_prefix, detect_parser
 
@@ -21,7 +22,9 @@ _SAMPLING_KEYS = ("top_k", "top_p", "temperature", "repeat_penalty",
 
 
 class Pipeline:
-    def __init__(self, svc, body: dict, *, chat: bool):
+    def __init__(self, svc: InferenceGateway, body: dict, *, chat: bool):
+        # A-5：svc 只需满足 InferenceGateway 契约（模型名/tool 配置/system/
+        # supervisor/queue/ttft_log），不再要求完整 ServiceState。
         self.svc = svc
         self.body = body
         self.chat = chat

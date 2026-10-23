@@ -20,8 +20,7 @@ from typing import Any, Callable
 
 from ..agent.json_schema import validate as validate_schema
 
-__all__ = ["TOOL_DEFS", "build_handlers", "tool_definitions", "max_tool_prefix",
-           "Cancelled"]
+__all__ = ["TOOL_DEFS", "build_handlers", "tool_definitions", "Cancelled"]
 
 # 模式预设：辅助任务的提示词骨架（中文语境，保留英文关键词）
 _MODE_PROMPTS = {
@@ -41,10 +40,6 @@ _TOOL_DOC_COMMON = (
 
 class Cancelled(Exception):
     """工具内部信号：任务被取消（由 stdio 转成 isError 文本）。"""
-
-
-def max_tool_prefix(prefix: str) -> str:
-    return prefix
 
 
 def _tool(name: str, desc: str, schema: dict, *,

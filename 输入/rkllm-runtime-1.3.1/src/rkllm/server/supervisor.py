@@ -23,7 +23,9 @@ import uuid
 from pathlib import Path
 from typing import Iterator
 
-from ..worker.frames import read_frame, write_frame, FrameError
+from ..worker.frames import (OP_ABORT, OP_END, OP_ERROR, OP_READY, OP_RUN,
+                             OP_TOKEN, PROTOCOL_VERSION, FrameError,
+                             read_frame, write_frame)
 
 SRC_DIR = str(Path(__file__).resolve().parents[2])
 
@@ -57,7 +59,7 @@ class WorkerClient:
         req_id = uuid.uuid4().hex[:10]
         try:
             with self._write_lock:
-                write_frame(self._wfile, {"op": "run", "id": req_id,
+                write_frame(self._wfile, {"op": OP_RUN, "id": req_id,
                                           "prompt": prompt,
                                           "params": {"role": role,
                                                      "enable_thinking": enable_thinking,
@@ -85,18 +87,18 @@ class WorkerClient:
             # 否则会把残留 end 当成当前请求完成而立即返回空响应。
             if fid is not None and fid != req_id:
                 continue
-            if op == "token":
+            if op == OP_TOKEN:
                 yield frame["text"]
-            elif op == "end":
+            elif op == OP_END:
                 return
-            elif op == "error":
+            elif op == OP_ERROR:
                 # worker 明确报告本次请求失败：进程活着，绝不走重启路径
                 raise RequestFailed(frame.get("message", "worker error"))
 
     def abort(self) -> None:
         with self._write_lock:
             try:
-                write_frame(self._wfile, {"op": "abort"})
+                write_frame(self._wfile, {"op": OP_ABORT})
             except OSError:
                 pass
 
@@ -210,10 +212,18 @@ class Supervisor:
             self._client.close()
             self._client = None
             raise WorkerDown("worker ready frame failed: %s" % exc)
-        if ready.get("op") != "ready":
+        if ready.get("op") != OP_READY:
             self._client.close()
             self._client = None
             raise WorkerDown("worker sent %r instead of ready" % ready)
+        # A-8：帧协议版本必须一致（灰度/回滚时 worker 与 server 可能错配）。
+        # 缺字段视为旧 worker，按兼容放行。
+        worker_proto = ready.get("v")
+        if worker_proto is not None and worker_proto != PROTOCOL_VERSION:
+            self._client.close()
+            self._client = None
+            raise WorkerDown("worker frame protocol v%s != server v%s"
+                             % (worker_proto, PROTOCOL_VERSION))
         if ready.get("lib_sha256"):
             self.lib_fingerprint = {
                 "sha256": ready.get("lib_sha256"),
@@ -355,11 +365,6 @@ class Supervisor:
                 self._proc.kill()
 
 
-def _unpack(head: bytes) -> tuple[int]:
-    import struct
-    return struct.unpack(">I", head)
-
-
 class LocalSupervisor:
     """`engine.mode=in_process`：进程内推理（S1 回滚开关 / 排障用）。
 
@@ -397,8 +402,25 @@ class LocalSupervisor:
                 sampling: dict | None = None,
                 cache_hint: bool = True,
                 request_timeout_s: int = 900) -> Iterator[str]:
+        """与 `Supervisor.execute` 同语义：超过 `request_timeout_s` 中止推理。
+
+        P2：此前该参数被完全忽略（进程内模式没有 socket 超时），长 prefill
+        在 in_process 模式下没有任何上限。这里用定时器调 `abort()` 对齐
+        supervisor 的「请求超时 → 打断推理」行为。
+        """
         if self.state != "ready":
             raise WorkerDown("engine not ready")
+        timer = None
+        if request_timeout_s and request_timeout_s > 0:
+            def _expire() -> None:
+                # 从定时器线程打断：等价于 subprocess 模式的读超时
+                try:
+                    self.engine.abort()
+                except Exception:
+                    pass
+            timer = threading.Timer(request_timeout_s, _expire)
+            timer.daemon = True
+            timer.start()
         try:
             yield from self.engine.stream(
                 prompt, role=role, enable_thinking=enable_thinking,
@@ -409,6 +431,9 @@ class LocalSupervisor:
         except Exception as exc:      # 与 worker 路径的错误语义对齐：结构 503；
             # 引擎进程仍在，按请求级失败处理，不把 supervisor 打进 error
             raise RequestFailed("engine failure: %s" % exc)
+        finally:
+            if timer is not None:
+                timer.cancel()
 
     def abort(self) -> None:
         try:

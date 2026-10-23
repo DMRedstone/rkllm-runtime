@@ -33,7 +33,7 @@ def estimate_seconds(model_class: str, prefill_tokens: int,
 
 
 class Job:
-    __slots__ = ("id", "state", "result", "error", "created", "request_id",
+    __slots__ = ("id", "state", "result", "error", "created",
                  "_cancel_requested", "_cond")
 
     def __init__(self, job_id: str):
@@ -42,7 +42,6 @@ class Job:
         self.result: Any = None
         self.error: str | None = None
         self.created = time.monotonic()
-        self.request_id: str | None = None      # 取消传导到后端的句柄
         self._cancel_requested = threading.Event()
         self._cond = threading.Condition()
 
@@ -88,13 +87,12 @@ class JobTable:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
 
-    def create(self, request_id: str | None = None) -> Job:
+    def create(self) -> Job:
         with self._lock:
             self._evict_locked()
             if len(self._jobs) >= self.max_jobs:
                 self._drop_oldest_locked()
             job = Job(uuid.uuid4().hex[:12])
-            job.request_id = request_id
             self._jobs[job.id] = job
             return job
 

@@ -275,18 +275,28 @@ class Config:
 
 
 class _SectionView:
-    __slots__ = ("_cfg", "_section")
+    """section 视图：前缀与 values 引用预先算好，热路径只做一次 dict 查找。
+
+    审查项（效率）：原实现每次属性访问都做 f-string 拼接 + 两次
+    `object.__getattribute__` + `in` 判断 + 再取值（两次 dict 查找）。
+    `Config.values` 只会被原地修改（`cli.py` 的 `cfg.values[...] = ...`），
+    dict 对象本身不替换，因此缓存引用是安全的。
+    """
+
+    __slots__ = ("_cfg", "_section", "_prefix", "_values")
 
     def __init__(self, cfg: Config, section: str):
         object.__setattr__(self, "_cfg", cfg)
         object.__setattr__(self, "_section", section)
+        object.__setattr__(self, "_prefix", section + ".")
+        object.__setattr__(self, "_values", cfg.values)
 
     def __getattr__(self, name: str) -> Any:
-        full = f"{object.__getattribute__(self, '_section')}.{name}"
-        values = object.__getattribute__(object.__getattribute__(self, "_cfg"), "values")
-        if full not in values:
-            raise AttributeError(full)
-        return values[full]
+        key = self._prefix + name
+        try:
+            return self._values[key]
+        except KeyError:
+            raise AttributeError(key) from None
 
 
 def _coerce(key: Key, raw: Any, origin: str, errors: list[str]) -> Any:

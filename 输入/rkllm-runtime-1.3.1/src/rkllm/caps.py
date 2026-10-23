@@ -61,11 +61,6 @@ UNSUPPORTED_PARAMS: tuple[str, ...] = (
     "modalities", "audio", "prediction",
 )
 
-# 语义关键项：即便 param_policy=warn 也必须 reject（D2 教训：静默降级难定位）
-_ALWAYS_REJECT: frozenset[str] = frozenset({
-    "tool_choice", "n>1",
-})
-
 _PARAM_TIER: dict[str, str] = {
     **{p: "native" for p in NATIVE_PARAMS},
     **{p: "emulated" for p in EMULATED_PARAMS},
@@ -140,8 +135,8 @@ def check_request_params(body: dict[str, Any], *,
 
     if body.get("n", 1) not in (1, None):
         reject.append("n>1")
-    # tool_choice 与 json_schema 同属语义关键项：_ALWAYS_REJECT 声明为恒 reject，
-    # 就必须真的拦——旧实现只在注释里拒绝、代码里静默忽略（审计 P2-8）。
+    # tool_choice 与 json_schema 同属语义关键项：声明为「必须拦」就必须真的拦
+    # ——旧实现只在注释里拒绝、代码里静默忽略（审计 P2-8）。
     tc = body.get("tool_choice")
     if tc is not None:
         # P1-15：只拒绝"强制指定"模式；auto/none 无强制语义，放行（新 SDK 默认

@@ -172,7 +172,9 @@ def test_serve_startup_path(monkeypatch, tmp_path):
 
     sup = _Sup()
     ran = {}
-    monkeypatch.setattr(cli, "_build_supervisor", lambda cfg, use_fake: sup)
+    # A-4：serve 的实现已拆到 cli_serve 模块，patch 目标随之调整（断言不变）
+    monkeypatch.setattr("rkllm.cli_serve._build_supervisor",
+                        lambda cfg, use_fake: sup)
     monkeypatch.setattr("uvicorn.run", lambda *a, **k: ran.update(kwargs=k))
     code = cli.main(["serve", str(model), "--port", "18099",
                      "--host", "127.0.0.1", "--api-key", "k"])

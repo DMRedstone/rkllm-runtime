@@ -236,8 +236,7 @@ class StdioServer:
 
     def _run_as_job(self, short: str, handler, arguments: dict,
                     progress_token, request_id=None) -> dict:
-        job = self.jobs.create(request_id=str(request_id)
-                               if request_id is not None else None)
+        job = self.jobs.create()
         if self.jobs.get(job.id) is None:      # 防御：刚建即被逐出
             raise JsonRpcError(-32603, "job table overflow")
         key = str(request_id) if request_id is not None else None
@@ -356,6 +355,16 @@ class StdioServer:
         reader.start()
         reader.join()
         # 进程退出：取消在飞任务（M4：断开后 NPU 不空转）
+        # P2：原实现只取消 job，排队/执行中的**同步**调用（_inflight 里的
+        # CancelFlag）没人置位，NPU 会把这些请求一路算完。这里一并取消；
+        # Job 与 CancelFlag 都有幂等的 cancel()，重复调用无副作用。
+        with self._lock:
+            handles = list(self._inflight.values())
+        for handle in handles:
+            try:
+                handle.cancel()
+            except Exception:
+                pass
         for job in self.jobs.all():
             job.cancel()
         self._control_pool.shutdown(wait=False, cancel_futures=True)

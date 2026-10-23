@@ -13,28 +13,28 @@ token 流），再把结果/增量翻译回 Responses 结构与事件序列。
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import queue as queue_mod
-import threading
-import time
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ...agent import responses as tr
 from ...agent.pipeline import Pipeline
+from ..pipeline_runner import (SchemaError as _SchemaError,
+                               build_pipeline as _pipeline,
+                               http_error as _http_error,
+                               run_blocking as _run_blocking,
+                               run_blocking_checked as _run_blocking_checked,
+                               service_of as _svc)
 from ..queue import QueueBusy, QueueTimeout
+from ..streaming import (DISCONNECT, DONE, HEARTBEAT, TokenStream,
+                         iterate_stream)
 from ..supervisor import WorkerDown
-from .openai import (_http_error, _pipeline, _run_blocking, _svc,
-                     _run_blocking_checked, _SchemaError, _json_payload)
 
 router = APIRouter(prefix="/v1")
 
 log = logging.getLogger("rkllm.server.responses")
-
-_STREAM_DONE = object()
 
 
 def _sse(event: str, payload: dict) -> str:
@@ -128,29 +128,13 @@ def create_response(request: Request, body: dict):
 
 def _stream(request: Request, svc, pipe: Pipeline, body: dict,
             resp_id: str, created: int):
-    """SSE 事件流：把 chat 增量翻译成 Responses 事件序列。"""
+    """SSE 事件流：把 chat 增量翻译成 Responses 事件序列。
+
+    F-1：泵线程、心跳计时、断连取消统一由 `server.streaming` 提供——与
+    `/v1/chat/completions` 走同一套实现（此前两处各写一份，取消路径漂移）。
+    """
     heartbeat_s = max(1, int(svc.stream_heartbeat_s))
-    items: queue_mod.Queue = queue_mod.Queue(maxsize=512)
-
-    def pump() -> None:
-        try:
-            for item in svc.queue.run(lambda: pipe.iter_tokens()):
-                try:
-                    items.put(item, timeout=5)
-                except queue_mod.Full:
-                    break                 # 消费者已消失，别再攒（P0-3，对齐 openai）
-        except BaseException as exc:
-            try:
-                items.put(exc, timeout=1)
-            except queue_mod.Full:
-                pass
-        finally:
-            try:
-                items.put(_STREAM_DONE, timeout=1)
-            except queue_mod.Full:
-                pass
-
-    threading.Thread(target=pump, daemon=True, name="responses-pump").start()
+    stream = TokenStream(svc, pipe, name="responses-pump")
 
     def item_added(item: dict, index: int) -> str:
         return _sse("response.output_item.added",
@@ -165,25 +149,6 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
             payload = {"type": name, "sequence_number": seq, **payload}
             seq += 1
             return _sse(name, payload)
-
-        def _abort() -> None:
-            if svc.supervisor is not None:
-                try:
-                    svc.supervisor.abort()
-                except Exception:
-                    pass
-
-        async def watch_disconnect() -> None:
-            """直接长轮询 receive()：uvicorn 在 connection_lost 时推 http.disconnect。"""
-            try:
-                while not stop_watch.is_set():
-                    message = await request.receive()
-                    if message.get("type") == "http.disconnect":
-                        log.info("client disconnected -> abort worker")
-                        _abort()
-                        return
-            except Exception:
-                return
 
         message_id = "msg_" + resp_id[5:29]
         shell = tr.response_object(resp_id=resp_id,
@@ -203,87 +168,70 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
         parts: list[str] = []
         calls: list[dict] = []
         failure: BaseException | None = None
-        finished = False
-        last_emit = time.monotonic()
-        stop_watch = asyncio.Event()
-        watcher = asyncio.create_task(watch_disconnect())
-        try:
-            while True:
-                try:
-                    item = items.get_nowait()
-                except queue_mod.Empty:
-                    if time.monotonic() - last_emit >= heartbeat_s:
-                        yield ": ping\n\n"        # 长 prefill 保活（与 chat 一致）
-                        last_emit = time.monotonic()
-                    await asyncio.sleep(0.02)
-                    continue
-                if stop_watch.is_set():
-                    return
-                if item is _STREAM_DONE:
-                    break
-                if isinstance(item, BaseException):
-                    failure = item
-                    break
-                if isinstance(item, dict):
-                    if item.get("tool_calls"):
-                        calls = item["tool_calls"]
-                    continue
-                parts.append(item)
-                yield ev("response.output_text.delta", {
-                    "item_id": message_id, "output_index": 0,
-                    "content_index": 0, "delta": item})
-                last_emit = time.monotonic()
-
-            text = "".join(parts)
-            if failure is not None:
-                err = ("internal error" if not isinstance(
-                    failure, (QueueBusy, QueueTimeout, WorkerDown))
-                    else str(failure)[:300])
-                yield ev("response.failed", {
-                    "response": {**shell, "status": "failed",
-                                 "error": {"code": "stream_error", "message": err}}})
-                yield "data: [DONE]\n\n"
-                finished = True
-                return
-
-            # 文本消息收尾
-            yield ev("response.output_text.done", {
+        async for kind, item in iterate_stream(request, stream, heartbeat_s):
+            if kind == HEARTBEAT:
+                yield ": ping\n\n"        # 长 prefill 保活（与 chat 一致）
+                continue
+            if kind == DISCONNECT:
+                return                    # 已两段式取消并归还 NPU
+            if kind == DONE:
+                break
+            if isinstance(item, BaseException):
+                failure = item
+                break
+            if isinstance(item, dict):
+                if item.get("tool_calls"):
+                    calls = item["tool_calls"]
+                continue
+            parts.append(item)
+            yield ev("response.output_text.delta", {
                 "item_id": message_id, "output_index": 0,
-                "content_index": 0, "text": text})
-            yield ev("response.content_part.done", {
-                "item_id": message_id, "output_index": 0, "content_index": 0,
-                "part": {"type": "output_text", "text": text,
-                         "annotations": []}})
-            yield ev("response.output_item.done", {
-                "output_index": 0,
-                "item": tr.message_item(text, item_id=message_id)})
+                "content_index": 0, "delta": item})
 
-            output = [tr.message_item(text, item_id=message_id)]
-            for offset, call in enumerate(calls, start=1):
-                fc = tr.function_call_item(call)
-                output.append(fc)
-                yield item_added({**fc, "status": "in_progress",
-                                  "arguments": ""}, offset)
-                yield ev("response.function_call_arguments.delta", {
-                    "item_id": fc["id"], "output_index": offset,
-                    "delta": fc["arguments"]})
-                yield ev("response.function_call_arguments.done", {
-                    "item_id": fc["id"], "output_index": offset,
-                    "arguments": fc["arguments"]})
-                yield ev("response.output_item.done", {"output_index": offset,
-                                                       "item": fc})
-
-            final = tr.response_object(
-                resp_id=resp_id, model=body.get("model", svc.model_name),
-                created_at=created, status="completed", output=output,
-                usage=tr._usage(pipe.usage({"text": text})), request_body=body)
-            yield ev("response.completed", {"response": final})
+        text = "".join(parts)
+        if failure is not None:
+            err = ("internal error" if not isinstance(
+                failure, (QueueBusy, QueueTimeout, WorkerDown))
+                else str(failure)[:300])
+            yield ev("response.failed", {
+                "response": {**shell, "status": "failed",
+                             "error": {"code": "stream_error", "message": err}}})
             yield "data: [DONE]\n\n"
-            finished = True
-        finally:
-            stop_watch.set()
-            watcher.cancel()
-            if not finished:
-                _abort()
+            stream.mark_settled()         # 已发终帧：收尾不再 abort
+            return
+
+        # 文本消息收尾
+        yield ev("response.output_text.done", {
+            "item_id": message_id, "output_index": 0,
+            "content_index": 0, "text": text})
+        yield ev("response.content_part.done", {
+            "item_id": message_id, "output_index": 0, "content_index": 0,
+            "part": {"type": "output_text", "text": text,
+                     "annotations": []}})
+        yield ev("response.output_item.done", {
+            "output_index": 0,
+            "item": tr.message_item(text, item_id=message_id)})
+
+        output = [tr.message_item(text, item_id=message_id)]
+        for offset, call in enumerate(calls, start=1):
+            fc = tr.function_call_item(call)
+            output.append(fc)
+            yield item_added({**fc, "status": "in_progress",
+                              "arguments": ""}, offset)
+            yield ev("response.function_call_arguments.delta", {
+                "item_id": fc["id"], "output_index": offset,
+                "delta": fc["arguments"]})
+            yield ev("response.function_call_arguments.done", {
+                "item_id": fc["id"], "output_index": offset,
+                "arguments": fc["arguments"]})
+            yield ev("response.output_item.done", {"output_index": offset,
+                                                   "item": fc})
+
+        final = tr.response_object(
+            resp_id=resp_id, model=body.get("model", svc.model_name),
+            created_at=created, status="completed", output=output,
+            usage=tr._usage(pipe.usage({"text": text})), request_body=body)
+        yield ev("response.completed", {"response": final})
+        yield "data: [DONE]\n\n"
 
     return generate()

@@ -17,9 +17,28 @@ import json
 import struct
 from typing import Any
 
-__all__ = ["FrameError", "read_frame", "write_frame", "MAX_FRAME_BYTES"]
+__all__ = ["FrameError", "read_frame", "write_frame", "MAX_FRAME_BYTES",
+           "PROTOCOL_VERSION", "OP_RUN", "OP_ABORT", "OP_PING", "OP_SHUTDOWN",
+           "OP_TOKEN", "OP_END", "OP_ERROR", "OP_READY", "OP_STATE"]
 
 MAX_FRAME_BYTES = 8 * 1024 * 1024   # 与 MCP 消息上限同源
+
+# ---- 帧协议版本与 op 常量（A-8）-------------------------------------------
+# 原先 "run"/"token"/"end"/"error"/"ready" 等字面量散落在 worker 与 server
+# 两侧，改一个 op 要 grep 两个文件、拼错只会在运行期变成"未知帧"。收敛到
+# 这里，并在 ready 帧带 `v` 供 supervisor 校验版本错配（部署时 worker 与
+# server 来自同一 wheel，但灰度/回滚时会出现版本不一致）。
+PROTOCOL_VERSION = 1
+
+OP_RUN = "run"            # client → worker
+OP_ABORT = "abort"
+OP_PING = "ping"
+OP_SHUTDOWN = "shutdown"
+OP_TOKEN = "token"        # worker → client
+OP_END = "end"
+OP_ERROR = "error"
+OP_READY = "ready"
+OP_STATE = "state"
 
 
 class FrameError(Exception):

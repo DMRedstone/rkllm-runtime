@@ -6,11 +6,14 @@ max_wait=0 表示不排队；等待超时与推理时长上限按配置执行。
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any, Callable, Iterator
 
 __all__ = ["QueueBusy", "QueueTimeout", "InferenceQueue"]
+
+log = logging.getLogger("rkllm.server.queue")
 
 
 class QueueBusy(Exception):
@@ -34,10 +37,9 @@ class InferenceQueue:
         # 并告警，比"键存在但不生效"诚实。
         self.max_concurrent = 1
         if int(max_concurrent) > 1:
-            import sys as _sys
-            _sys.stderr.write(
-                "[rkllm] queue.max_concurrent=%d 已夹紧为 1：单 NPU 单引擎串行\n"
-                % int(max_concurrent))
+            # A-3：告警走日志系统（原先 sys.stderr.write，配 logging.file 时看不到）
+            log.warning("queue.max_concurrent=%d 已夹紧为 1：单 NPU 单引擎串行",
+                        int(max_concurrent))
         self.max_wait = max_wait
         self.wait_timeout_s = wait_timeout_s
         self.request_timeout_s = request_timeout_s

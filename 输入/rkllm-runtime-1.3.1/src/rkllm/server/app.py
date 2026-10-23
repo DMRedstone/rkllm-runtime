@@ -1,76 +1,37 @@
 """FastAPI 组装 + 优雅退出（改造设计 §6.2 / D11）。
 
-装配顺序（中间件是洋葱模型，先加的在最外层）：
-1. 鉴权（N4）：默认拒绝，仅 `/ready` 豁免；api_key 为空时不启用；
-2. 请求体上限（server.max_body_bytes）：按 Content-Length 前置拒绝；
-3. CORS（server.cors_origins 非空时）。
+中间件实际顺序（**由外到内**）：CORS → 根路径改写 → 请求体上限 → 鉴权。
+
+注意方向：`app.middleware("http")` 内部是 `add_middleware`，而它是
+`insert(0)`——**后注册的在更外层**，所以执行顺序与本文件里注册的顺序相反。
+
+1. CORS（最后注册，最外层）：OPTIONS 预检必须在鉴权之前放行——浏览器的
+   预检请求不带 Authorization，若被鉴权拦下，跨域客户端整体不可用；
+2. 根路径改写 root_alias：把 `/chat/completions` 等精确路径改写到 `/v1`，
+   后续鉴权与路由都看改写后的路径；
+3. 请求体上限（server.max_body_bytes）：含 chunked 的流式计数；
+4. 鉴权（N4，最内层）：默认拒绝，仅 `/ready` 豁免；api_key 为空时不启用。
+
+取舍：体限在鉴权外层，未授权的超大 body 会先拿到 413 而不是 401。这是既有
+顺序的代价（把体限挪到鉴权内层需连同 root_alias 一起重排，而 CORS 必须
+留在最外层不能被挤动）。
+
 运维端点 /metrics 的路径与开关来自 metrics.enabled / metrics.path。
 """
 from __future__ import annotations
 
+import logging
 import sys
+import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from ..platform import derive_class, max_tokens_for
 from .auth import make_auth_middleware
+from .logsetup import request_id_var
+from .state import ServiceState
 
-
-class ServiceState:
-    """进程级服务状态：supervisor / 队列 / 配置的装配点（app.state.svc）。"""
-
-    def __init__(self, cfg, *, supervisor=None):
-        from .queue import InferenceQueue
-        self.cfg = cfg
-        self.queue = InferenceQueue(
-            max_wait=cfg.queue.max_wait,
-            wait_timeout_s=cfg.queue.wait_timeout_s,
-            request_timeout_s=cfg.queue.request_timeout_s,
-            busy_retry_after_s=cfg.queue.busy_retry_after_s,
-            max_concurrent=cfg.queue.max_concurrent)
-        self.supervisor = supervisor      # None = 未配置推理（仅运维端点）
-        self.model_name = (cfg.model.path.rsplit("/", 1)[-1]
-                           .rsplit("\\", 1)[-1].removesuffix(".rkllm")
-                           or "rkllm")
-        self.model_path = cfg.model.path
-        self.context_len = cfg.model.context
-        # 档位（F12）：显式配置优先，否则按文件名/体积推导。
-        # 键名是 model.class（Python 关键字），只能用 getattr 取。
-        self.model_class = derive_class(cfg.model.path,
-                                       getattr(cfg.model, "class", "auto"))
-        self.default_max_tokens = (cfg.model.max_tokens
-                                   or max_tokens_for(self.model_class))
-        self.param_policy = cfg.openai.param_policy
-        self.tool_parser = cfg.openai.tool_parser
-        self.max_tool_calls = cfg.openai.max_tool_calls
-        # openai.tools_mode：native 需 rkllm_set_function_tools，ADR-06 明确不用
-        # （handle 级永久生效会污染后续请求），配置成 native 时降级为 prompt 并告警
-        self.tools_mode = cfg.openai.tools_mode
-        if self.tools_mode == "native":
-            sys.stderr.write(
-                "[rkllm] openai.tools_mode=native 不受支持（ADR-06），已按 prompt 处理\n")
-        self.reasoning_field = cfg.openai.reasoning_field
-        self.json_schema_retries = cfg.openai.json_schema_retries
-        self.stream_heartbeat_s = cfg.openai.stream_heartbeat_s
-        self.include_usage_default = cfg.openai.include_usage_default
-        # 进程级采样默认值（--temperature 等）：请求未指定时使用，
-        # 由 cli 在启动时填入；空 dict 表示全用 runtime 默认。
-        self.default_sampling: dict = {}
-        self.system_prompt = ""
-        self.version = "1.3.1-16"
-        self.lib_fingerprint: dict | None = None
-
-    def on_reset(self) -> None:
-        if self.supervisor:
-            # 走 worker 的 abort（帧协议控制帧）；KV 由下一次请求全量重放
-            self.supervisor.abort()
-
-    def ttft_log(self, seconds: float) -> None:
-        """首 token 耗时打点（N3 性能定位；默认 info 级，便于板端直接看）。"""
-        import logging
-        logging.getLogger("rkllm.server.ttft").info(
-            "supervisor 首 token %.2fs", seconds)
+log = logging.getLogger("rkllm.server")
 
 
 def create_app(cfg=None, *, supervisor=None) -> FastAPI:
@@ -177,6 +138,20 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
                                allow_methods=["GET", "POST", "OPTIONS"],
                                allow_headers=["*"])
 
+        # -- request_id（A-6：最后注册 = 最外层，预检与被拒请求也有 id）-------
+        async def request_id_mw(request: Request, call_next):
+            rid = (request.headers.get("x-request-id") or "").strip()[:64] \
+                or uuid.uuid4().hex[:12]
+            token = request_id_var.set(rid)
+            try:
+                response = await call_next(request)
+            finally:
+                request_id_var.reset(token)
+            response.headers["X-Request-Id"] = rid
+            return response
+
+        app.middleware("http")(request_id_mw)
+
     app.include_router(ops.router)
     app.include_router(openai.router)
     app.include_router(responses.router)   # Responses 翻译层（emulated）
@@ -208,7 +183,7 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
 def _render_metrics(request: Request) -> str:
     """Prometheus 文本（设计 §7.4 指标集，含 prompt 缓存命中与占用）。"""
     svc = request.app.state.svc
-    from .routes.ops import _cache_stats      # 与 /health 共用同一份统计
+    from .cacheview import cache_stats as _cache_stats   # 与 /health 共用同一份统计
     m = svc.queue.metrics
     sup = svc.supervisor.metrics if svc.supervisor else {}
     cache = _cache_stats(svc.cfg)          # 只读一次，避免 /metrics 双次统计

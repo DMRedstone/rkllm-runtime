@@ -13,50 +13,13 @@ from fastapi.responses import JSONResponse
 
 from ... import caps
 from ...platform import npu_status
+from ..cacheview import cache_stats as _cache_stats
 
 router = APIRouter()
 
 
 def _svc(request: Request):
     return request.app.state.svc
-
-
-def _cache_stats(cfg) -> dict:
-    """读取 worker 落盘的缓存统计（跨进程唯一可靠来源）。
-
-    目录不可读或文件不存在时返回零值，不报错——缓存是加速器，指标缺失不该
-    让 /health 失败。
-    """
-    if not getattr(cfg.cache, "enabled", False):
-        return {"enabled": False, "hits": 0, "misses": 0, "bytes": 0}
-    directory = cfg.cache.dir
-    stats = {"enabled": True, "hits": 0, "misses": 0, "bytes": 0}
-    bytes_from_stats = None
-    try:
-        with open(os.path.join(directory, "stats.json"), "r",
-                  encoding="utf-8") as fh:
-            data = json.load(fh)
-        stats["hits"] = int(data.get("hits", 0))
-        stats["misses"] = int(data.get("misses", 0))
-        if "bytes" in data:
-            bytes_from_stats = int(data["bytes"])
-    except (OSError, ValueError):
-        pass
-    if bytes_from_stats is not None:
-        # 效率：worker 已把 bytes 落盘，避免每次 /metrics 都 listdir+逐文件 getsize
-        stats["bytes"] = bytes_from_stats
-    else:
-        total = 0
-        try:
-            for name in os.listdir(directory):
-                try:
-                    total += os.path.getsize(os.path.join(directory, name))
-                except OSError:
-                    continue
-        except OSError:
-            pass
-        stats["bytes"] = total
-    return stats
 
 
 @router.get("/health")

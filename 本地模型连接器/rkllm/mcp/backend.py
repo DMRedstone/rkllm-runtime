@@ -8,13 +8,19 @@
 
 from __future__ import annotations
 
+import http.client
 import json
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Callable, Iterator
 
 __all__ = ["HttpBackend", "BackendError"]
+
+# 取消轮询粒度：长 prefill 期间板端不产出 chunk，主循环的检查点进不来，
+# 由看门狗线程按这个间隔检查（P2：取消原先只在收到 chunk 后生效）。
+CANCEL_POLL_S = 0.2
 
 
 class BackendError(Exception):
@@ -33,6 +39,59 @@ class HttpBackend:
         self.endpoint = endpoint.rstrip("/")
         self.api_key = api_key
         self.timeout_s = timeout_s
+        # keep-alive（审查项：原实现每次 urlopen 都新建 TCP，内网穿透下还要
+        # 重做 TLS 握手，一轮对话要付多次握手成本）。按线程复用连接——
+        # http.client 的连接不可并发共享，而调用方是多线程的工具池/job 线程。
+        parts = urllib.parse.urlsplit(self.endpoint)
+        self._scheme = parts.scheme or "http"
+        self._host = parts.hostname or "127.0.0.1"
+        self._port = parts.port
+        self._prefix = parts.path.rstrip("/")
+        self._local = threading.local()
+
+    # -- 连接管理 -----------------------------------------------------------
+    def _connection(self):
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            cls = (http.client.HTTPSConnection if self._scheme == "https"
+                   else http.client.HTTPConnection)
+            conn = cls(self._host, self._port, timeout=self.timeout_s)
+            self._local.conn = conn
+        return conn
+
+    def _drop_connection(self) -> None:
+        """丢弃本线程的连接（复用连接可能已被对端关闭，或响应未读完）。"""
+        conn = getattr(self._local, "conn", None)
+        self._local.conn = None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _request(self, path: str, body: bytes):
+        """POST 到板端并返回 `HTTPResponse`（复用 keep-alive 连接）。
+
+        首次失败可能是复用的空闲连接已被对端关闭（keep-alive idle 超时），
+        重建连接重试一次；仍失败才报不可达。
+        """
+        headers = {"Content-Type": "application/json",
+                   "Accept": "text/event-stream",
+                   **({"Authorization": "Bearer " + self.api_key}
+                      if self.api_key else {})}
+        last_exc: Exception | None = None
+        for attempt in (0, 1):
+            conn = self._connection()
+            try:
+                conn.request("POST", self._prefix + path, body=body,
+                             headers=headers)
+                return conn.getresponse()
+            except (http.client.HTTPException, OSError) as exc:
+                last_exc = exc
+                self._drop_connection()
+                if attempt == 0:
+                    continue
+        raise BackendError("无法连接板端：%s" % last_exc)
 
     def chat(self, messages: list[dict], *, max_tokens: int = 512,
              temperature: float = 0.3,
@@ -49,27 +108,43 @@ class HttpBackend:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }).encode("utf-8")
-        req = urllib.request.Request(
-            self.endpoint + "/chat/completions", data=body,
-            headers={"Content-Type": "application/json",
-                     **({"Authorization": "Bearer " + self.api_key}
-                        if self.api_key else {})})
-        try:
-            resp = urllib.request.urlopen(req, timeout=self.timeout_s)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read(2000).decode("utf-8", "replace")
-            if exc.code == 503:
-                retry = exc.headers.get("Retry-After")
+        resp = self._request("/chat/completions", body)
+        if resp.status >= 400:
+            detail = resp.read(2000).decode("utf-8", "replace")
+            self._drop_connection()   # 错误响应后连接状态不确定，不复用
+            if resp.status == 503:
+                retry = resp.getheader("Retry-After")
                 raise BackendError("模型忙：" + detail[:200],
                                    retry_after_s=int(retry) if retry else None,
                                    kind="busy")
-            raise BackendError("板端 HTTP %d：%s" % (exc.code, detail[:200]))
-        except urllib.error.URLError as exc:
-            raise BackendError("无法连接板端：%s" % exc.reason)
+            raise BackendError("板端 HTTP %d：%s"
+                               % (resp.status, detail[:200]))
 
         text_parts: list[str] = []
         usage = None
         finish_reason = "stop"
+        stop_watch = threading.Event()
+        cancelled = threading.Event()
+
+        def watchdog() -> None:
+            """无输出期的取消检查（P2）。
+
+            原实现只在收到 chunk 后检查 `cancel_check()`——长 prefill 期间
+            板端一个 chunk 都没有，取消形同虚设，任务会一直算完。这里在
+            后台线程定期检查，命中即断流+`/reset`，主循环随后退出。
+            """
+            while not stop_watch.wait(CANCEL_POLL_S):
+                if cancel_check is not None and cancel_check():
+                    cancelled.set()
+                    self._abort_remote(resp)
+                    return
+
+        watcher = None
+        if cancel_check is not None:
+            watcher = threading.Thread(target=watchdog, daemon=True,
+                                       name="backend-cancel")
+            watcher.start()
+        finished = False
         try:
             import time as _time
             _start = _time.monotonic()
@@ -78,6 +153,8 @@ class HttpBackend:
                 # ——这里加总 deadline 兜底（finally 负责 close）。
                 if _time.monotonic() - _start > self.timeout_s:
                     raise BackendError("板端响应超过总超时 %ss" % self.timeout_s)
+                if cancelled.is_set():
+                    raise BackendError("任务已取消", kind="cancelled")
                 line = raw.decode("utf-8", "replace").strip()
                 if not line.startswith("data:"):
                     continue
@@ -89,21 +166,8 @@ class HttpBackend:
                 except json.JSONDecodeError:
                     continue
                 if cancel_check and cancel_check():
-                    # 先断流（设计 §4.3：关闭连接 → 板端检测断连后 abort），
-                    # 再尽力 /reset 兜底——顺序反了会把请求留在服务端算完。
-                    try:
-                        resp.close()
-                    except OSError:
-                        pass
-                    req_abort = urllib.request.Request(
-                        self.endpoint + "/reset", data=b"{}", method="POST",
-                        headers={"Content-Type": "application/json",
-                                 **({"Authorization": "Bearer " + self.api_key}
-                                    if self.api_key else {})})
-                    try:
-                        urllib.request.urlopen(req_abort, timeout=5)
-                    except OSError:
-                        pass
+                    cancelled.set()
+                    self._abort_remote(resp)
                     raise BackendError("任务已取消", kind="cancelled")
                 err = chunk.get("error")
                 if err:
@@ -119,10 +183,37 @@ class HttpBackend:
                     text_parts.append(delta["content"])
                 if chunk.get("usage"):
                     usage = chunk["usage"]
+            finished = True
+        except (OSError, ValueError) as exc:
+            # 看门狗 close() 会让阻塞中的读抛异常——这是取消而不是板端故障
+            if cancelled.is_set():
+                raise BackendError("任务已取消", kind="cancelled") from exc
+            raise BackendError("读板端流失败：%s" % exc) from exc
         finally:
-            resp.close()
+            stop_watch.set()
+            if finished:
+                # 响应已读到 EOF：保留连接供下次复用（keep-alive）
+                pass
+            else:
+                self._drop_connection()   # 取消/异常：连接不可复用
         return {"text": "".join(text_parts), "usage": usage,
                 "finish_reason": finish_reason}
+
+    def _abort_remote(self, resp) -> None:
+        """取消收尾：先断流、再 `/reset` 兜底（顺序反了会把请求留在服务端算完）。"""
+        try:
+            resp.close()
+        except OSError:
+            pass
+        req_abort = urllib.request.Request(
+            self.endpoint + "/reset", data=b"{}", method="POST",
+            headers={"Content-Type": "application/json",
+                     **({"Authorization": "Bearer " + self.api_key}
+                        if self.api_key else {})})
+        try:
+            urllib.request.urlopen(req_abort, timeout=5)
+        except OSError:
+            pass
 
     def status(self) -> dict:
         """板端健康摘要（local_llm_status 用）。

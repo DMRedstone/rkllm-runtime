@@ -20,6 +20,23 @@ eMMC/SD 的 I/O 瓶颈与写入磨损。若 tmpfs 不可用则自动降级到 /t
 
 失败降级：缓存文件损坏或 runtime 拒绝加载时，engine 会清槽并重试一次不带
 缓存的推理——缓存只能是加速器，不能成为可用性的单点。
+
+O-1（字节级 LCP + 相似度阈值，对齐 llama.cpp `--slot-prompt-similarity`）：
+- 命中判定从 `str.startswith` 换成**字节级最长公共前缀**（UTF-8 边界安全），
+  由此得到「缓存内容中可续用的比例」`similarity = lcp / len(meta)`；
+- 为什么不做"部分前缀复用"：llama.cpp 能把 slot 的 KV 裁到公共前缀，本
+  runtime 的 `prompt_cache_params` 是**整文件加载、不截断**——注入比新 prompt
+  更长的旧 KV 会污染上下文。所以只有 `lcp == len(meta)`（严格前缀）才安全
+  命中，这一点不打折扣；
+- 阈值真正生效的位置是**是否让本请求接管单槽**（在 prepare 阶段决定，不是
+  commit）：`meta` 与 `cache` 文件必须始终配对——runtime 在 `save=1` 时会
+  直接覆盖缓存文件，若只跳过 meta 就会造成「文件是新会话的、meta 是旧会话
+  的」错位，下一次旧会话命中后加载到别人的 KV，上下文直接错。
+  因此：严格前缀 → `save=0` 复用；相似度 ≥ 阈值（同一会话的延续，例如用户
+  改了最后一句）→ `save=1` 重建；相似度低于阈值（另一个会话）→ **本次不
+  加载也不保存**（返回 None），既有配对保持不动，热点会话下一轮继续命中。
+  这避免了交错请求下「每次 miss、每次覆盖」的抖动，代价是无关会话在单槽
+  存续期间得不到缓存——比注入错误上下文的代价小得多。
 """
 
 from __future__ import annotations
@@ -35,9 +52,33 @@ _CACHE_NAME = "prefix.cache"
 _META_NAME = "prefix.meta"
 _STATS_NAME = "stats.json"
 
+# 相似度阈值：与 llama.cpp `--slot-prompt-similarity` 默认值一致（0.5）。
+# 单槽下用于区分「同一会话的延续」与「另一个会话」——低于阈值的 commit
+# 会保留既有缓存而不是覆盖（见模块 docstring 的 O-1 说明）。
+PROMPT_SIMILARITY = 0.5
+
 # 内存优先：tmpfs 是 Linux 标准内存文件系统，无需外部依赖。
 _DEFAULT_TMPFS_DIR = "/dev/shm/rkllm/prefix"
 _FALLBACK_TMP_DIR = "/tmp/rkllm/prefix"
+
+
+def common_prefix_len(left: str, right: str) -> int:
+    """字节级最长公共前缀长度（UTF-8 边界安全）。
+
+    先按 UTF-8 字节比较，再把落点回退到字符起始处——避免返回一个切在
+    多字节字符中间的偏移（那种偏移既不能用于切片，也无法与长度比较）。
+    """
+    a = left.encode("utf-8")
+    b = right.encode("utf-8")
+    limit = min(len(a), len(b))
+    index = 0
+    while index < limit and a[index] == b[index]:
+        index += 1
+    # 0b10xxxxxx 是 UTF-8 续字节：回退到该字符首字节
+    while 0 < index < len(a) and (a[index] & 0xC0) == 0x80:
+        index -= 1
+    return index
+
 
 
 def _pick_cache_dir(requested: str | None) -> str:
@@ -77,6 +118,10 @@ class PromptCache:
         self.stats_path = os.path.join(self.dir, _STATS_NAME)
         self.hits = 0
         self.misses = 0
+        # O-1：上一次 prepare 的相似度（缓存内容中可续用的比例）与因阈值
+        # 未接管单槽的次数——都进 stats.json，供板端判断前缀复用是否有效。
+        self.last_similarity = 0.0
+        self.skipped_saves = 0
         self._warned = False
         self._disabled = False
 
@@ -85,22 +130,48 @@ class PromptCache:
         """返回 (缓存路径, save 标志)。路径为 None 表示本次不使用缓存。
 
         save=0 表示"加载已有缓存"，save=1 表示"推理结束后保存"。
+
+        命中判定用字节级 LCP（O-1）：只有 `lcp == len(meta)`（缓存内容是
+        本次 prompt 的严格前缀）才安全复用——runtime 整文件加载、不截断，
+        部分前缀命中会把多余 KV 注入上下文。
         """
         if not self._usable():
             return None, 0
         self.maintain()
         meta = self._read_meta()
-        if (meta is not None and os.path.isfile(self.cache_path)
-                and len(meta) <= len(prompt) and prompt.startswith(meta)):
+        self.last_similarity = 0.0
+        if meta is None or not os.path.isfile(self.cache_path):
+            # 首次写入（或缓存文件被外部清掉）：本次建立配对
+            self.misses += 1
+            self._write_stats()
+            return self.cache_path, 1
+        meta_bytes = len(meta.encode("utf-8"))
+        prefix = common_prefix_len(prompt, meta)
+        if meta_bytes:
+            self.last_similarity = prefix / meta_bytes
+        if prefix >= meta_bytes:
             self.hits += 1
             self._write_stats()
             return self.cache_path, 0
+        if self.last_similarity >= PROMPT_SIMILARITY:
+            # 同一会话的延续（例如用户改了最后一句）：允许本轮重建缓存。
+            # save=1 会覆盖缓存文件，commit 随后同步 meta，配对保持一致。
+            self.misses += 1
+            self._write_stats()
+            return self.cache_path, 1
+        # 无关会话：不加载、不保存。既避免把别人的 KV 当前缀注入，也避免
+        # 覆盖掉热点会话的缓存文件（meta 与 cache 必须始终配对）。
+        self.skipped_saves += 1
         self.misses += 1
         self._write_stats()
-        return self.cache_path, 1
+        return None, 0
 
     def commit(self, prompt: str) -> None:
-        """推理成功后记录本次 prompt，作为下一次的前缀判断依据。"""
+        """推理成功后记录本次 prompt，作为下一次的前缀判断依据。
+
+        只在 `prepare` 返回了路径（save=1）时由 engine 调用，因此这里
+        无需再判相似度——能否接管单槽已在 prepare 阶段决定。
+        """
         if not self._usable():
             return
         try:
@@ -195,8 +266,14 @@ class PromptCache:
 
     def stats(self) -> dict:
         """跨进程可读的统计（server 的 /health 直接读这个文件）。"""
+        return self._stats_dict()
+
+    def _stats_dict(self) -> dict:
         return {"hits": self.hits, "misses": self.misses,
-                "bytes": self.bytes_used()}
+                "bytes": self.bytes_used(),
+                # O-1：相似度 gauge 与因阈值未接管单槽的次数
+                "similarity": round(self.last_similarity, 3),
+                "skipped_saves": self.skipped_saves}
 
     def _write_stats(self) -> None:
         """原子写 stats.json：worker 是唯一写者，server 只读。"""
@@ -204,8 +281,7 @@ class PromptCache:
         try:
             tmp = self.stats_path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump({"hits": self.hits, "misses": self.misses,
-                           "bytes": self.bytes_used()}, fh)
+                json.dump(self._stats_dict(), fh)
             os.replace(tmp, self.stats_path)
         except OSError:
             pass

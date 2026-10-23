@@ -12,11 +12,13 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 import stat
-import sys
 
 __all__ = ["EXEMPT_PATHS", "resolve_api_key", "make_auth_middleware"]
+
+log = logging.getLogger("rkllm.server.auth")
 
 EXEMPT_PATHS = frozenset({"/ready"})
 
@@ -28,20 +30,20 @@ def resolve_api_key(cfg) -> str:
         try:
             st = os.stat(path)
         except OSError as exc:
-            sys.stderr.write("[rkllm] api_key_file 不可读（%s）：%s；"
-                             "回退到 api_key\n" % (path, exc))
+            # A-3：走日志（不记 key 本身，只记路径与异常）
+            log.warning("api_key_file 不可读（%s）：%s；回退到 api_key",
+                        path, exc)
         else:
             if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-                sys.stderr.write(
-                    "[rkllm] 警告：%s 权限过宽（建议 0600），当前 %o\n"
-                    % (path, stat.S_IMODE(st.st_mode)))
+                log.warning("%s 权限过宽（建议 0600），当前 %o", path,
+                            stat.S_IMODE(st.st_mode))
             try:
                 with open(path, encoding="utf-8") as fh:
                     key = fh.read().strip()
                 if key:
                     return key
             except OSError as exc:
-                sys.stderr.write("[rkllm] api_key_file 读取失败：%s\n" % exc)
+                log.warning("api_key_file 读取失败：%s", exc)
     return (getattr(cfg.server, "api_key", "") or "").strip()
 
 
