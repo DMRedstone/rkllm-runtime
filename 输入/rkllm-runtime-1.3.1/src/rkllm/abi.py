@@ -83,12 +83,6 @@ class _Param(ctypes.Structure):
     ]
 
 
-class _LoraAdapter(ctypes.Structure):
-    _fields_ = [("lora_adapter_path", ctypes.c_char_p),
-                ("lora_adapter_name", ctypes.c_char_p),
-                ("scale", ctypes.c_float)]
-
-
 class _LoraParam(ctypes.Structure):
     _fields_ = [("lora_adapter_name", ctypes.c_char_p)]
 

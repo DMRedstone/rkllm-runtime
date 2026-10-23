@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Iterator
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -25,7 +24,6 @@ from ...agent.pipeline import Pipeline
 from ..pipeline_runner import (SchemaError as _SchemaError,
                                build_pipeline as _pipeline,
                                http_error as _http_error,
-                               json_payload as _json_payload,
                                run_blocking as _run_blocking,
                                run_blocking_checked as _run_blocking_checked,
                                service_of as _svc)
@@ -175,8 +173,13 @@ def _completion_payload(svc, pipe: Pipeline, result: dict,
     if result.get("reasoning") and svc.reasoning_field != "none":
         message[svc.reasoning_field] = result["reasoning"]
     if result.get("tool_calls"):
+        # OpenAI 语义：带 tool_calls 时 content 是模型**调用前**输出的文本。
+        # `result["text"]` 正是这部分——Pipeline._route_content 只把
+        # kind=="content" 的片段 yield 成文本，tool_call 块走 dict，
+        # _run_blocking 的 parts 就是这些文本的拼接。
+        # 此前这里用 `result.get("content_before_tools", "")` 覆盖，而该键
+        # 从未被产出，等于把前置文本抹成空串（已修）。
         message["tool_calls"] = result["tool_calls"]
-        message["content"] = result.get("content_before_tools", "")
     return {
         "id": "chatcmpl-" + str(id(result))[-8:],
         "object": "chat.completion",

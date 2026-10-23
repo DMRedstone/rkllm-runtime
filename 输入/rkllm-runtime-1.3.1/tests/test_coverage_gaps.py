@@ -185,6 +185,79 @@ def test_pipeline_sampling_merge():
     assert merged["top_k"] == 1              # 进程默认保留
 
 
+def test_pipeline_tool_block_not_in_text():
+    """tool_call 块不计入文本产出——这正是「调用前的 content」的定义。"""
+    import types
+
+    from rkllm.agent.pipeline import Pipeline
+
+    class Sup:
+        def __init__(self, chunks):
+            self.chunks = chunks
+
+        def execute(self, prompt, **kw):
+            return iter(self.chunks)
+
+        def abort(self):
+            pass
+
+    class Svc(_Svc):
+        supervisor = Sup(["好的，我查一下。",
+                          '<tool_call>{"name": "get_weather", '
+                          '"arguments": {"city": "北京"}}</tool_call>'])
+        queue = types.SimpleNamespace(request_timeout_s=5)
+
+        def ttft_log(self, seconds):
+            pass
+
+    body = {"messages": [{"role": "user", "content": "查天气"}],
+            "tools": [{"type": "function",
+                       "function": {"name": "get_weather", "description": "d",
+                                    "parameters": {"type": "object"}}}]}
+    pipe = Pipeline(Svc(), body, chat=True)
+    text: list[str] = []
+    meta: dict = {}
+    for item in pipe.iter_tokens():
+        if isinstance(item, dict):
+            meta.update(item)
+        else:
+            text.append(item)
+    assert "".join(text) == "好的，我查一下。"       # 不含 tool_call 块
+    assert meta["tool_calls"][0]["function"]["name"] == "get_weather"
+
+
+def test_completion_payload_keeps_pre_tool_text():
+    """带 tool_calls 时 message.content 必须是调用前的文本，不能是空串。"""
+    import types
+
+    from rkllm.server.routes.openai import _completion_payload
+
+    class Pipe:
+        def usage(self, result=None):
+            return {"prompt_tokens": 3, "completion_tokens": 4,
+                    "total_tokens": 7}
+
+        def finish_reason(self):
+            return "tool_calls"
+
+    svc = types.SimpleNamespace(reasoning_field="none", model_name="fake")
+    result = {"text": "好的，我查一下。",
+              "tool_calls": [{"id": "call_1", "type": "function",
+                              "function": {"name": "get_weather",
+                                           "arguments": "{}"}}]}
+    payload = _completion_payload(svc, Pipe(), result, 64)
+    choice = payload["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["content"] == "好的，我查一下。"
+    assert choice["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
+
+    # 无前置文本时保持空串（不改成 None，避免影响既有客户端断言）
+    empty = _completion_payload(svc, Pipe(), {"text": "", "tool_calls": [
+        {"id": "c2", "type": "function", "function": {"name": "f",
+                                                      "arguments": "{}"}}]}, 8)
+    assert empty["choices"][0]["message"]["content"] == ""
+
+
 # ---------------------------------------------------------------------------
 # 连接器 main()：启动分支（不真跑 serve_forever）
 # ---------------------------------------------------------------------------

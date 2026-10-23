@@ -12,7 +12,6 @@ kill -9 worker 后 HTTP 存活并在飞请求 503，120 s 内恢复）。
 from __future__ import annotations
 
 import collections
-import json
 import os
 import socket
 import subprocess

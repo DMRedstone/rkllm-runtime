@@ -42,22 +42,11 @@ class FakeEngine:
     def last_perf(self):
         return (3, len(str(self._turns)) + 9)   # 确定的假 perf，供 end 帧测试
 
-    def clear_history(self):
-        self._turns = 0
-        return 0
-
     def abort(self):
         return None
 
-    def is_running(self):
-        return False
-
     def destroy(self):
         self._destroyed = True
-
-    def diagnostics(self):
-        return {"library": "<fake>", "model_path": "<fake>",
-                "keep_history": self.keep_history}
 
 
 class GateEngine(FakeEngine):

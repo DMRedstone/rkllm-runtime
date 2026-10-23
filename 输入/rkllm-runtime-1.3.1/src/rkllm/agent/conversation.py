@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 __all__ = ["build_prompt"]
 

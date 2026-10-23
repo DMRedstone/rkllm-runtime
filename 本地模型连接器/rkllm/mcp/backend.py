@@ -14,7 +14,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Iterator
+from typing import Callable
 
 __all__ = ["HttpBackend", "BackendError"]
 

@@ -55,12 +55,6 @@ class JsonRpcError(Exception):
         self.message = message
         self.data = data
 
-    def as_object(self) -> dict:
-        err = {"code": self.code, "message": self.message}
-        if self.data is not None:
-            err["data"] = self.data
-        return err
-
 
 def result_payload(protocol_version: str, result: dict) -> dict:
     """按协议版本补齐 result 包裹。

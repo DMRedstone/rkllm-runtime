@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 from ..agent.json_schema import validate as validate_schema
 
-__all__ = ["TOOL_DEFS", "build_handlers", "tool_definitions", "Cancelled"]
+__all__ = ["build_handlers", "tool_definitions", "Cancelled"]
 
 # 模式预设：辅助任务的提示词骨架（中文语境，保留英文关键词）
 _MODE_PROMPTS = {
@@ -141,14 +141,14 @@ def _extract_json(text: str) -> Any:
 
 
 def build_handlers(backend, cfg: dict, jobs, *,
-                   progress_cb: Callable[[str], None] | None = None,
                    extract_retries: int = 2,
                    sessions: dict[str, list[dict]] | None = None,
                    sessions_lock: threading.Lock | None = None) -> dict[str, Callable]:
     """返回 {工具短名: handler(params, should_cancel=None)->result dict}。
 
-    cfg 需要：tool_prefix / default_max_tokens / default_temperature /
-    max_input_chars / max_result_chars / batch_max_segments。
+    cfg 需要：default_max_tokens / default_temperature / max_input_chars /
+    max_result_chars / batch_max_segments。工具名前缀由 `tool_definitions()`
+    的形参决定（stdio 自己从 cfg 取 `tool_prefix` 后传入），本函数不用。
 
     sessions/sessions_lock 给 `local_llm_chat` 的可选会话记忆（MCP 2026 无状态，
     会话只能作为工具参数显式传）；不传则每次只处理本次 messages。
@@ -166,7 +166,6 @@ def build_handlers(backend, cfg: dict, jobs, *,
         snapshot = bool(value)
         return lambda: snapshot
 
-    prefix = cfg["tool_prefix"]
     input_limit = cfg["max_input_chars"]
     result_limit = cfg["max_result_chars"]
     session_store = sessions if sessions is not None else {}

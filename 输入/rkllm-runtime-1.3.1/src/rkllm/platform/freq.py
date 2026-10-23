@@ -53,6 +53,8 @@ class FreqLock:
         self.npu_governor: tuple[str, str] | None = None     # (path, 原值)
         self.npu_limits: tuple[str, str, str] | None = None  # (min_path, max_path, 原值)
         self.cpu_governors: list[tuple[str, str]] = []
+        # 走了外部脚本时记录脚本路径：restore() 无法用内建方案还原，
+        # 且测试用它断言「外部脚本分支被选中」（本次清理复核后保留）。
         self.external_cmd: str | None = None
         self.locked = False
 

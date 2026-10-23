@@ -311,7 +311,7 @@ def _coerce(key: Key, raw: Any, origin: str, errors: list[str]) -> Any:
                     return True
                 if low in ("0", "false", "no", "off"):
                     return False
-            raise ValueError(f"需为布尔（true/false）")
+            raise ValueError("需为布尔（true/false）")
         if key.type is int:
             if isinstance(raw, bool):
                 raise ValueError("需为整数")

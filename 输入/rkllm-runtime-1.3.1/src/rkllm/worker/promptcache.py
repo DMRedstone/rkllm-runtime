@@ -41,7 +41,6 @@ O-1（字节级 LCP + 相似度阈值，对齐 llama.cpp `--slot-prompt-similari
 
 from __future__ import annotations
 
-import hashlib
 import os
 import time
 import sys

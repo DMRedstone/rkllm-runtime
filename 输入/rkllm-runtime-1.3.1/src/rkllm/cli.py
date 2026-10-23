@@ -24,13 +24,23 @@ import sys
 
 PROGRAM = "rkllm"
 
+# 兼容导出面：A-4 拆分后，这些名字仍按旧路径 `rkllm.cli._xxx` 暴露给测试与
+# 外部脚本。写进 __all__ 既说明意图，也让静态检查知道它们不是"未使用导入"。
+__all__ = ["main", "build_parser", "PROGRAM",
+           "_apply_memory_budget", "_build_supervisor", "_search_dirs",
+           "_resolve_model_path", "_make_engine",
+           "_env_default", "_env_flag", "_legacy_cli_overrides",
+           "_sampling_from_args",
+           "_cmd_serve", "_cmd_list", "_cmd_info", "_cmd_selftest",
+           "_cmd_config", "_cmd_run", "_cmd_chat"]
+
 
 # A-4：实现按职责拆到 cli_env / cli_engine / cli_info / cli_serve。
-# 这里 re-export 旧名字，保持 `rkllm.cli._xxx` 的既有访问方式可用（测试与
-# 外部脚本按旧路径引用，拆分不应让它们 AttributeError）。
-from .cli_engine import (_apply_memory_budget, _build_supervisor, _make_engine,
-                         _resolve_model_path, _search_dirs)
-from .cli_env import (_env_default, _env_flag, _legacy_cli_overrides,
+# 下面 re-export 旧名字是**有意为之**（pyflakes 会报 F401）：`rkllm.cli._xxx`
+# 是测试与外部脚本的既有访问路径，拆分不应让它们 AttributeError。
+from .cli_engine import (_apply_memory_budget, _build_supervisor,  # noqa: F401
+                         _make_engine, _resolve_model_path, _search_dirs)
+from .cli_env import (_env_default, _env_flag, _legacy_cli_overrides,  # noqa: F401
                       _sampling_from_args)
 from .cli_info import _cmd_config, _cmd_info, _cmd_list, _cmd_selftest
 from .cli_serve import _cmd_serve

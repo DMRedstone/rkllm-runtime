@@ -80,7 +80,6 @@ class Pipeline:
         self._reasoning: list[str] = []
         self._content_before: list[str] = []
         self._tool_calls: list[dict] = []
-        self._perf: dict | None = None
 
     # -- token 流 -----------------------------------------------------------
 
@@ -247,10 +246,6 @@ class Pipeline:
     @property
     def reasoning_text(self) -> str:
         return "".join(self._reasoning)
-
-    @property
-    def content_before_tools(self) -> str:
-        return "".join(self._content_before)
 
     def trailing_frames(self, session) -> list[str]:
         """流式收尾附加帧：tool_calls 增量帧与 reasoning 帧。"""

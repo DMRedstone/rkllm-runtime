@@ -13,7 +13,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
-from typing import Any, Callable
+from typing import Any
 
 __all__ = ["JobTable", "estimate_seconds", "DECODE_TOK_S"]
 

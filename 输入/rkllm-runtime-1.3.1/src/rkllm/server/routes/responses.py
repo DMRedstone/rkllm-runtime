@@ -24,7 +24,6 @@ from ...agent.pipeline import Pipeline
 from ..pipeline_runner import (SchemaError as _SchemaError,
                                build_pipeline as _pipeline,
                                http_error as _http_error,
-                               run_blocking as _run_blocking,
                                run_blocking_checked as _run_blocking_checked,
                                service_of as _svc)
 from ..queue import QueueBusy, QueueTimeout

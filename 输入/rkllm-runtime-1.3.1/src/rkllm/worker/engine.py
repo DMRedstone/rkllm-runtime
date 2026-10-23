@@ -74,10 +74,6 @@ class _Failure(Exception):
     pass
 
 
-class _Aborted(Exception):
-    pass
-
-
 _END = object()
 
 
@@ -335,20 +331,11 @@ class RealEngine:
     def last_perf(self):
         return self._last_perf
 
-    def clear_history(self):
-        return self.lib.rkllm_clear_kv_cache(self._handle, 1, None, None)
-
     def abort(self):
         try:
             return self.lib.rkllm_abort(self._handle)
         except Exception:
             return None
-
-    def is_running(self):
-        try:
-            return bool(self.lib.rkllm_is_running(self._handle))
-        except Exception:
-            return False
 
     def destroy(self):
         if self._destroyed:
@@ -358,9 +345,3 @@ class RealEngine:
             self.lib.rkllm_destroy(self._handle)
         except Exception:
             pass
-
-    def diagnostics(self):
-        return {"library": self.lib_path, "model_path": self.model_path,
-                "keep_history": self.keep_history,
-                "lib_sha256": self.lib_fingerprint.get("sha256"),
-                "lib_size": self.lib_fingerprint.get("size")}

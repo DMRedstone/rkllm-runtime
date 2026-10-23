@@ -19,7 +19,6 @@ import argparse
 import os
 import queue
 import socket
-import sys
 import threading
 
 from .frames import (OP_ABORT, OP_END, OP_ERROR, OP_PING, OP_READY, OP_RUN,
