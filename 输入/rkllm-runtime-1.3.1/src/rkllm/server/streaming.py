@@ -40,12 +40,13 @@ DONE = "done"
 # ---- 哨兵（原先 openai/responses 各定义一份 `_STREAM_DONE`）---------------
 STREAM_DONE = object()
 TRUNCATED = {"truncated": True}   # 不可变标记：泵因消费停滞而截断
+DISCONNECT_ITEM = object()        # 断连监视投进同一队列：见 iterate_stream
 
 # ---- 魔法数集中（原理由：两文件各写一份 512/5/0.02）----------------------
+# 消费停滞的判定：积压到上限即截断（PUT_TIMEOUT_S / BACKPRESSURE_POLL_S 的
+# 轮询等待已去掉，见 TokenStream._offer）。
 ITEM_QUEUE_MAXSIZE = 512
-PUT_TIMEOUT_S = 5.0        # 消费者停滞多久即判定"已消失"
-TAIL_TIMEOUT_S = 1.0       # 尾部哨兵投递：消费者已走，不能久等
-BACKPRESSURE_POLL_S = 0.01  # 仅在队列满时等待，正常路径不触发
+WATCH_IDLE_SLEEP_S = 0.05  # 断连监视：receive() 空转时的退避，见 watch()
 
 
 class CancelToken:
@@ -133,48 +134,44 @@ class TokenStream:
             # 取消导致的异常（QueueTimeout("cancelled while waiting") 等）
             # 不作为错误帧投递：客户端已经断开，没有人会读它。
             if not self.token.cancelled:
-                self._put(exc, TAIL_TIMEOUT_S)
+                self._put(exc)
         finally:
             if truncated:
-                self._put(TRUNCATED, TAIL_TIMEOUT_S)
-            self._put(STREAM_DONE, TAIL_TIMEOUT_S)
+                self._put(TRUNCATED)
+            self._put(STREAM_DONE)
             # 兜底第二段：泵退出时若已取消，确保归还（abort_once 幂等）
             if self.token.cancelled:
                 self.token.abort_once()
 
     def _offer(self, item) -> bool:
-        """投递一条 item；队列满时等消费者，超过 PUT_TIMEOUT_S 视为已消失。"""
-        deadline = time.monotonic() + PUT_TIMEOUT_S
-        while True:
-            if self.token.cancelled:
-                return False
-            if self._queue is not None and \
-                    self._queue.qsize() < ITEM_QUEUE_MAXSIZE:
-                try:
-                    self._loop.call_soon_threadsafe(
-                        self._queue.put_nowait, item)
-                    return True
-                except RuntimeError:      # 事件循环已关闭（进程收尾）
-                    return False
-            if time.monotonic() > deadline:
-                return False
-            time.sleep(BACKPRESSURE_POLL_S)
+        """投递一条 item；消费停滞（队列积压到上限）即截断，不等消费者。
 
-    def _put(self, item, timeout: float) -> None:
+        此前这里用 `sleep(0.01)` 轮询等消费者最多 5s：泵线程被卡在投递上，
+        NPU 那头却还在出 token——等的是永远不会及时消费的对端。截断语义本
+        就在契约里（`TRUNCATED` → `finish_reason=length`），与其等满 5s 不
+        如立刻截断并归还 NPU（审计 P-背压去轮询）。
+        """
+        if self.token.cancelled:
+            return False
+        if self._queue is not None and \
+                self._queue.qsize() >= ITEM_QUEUE_MAXSIZE:
+            return False
+        try:
+            self._loop.call_soon_threadsafe(self._queue.put_nowait, item)
+            return True
+        except RuntimeError:              # 事件循环已关闭（进程收尾）
+            return False
+
+    def _put(self, item) -> None:
         """尾部投递（异常/哨兵）：事件循环可能已关闭，失败即放弃。"""
         if self._queue is None or self._loop is None:
             return
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                self._loop.call_soon_threadsafe(self._queue.put_nowait, item)
-                return
-            except RuntimeError:
-                return
-            except Exception:
-                if time.monotonic() > deadline:
-                    return
-                time.sleep(BACKPRESSURE_POLL_S)
+        # asyncio.Queue 无界，`put_nowait` 不会抛 Full：这里的重试只可能来自
+        # 事件循环已关闭（RuntimeError，直接放弃），循环退避已随背压轮询一并去掉。
+        try:
+            self._loop.call_soon_threadsafe(self._queue.put_nowait, item)
+        except RuntimeError:
+            return
 
 
 async def iterate_stream(request, stream: TokenStream, heartbeat_s: int):
@@ -185,8 +182,12 @@ async def iterate_stream(request, stream: TokenStream, heartbeat_s: int):
     - `("disconnect", None)`：客户端断开（已取消 + 归还 NPU），调用方应立即结束；
     - `("done", None)`：泵结束（正常完成或截断）。
 
-    这里用 `asyncio.wait` 同时等「取到 item」与「断连」两个 task，因此
-    断连在毫秒级生效（此前要等下一轮 20ms 轮询才被看到）。
+    断连为什么走队列而不是和 getter 一起 `asyncio.wait`：实测（Python
+    3.13 + uvicorn 0.54）`asyncio.wait` 的集合里只要还有一个长期挂起的
+    task，另一个 task 的完成就**不会提前唤醒等待**——每条 token 都要等满
+    一个 `heartbeat_s`（15s）才被取走，流式从毫秒级退化成 15s/token。故
+    这里主循环只等 `queue.get()` 一个源，断连由 `watch()` 投 `DISCONNECT_ITEM`
+    到同一队列唤醒：断连仍毫秒级生效，token 也不再被心跳节拍限速。
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
@@ -198,6 +199,11 @@ async def iterate_stream(request, stream: TokenStream, heartbeat_s: int):
 
         不用 request.is_disconnected()：它内部用 CancelScope 立即取消等待，
         只读取"已经入队"的消息，流式期间极易漏掉（实测断连后永不触发）。
+
+        ASGI 并未承诺「body 读完后 receive() 会挂起」：某些 server/版本会
+        立刻返回非 disconnect 的消息，裸 while 循环随即变成空转、饿死事件
+        循环。故每轮未收到 disconnect 都退避一拍：真断连不受影响，空转时
+        让出循环。
         """
         try:
             while True:
@@ -205,7 +211,13 @@ async def iterate_stream(request, stream: TokenStream, heartbeat_s: int):
                 if message.get("type") == "http.disconnect":
                     log.info("client disconnected -> abort worker")
                     stream.cancel()        # 第一段 + 第二段（归还 NPU）
+                    try:
+                        loop.call_soon_threadsafe(queue.put_nowait,
+                                                  DISCONNECT_ITEM)
+                    except RuntimeError:     # 事件循环已关闭
+                        pass
                     return
+                await asyncio.sleep(WATCH_IDLE_SLEEP_S)
         except Exception:
             return
 
@@ -215,22 +227,21 @@ async def iterate_stream(request, stream: TokenStream, heartbeat_s: int):
         while True:
             if getter is None:
                 getter = asyncio.create_task(queue.get())
-            done, _ = await asyncio.wait({getter, watcher},
-                                         timeout=heartbeat_s)
-            if getter in done:
-                item = getter.result()
-                getter = None
-                if item is STREAM_DONE:
-                    completed = True
-                    yield DONE, None
-                    return
-                yield ITEM, item
+            done, _ = await asyncio.wait({getter}, timeout=heartbeat_s)
+            if getter not in done:
+                yield HEARTBEAT, None
                 continue
-            if watcher in done:
+            item = getter.result()
+            getter = None
+            if item is DISCONNECT_ITEM:
                 completed = True
                 yield DISCONNECT, None
                 return
-            yield HEARTBEAT, None
+            if item is STREAM_DONE:
+                completed = True
+                yield DONE, None
+                return
+            yield ITEM, item
     finally:
         watcher.cancel()
         if getter is not None and not getter.done():

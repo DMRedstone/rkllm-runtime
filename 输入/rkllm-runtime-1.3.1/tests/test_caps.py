@@ -7,8 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from rkllm.caps import (CAPS, ENDPOINTS, capabilities_doc, check_request_params,
-                        param_tier)
+from rkllm.caps import CAPS, ENDPOINTS, check_request_params, param_tier
 
 
 def test_caps_structure():
@@ -75,6 +74,3 @@ def test_endpoints_native_core():
     assert ENDPOINTS["embeddings"] == "unsupported"
 
 
-def test_capabilities_doc_line():
-    line = capabilities_doc()
-    assert "native" in line and "emulated" in line

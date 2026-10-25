@@ -237,7 +237,7 @@ def test_completion_payload_keeps_pre_tool_text():
             return {"prompt_tokens": 3, "completion_tokens": 4,
                     "total_tokens": 7}
 
-        def finish_reason(self):
+        def finish_reason(self, result=None):
             return "tool_calls"
 
     svc = types.SimpleNamespace(reasoning_field="none", model_name="fake")

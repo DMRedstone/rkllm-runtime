@@ -21,7 +21,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ...agent.pipeline import Pipeline
-from ..pipeline_runner import (SchemaError as _SchemaError,
+from ..pipeline_runner import (BUSY_MESSAGE,
+                               SchemaError as _SchemaError,
+                               StreamTimer,
                                build_pipeline as _pipeline,
                                http_error as _http_error,
                                run_blocking as _run_blocking,
@@ -38,6 +40,7 @@ from ... import caps
 router = APIRouter(prefix="/v1")
 
 log = logging.getLogger("rkllm.server.openai")
+
 
 
 @router.get("/models")
@@ -99,7 +102,7 @@ def chat_completions(body: ChatCompletionRequest, request: Request):
                            "response did not match response_format.json_schema "
                            "after retries: %s" % exc, code="schema_mismatch")
     except QueueBusy as exc:
-        return _http_error(503, "server_error", "model busy",
+        return _http_error(503, "server_error", BUSY_MESSAGE,
                            code="queue_full",
                            **{"Retry-After": str(exc.retry_after_s)})
     except QueueTimeout:
@@ -129,6 +132,7 @@ def _stream_chat(request: Request, svc, pipe: Pipeline, raw: dict):
     heartbeat_s = max(1, int(svc.stream_heartbeat_s))
 
     async def generate():
+        timer = StreamTimer()
         yield session.first_frame()
         truncated = False
         async for kind, item in iterate_stream(request, stream, heartbeat_s):
@@ -136,7 +140,8 @@ def _stream_chat(request: Request, svc, pipe: Pipeline, raw: dict):
                 yield session.heartbeat()       # D9：无 token 期间续命
                 continue
             if kind == DISCONNECT:
-                return                          # 已两段式取消并归还 NPU
+                timer.finish(svc, pipe)         # 断连也计入（NPU 已归还）
+                return
             if kind == DONE:
                 break
             if isinstance(item, BaseException):
@@ -151,6 +156,7 @@ def _stream_chat(request: Request, svc, pipe: Pipeline, raw: dict):
                 if item.get("truncated"):
                     truncated = True
                 continue                        # 管线元数据（tool_calls 等）
+            timer.first_token()
             yield session.delta_frame(content=item)
 
         for frame in pipe.trailing_frames(session):
@@ -161,6 +167,7 @@ def _stream_chat(request: Request, svc, pipe: Pipeline, raw: dict):
             (raw.get("stream_options") or {}).get("include_usage"))
         if want_usage:
             yield session.usage_frame(pipe.usage())
+        timer.finish(svc, pipe)
         yield session.done()
 
     return generate()
@@ -186,29 +193,45 @@ def _completion_payload(svc, pipe: Pipeline, result: dict,
         "created": int(time.time()),
         "model": svc.model_name,
         "choices": [{"index": 0, "message": message,
-                     "finish_reason": pipe.finish_reason()}],
+                     "finish_reason": pipe.finish_reason(result)}],
         "usage": usage,
     }
 
 
 @router.post("/completions")
 def completions(body: CompletionRequest, request: Request):
-    """薄封装：prompt 直喂 runtime（设计 §4.1 native）。"""
+    """legacy completions：prompt 直喂 runtime（设计 §4.1 native）。
+
+    流式与非流式同 chat 端点语义；信封为 text_completion（delta.text）。
+    """
     svc = _svc(request)
     raw = body.model_dump()
+    streaming = bool(raw.get("stream"))
     # completions 同样走 caps 参数策略（审计 P3-9）
     reject, warn = caps.check_request_params(raw, policy=svc.param_policy,
-                                            stream=bool(raw.get("stream")))
+                                            stream=streaming)
     if reject:
         return _http_error(400, "invalid_request_error",
                            "unsupported parameter(s): %s" % ", ".join(reject),
                            code="unsupported_parameter")
     headers = {"X-RKLLM-Unsupported": ",".join(warn)} if warn else {}
-    pipe = _pipeline(svc, raw, chat=False)
+    max_tokens = raw.get("max_tokens") or svc.default_max_tokens
+
+    if streaming:
+        try:
+            pipe = _pipeline(svc, {**raw, "max_tokens": max_tokens}, chat=False)
+        except ValueError as exc:
+            return _http_error(400, "invalid_request_error", str(exc))
+        return StreamingResponse(
+            _stream_completions(request, svc, pipe, raw),
+            media_type="text/event-stream",
+            headers={**sse_response_headers(), **headers})
+
+    pipe = _pipeline(svc, {**raw, "max_tokens": max_tokens}, chat=False)
     try:
         result = _run_blocking(svc, pipe)
     except QueueBusy as exc:
-        return _http_error(503, "server_error", "model busy",
+        return _http_error(503, "server_error", BUSY_MESSAGE,
                            code="queue_full",
                            **{"Retry-After": str(exc.retry_after_s)})
     except (QueueTimeout, WorkerDown) as exc:
@@ -219,6 +242,57 @@ def completions(body: CompletionRequest, request: Request):
         "created": int(time.time()),
         "model": svc.model_name,
         "choices": [{"index": 0, "text": result["text"],
-                     "finish_reason": pipe.finish_reason()}],
+                     "finish_reason": pipe.finish_reason(result)}],
         "usage": pipe.usage(result),
     }, headers=headers)
+
+
+def _stream_completions(request: Request, svc, pipe: Pipeline, raw: dict):
+    """completions 的 SSE 生成器：text_completion 信封（delta.text，无 role）。
+
+    复用与 chat 完全相同的两段式取消 / 心跳 / 错误帧机制（F-1），只换信封。
+    """
+    session = SseSession(model=svc.model_name,
+                         object_name="text_completion",
+                         delta_field="text")
+    stream = TokenStream(svc, pipe, name="sse-pump")
+    heartbeat_s = max(1, int(svc.stream_heartbeat_s))
+
+    async def generate():
+        timer = StreamTimer()
+        yield session.first_frame(role=None)
+        truncated = False
+        async for kind, item in iterate_stream(request, stream, heartbeat_s):
+            if kind == HEARTBEAT:
+                yield session.heartbeat()
+                continue
+            if kind == DISCONNECT:
+                timer.finish(svc, pipe)
+                return
+            if kind == DONE:
+                break
+            if isinstance(item, BaseException):
+                if isinstance(item, (QueueBusy, QueueTimeout, WorkerDown)):
+                    yield session.error_frame(str(item)[:300])
+                else:
+                    yield session.error_frame("internal error")
+                yield session.done()
+                stream.mark_settled()
+                return
+            if isinstance(item, dict):
+                if item.get("truncated"):
+                    truncated = True
+                continue
+            timer.first_token()
+            yield session.delta_frame(content=item)
+
+        yield session.finish_frame("length" if truncated
+                                   else pipe.finish_reason())
+        want_usage = svc.include_usage_default or bool(
+            (raw.get("stream_options") or {}).get("include_usage"))
+        if want_usage:
+            yield session.usage_frame(pipe.usage())
+        timer.finish(svc, pipe)
+        yield session.done()
+
+    return generate()

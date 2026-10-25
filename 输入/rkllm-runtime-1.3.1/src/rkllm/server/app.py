@@ -29,6 +29,7 @@ import uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from .. import VERSION
 from .auth import make_auth_middleware
 from .logsetup import request_id_var
 from .state import ServiceState
@@ -39,7 +40,7 @@ log = logging.getLogger("rkllm.server")
 def create_app(cfg=None, *, supervisor=None) -> FastAPI:
     from .routes import ops, openai, responses, unsupported
 
-    app = FastAPI(title="rkllm-server", version="1.3.1-16",
+    app = FastAPI(title="rkllm-server", version=VERSION,
                   docs_url=None, redoc_url=None, openapi_url="/openapi.json")
     svc = ServiceState(cfg, supervisor=supervisor) if cfg else None
     app.state.svc = svc
@@ -106,7 +107,7 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
                 state = app.state.svc
                 if state is None:
                     return JSONResponse({"service": "rkllm-server",
-                                         "version": "1.3.1-16"})
+                                         "version": VERSION})
                 return JSONResponse({
                     "service": "rkllm-server",
                     "version": state.version,

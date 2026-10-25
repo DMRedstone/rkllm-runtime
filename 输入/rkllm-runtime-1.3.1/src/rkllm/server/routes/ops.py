@@ -28,6 +28,10 @@ def health(request: Request):
     # in_process 模式下 supervisor 直接暴露 engine 的指纹。
     fingerprint = (getattr(svc.supervisor, "lib_fingerprint", None)
                    or svc.lib_fingerprint or {})
+    # 1.3.1-15 兼容：旧客户端（health_check 等）读 stats 计数。计数现以
+    # Prometheus /metrics 为正本，这里原样暴露同一组计数器（2026-10-25
+    # 审计 P1：对外契约不能无声变化）。
+    m = svc.queue.metrics
     return {
         "state": svc.supervisor.state if svc.supervisor else "unconfigured",
         "context_len": svc.context_len,
@@ -40,6 +44,13 @@ def health(request: Request):
         "version": svc.version,
         "lib_sha256": fingerprint.get("sha256"),
         "lib_size": fingerprint.get("size"),
+        "stats": {
+            "requests": m.get("requests_total", 0),
+            "rejected": m.get("rejected_total", 0),
+            "errors": m.get("errors_total", 0),
+            "prompt_tokens": m.get("prompt_tokens_total", 0),
+            "completion_tokens": m.get("completion_tokens_total", 0),
+        },
         # 驱动可用性对运维/本地 status 工具可见（0.9.x 起是 DRM render node）
         "npu": {"available": npu_ok, "detail": npu_detail},
         # 设计 §6.4(4)：缓存命中与占用对运维可见

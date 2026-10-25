@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 from .cli_engine import _search_dirs
+from . import VERSION
 
 __all__ = ["_cmd_list", "_cmd_info", "_cmd_selftest", "_cmd_config"]
 
@@ -47,7 +49,7 @@ def _cmd_info(args) -> int:
     from .platform import available_mb, detect_platform, npu_status
     npu_available, npu_detail = npu_status()
     info = {
-        "rkllm": "1.3.1-16",
+        "rkllm": VERSION,
         "python": sys.version.split()[0],
         "platform_detected": detect_platform(),
         "machine": py_platform.machine(),
@@ -102,7 +104,8 @@ def _cmd_selftest(args) -> int:
             pass
     checks.append(("model files", bool(models), "%d 个" % len(models)))
     from .config import SCHEMA
-    checks.append(("config schema", len(SCHEMA) == 80, "%d 键" % len(SCHEMA)))
+    checks.append(("config schema", len(SCHEMA) == 82, "%d 键" % len(SCHEMA)))
+    checks.extend(_selftest_http())
 
     failed = 0
     for name, ok, detail in checks:
@@ -110,6 +113,142 @@ def _cmd_selftest(args) -> int:
         failed += 0 if ok else 1
     print("\n%d/%d 通过" % (len(checks) - failed, len(checks)))
     return 0 if failed == 0 else 1
+
+
+def _selftest_http() -> list[tuple[str, bool, str]]:
+    """HTTP 端到端回环：真实 uvicorn + 临时端口 + FakeEngine，不依赖 NPU。
+
+    1.3.1-15 的 selftest 覆盖 models/401/chat/流式/stop/usage（「装完即用」
+    的验收强度）；新栈一度缩水为纯静态检查，2026-10-25 审计后恢复。
+
+    为什么不用 `fastapi.testclient`：TestClient 的 ASGI transport 会让
+    `request.receive()`（断连监视用）立刻返回并空转，事件循环被饿死——
+    实测每个 token 要等满一个心跳周期（15s）才投递到 SSE，一条 30 token
+    的回环要跑几分钟，selftest 形同卡死。真机/uvicorn 下没有该现象
+    （真 socket 的 receive() 会真正挂起），所以回环走真实端口：既贴近
+    生产路径，又不引入测试栈特有的假故障。
+    """
+    try:
+        import asyncio
+        import http.client
+        import json as _json
+        import socket
+        import threading
+
+        import uvicorn
+
+        from .config import load_config
+        from .server.app import create_app
+        from .server.supervisor import LocalSupervisor
+        from .worker.fake import FakeEngine
+    except Exception as exc:                      # noqa: BLE001
+        return [("http e2e (deps)", False, str(exc)[:120])]
+
+    key = "selftest-probe-key"
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+
+    cfg = load_config(env={"RKLLM_API_KEY": key})
+    app = create_app(cfg, supervisor=LocalSupervisor(FakeEngine()))
+    server = uvicorn.Server(uvicorn.Config(
+        app, host="127.0.0.1", port=port, log_level="warning",
+        access_log=False))
+    server.install_signal_handlers = lambda: None   # 非主线程装 handler 会炸
+
+    def _serve() -> None:
+        asyncio.run(server.serve())
+
+    th = threading.Thread(target=_serve, daemon=True, name="selftest-http")
+    th.start()
+    for _ in range(100):                            # 至多等 10s
+        if server.started:
+            break
+        time.sleep(0.1)
+    if not server.started:
+        server.should_exit = True
+        return [("http e2e (boot)", False, "uvicorn 未能在 10s 内起来")]
+
+    def call(method: str, path: str, body=None, auth: bool = True):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        headers = {"Content-Type": "application/json"}
+        if auth:
+            headers["Authorization"] = "Bearer " + key
+        try:
+            conn.request(method, path,
+                         body=_json.dumps(body) if body is not None else None,
+                         headers=headers)
+            resp = conn.getresponse()
+            raw = resp.read().decode("utf-8", "replace")
+            return resp.status, raw
+        finally:
+            conn.close()
+
+    out: list[tuple[str, bool, str]] = []
+    try:
+        status, raw = call("GET", "/v1/models")
+        body = _json.loads(raw) if status == 200 else {}
+        out.append(("http models", status == 200 and body.get("object") == "list"
+                    and bool(body.get("data")), "GET /v1/models"))
+
+        status, _ = call("GET", "/v1/models", auth=False)
+        out.append(("http auth 401", status == 401, "无 Authorization → 401"))
+
+        status, raw = call("POST", "/v1/chat/completions",
+                           {"messages": [{"role": "user", "content": "ping"}],
+                            "max_tokens": 16})
+        body = _json.loads(raw) if status == 200 else {}
+        choice = (body.get("choices") or [{}])[0]
+        usage = body.get("usage") or {}
+        out.append(("http chat",
+                    status == 200
+                    and "answer" in (choice.get("message") or {}).get(
+                        "content", "")
+                    and "completion_tokens" in usage,
+                    "chat.completion + usage（%s）"
+                    % (choice.get("finish_reason") or "?")))
+
+        status, raw = call("POST", "/v1/chat/completions",
+                           {"messages": [{"role": "user", "content": "ping"}],
+                            "stream": True})
+        out.append(("http chat stream",
+                    status == 200 and "chat.completion.chunk" in raw
+                    and raw.rstrip().endswith("data: [DONE]"),
+                    "SSE + [DONE]"))
+
+        status, raw = call("POST", "/v1/completions",
+                           {"prompt": "ping", "stream": True})
+        out.append(("http completions stream",
+                    status == 200 and "text_completion" in raw
+                    and raw.rstrip().endswith("data: [DONE]"),
+                    "text_completion 信封（P0-2 修复后）"))
+
+        status, raw = call("POST", "/v1/chat/completions",
+                           {"messages": [{"role": "user",
+                                          "content": "一二三四五"}],
+                            "stop": ["三"], "max_tokens": 64})
+        body = _json.loads(raw) if status == 200 else {}
+        text = ((body.get("choices") or [{}])[0].get("message")
+                or {}).get("content") or ""
+        out.append(("http stop 截断", status == 200 and "三" not in text,
+                    repr(text[:24])))
+
+        status, raw = call("GET", "/health")
+        stats = (_json.loads(raw) if status == 200 else {}).get("stats") or {}
+        out.append(("http health stats",
+                    status == 200
+                    and {"requests", "rejected", "errors"} <= set(stats),
+                    "15 版兼容计数（requests=%s）"
+                    % stats.get("requests", "?")))
+    except Exception as exc:                      # noqa: BLE001
+        out.append(("http e2e (abort)", False, str(exc)[:120]))
+    finally:
+        server.should_exit = True
+        th.join(timeout=5)
+    return out
+
+
 def _cmd_config(args) -> int:
     from .config import load_config, config_docs, config_init, config_show
     if args.action == "docs":

@@ -176,7 +176,8 @@ def build_engine(args):
     if getattr(args, "cache_dir", "") and not getattr(args, "no_cache", False):
         cache = PromptCache(args.cache_dir,
                             max_mb=getattr(args, "cache_max_mb", 512),
-                            ttl_s=getattr(args, "cache_ttl_s", 604800))
+                            ttl_s=getattr(args, "cache_ttl_s", 604800),
+                            similarity=getattr(args, "cache_similarity", 0.5))
     return RealEngine(model_path=args.model, platform=args.platform,
                       context_len=args.context, max_new_tokens=args.max_tokens,
                       keep_history=not args.no_history, threads=args.threads,

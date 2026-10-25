@@ -27,6 +27,9 @@ router = APIRouter()
 _UNSUPPORTED: dict[str, tuple[str, str]] = {
     "/v1/embeddings": ("embeddings", "/v1/chat/completions（本服务不提供向量化）"),
     "/v1/messages": ("messages(anthropic)", "/v1/chat/completions（OpenAI 形状）"),
+    # root_alias 会把 /moderations 改写到这里；没有这条路由就落框架 404，
+    # 与其余 unsupported 端点的显式 501 不一致（10-25 审计 P2）。
+    "/v1/moderations": ("moderations", "/v1/chat/completions（本服务不做内容审核）"),
 }
 
 
@@ -59,6 +62,11 @@ async def embeddings_not_implemented(request: Request) -> JSONResponse:
 @router.post("/v1/messages", include_in_schema=False)
 async def anthropic_messages_not_implemented(request: Request) -> JSONResponse:
     return _reject("/v1/messages")
+
+
+@router.post("/v1/moderations", include_in_schema=False)
+async def moderations_not_implemented(request: Request) -> JSONResponse:
+    return _reject("/v1/moderations")
 
 
 __all__ = ["router", "_UNSUPPORTED"]

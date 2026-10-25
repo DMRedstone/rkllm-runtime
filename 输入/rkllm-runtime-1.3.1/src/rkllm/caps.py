@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["CAPS", "capabilities_doc", "param_tier", "check_request_params"]
+__all__ = ["CAPS", "param_tier", "check_request_params"]
 
 # ---------------------------------------------------------------------------
 # 端点三档
@@ -28,6 +28,7 @@ ENDPOINTS: dict[str, str] = {
     "models": "native",               # 单模型；models/{id} 返回同一对象
     "embeddings": "unsupported",      # 仅当配置 embedding 模型才可用，不假装支持
     "messages(anthropic)": "unsupported",
+    "moderations": "unsupported",     # root_alias 有别名，故必须显式 501 而非 404
     "health": "native",               # 非标准扩展
     "ready": "native",
     "metrics": "native",
@@ -81,6 +82,10 @@ LIMITS: dict[str, Any] = {
 }
 
 NOTES: dict[str, str] = {
+    # 硬件现实而非缺陷：RK3588 只有一个 NPU 上下文，请求必然串行（limits.
+    # concurrency=1）。写进能力表 + 503 文案，避免客户端误判为可并行。
+    "concurrency": "single NPU context: requests are serialized; concurrent "
+                   "requests are queued (queue.max_wait) or rejected with 503",
     "json_schema": "prompt+validate+retry on non-stream requests; streaming "
                    "returns 400 (cannot correct frames already sent)",
     "tools": "prompt-injected; accuracy depends on model; handle-level "
@@ -155,19 +160,7 @@ def check_request_params(body: dict[str, Any], *,
             reject.append("response_format.json_schema(stream)")
         # 非流式：交由 Pipeline 注入提示 + 校验重试（emulated），不在此拦截
     elif isinstance(rf, dict) and rf.get("type") == "json_object":
-        pass  # emulated：由 agent/jsonmode 处理，不在此拦截
+        pass  # emulated：由 agent/pipeline.py 追加 json_hint 提示，不在此拦截
     for name in IGNORED_PARAMS:
         body.pop(name, None)   # 静默剥离：不生效、不告警、不打挂
     return reject, warn
-
-
-def capabilities_doc() -> str:
-    """启动日志摘要（native/emulated/unsupported 一行可读）。"""
-    return ("endpoints[native]=" + ",".join(
-        k for k, v in ENDPOINTS.items() if v == "native")
-        + " emulated=" + ",".join(
-            k for k, v in ENDPOINTS.items() if v == "emulated")
-        + f" | params[native]={len(NATIVE_PARAMS)}"
-          f" emulated={len(EMULATED_PARAMS)}"
-          f" ignored={len(IGNORED_PARAMS)}"
-          f" unsupported={len(UNSUPPORTED_PARAMS)}")

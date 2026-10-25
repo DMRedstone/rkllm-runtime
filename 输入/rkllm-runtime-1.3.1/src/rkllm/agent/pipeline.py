@@ -58,10 +58,11 @@ class Pipeline:
             prompt = str(body.get("prompt", ""))
         rf = body.get("response_format") or {}
         if isinstance(rf, dict) and rf.get("type") == "json_object":
-            # 与 1.3.1-15 一致：提示语可由旧 conffile 的 RKLLM_JSON_HINT 覆盖，
-            # 空=用内置默认，填 "none"=不追加任何提示。
-            import os
-            hint = (os.environ.get("RKLLM_JSON_HINT") or "").strip()
+            # 提示语可配（openai.json_hint，兼容 15 版 conffile 的
+            # RKLLM_JSON_HINT）：空=用内置默认，填 "none"=不追加任何提示。
+            # 此前直读 os.environ，绕开了配置表（违反「影响行为的参数必须
+            # 进表」），现已改为读 svc.json_hint。
+            hint = (getattr(svc, "json_hint", "") or "").strip()
             if hint.lower() == "none":
                 hint = ""
             elif not hint:
@@ -80,6 +81,7 @@ class Pipeline:
         self._reasoning: list[str] = []
         self._content_before: list[str] = []
         self._tool_calls: list[dict] = []
+        self._perf: dict = {}      # end 帧 perf（generate_tokens 等）
 
     # -- token 流 -----------------------------------------------------------
 
@@ -97,6 +99,14 @@ class Pipeline:
             request_timeout_s=self.svc.queue.request_timeout_s)
         _first = True
         for token in stream:
+            if isinstance(token, dict):
+                # 管线元数据（perf / tool_calls / parse_error）原样向上传，
+                # 非流式路径由 run_blocking 收进 result；perf 另存一份，
+                # 供 finish_reason()/usage() 无参调用（流式路径）。
+                if token.get("perf"):
+                    self._perf = token["perf"]
+                yield token
+                continue
             if _first:
                 _first = False
                 # TTFT 打点：supervisor 层返回首个 token 的耗时（N3 定位用）
@@ -217,11 +227,27 @@ class Pipeline:
 
     # -- 收尾视图 ------------------------------------------------------------
 
-    def finish_reason(self) -> str:
+    def last_perf(self) -> dict | None:
+        """end 帧带回来的 perf（prefill/generate token 数），供 metrics 精确计数。
+
+        流式路径拿不到 `result`，指标只能从管线侧取——此前 `/metrics` 的
+        token 计数因此只覆盖非流式。
+        """
+        return self._perf or None
+
+    def finish_reason(self, result: dict | None = None) -> str:
         if self._tool_calls:
             return "tool_calls"
-        if self._parser is not None and self._parser.parse_failed:
+        if self._stop_hit:
             return "stop"
+        # length 判定口径复刻 1.3.1-15（git 950005f 的 _finish_reason）：
+        # runtime 的 generate_tokens 触顶时比 max_new_tokens 少 1（真机实测
+        # 8→7、40→39、6→5），自然结束远低于上限，故 >= limit-1 判 length。
+        # max_tokens 未给时不判（引擎默认上限对上层不可见，15 版同口径）。
+        perf = (result or {}).get("perf") or self._perf or {}
+        generated = perf.get("generate_tokens")
+        if self.max_tokens and generated and generated >= self.max_tokens - 1:
+            return "length"
         return "stop"
 
     def usage(self, result: dict | None = None) -> dict:
@@ -232,7 +258,7 @@ class Pipeline:
                  "total_tokens": 0}
         usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
         usage["estimated"] = True      # 无 tokenizer：估算并标注（设计 §4.3）
-        perf = result.get("perf") if result else None
+        perf = (result or {}).get("perf") or self._perf or None
         if perf:
             usage["prompt_tokens"] = perf.get("prefill_tokens",
                                               usage["prompt_tokens"])

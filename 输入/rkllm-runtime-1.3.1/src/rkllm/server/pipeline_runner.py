@@ -22,6 +22,11 @@ from ..agent.json_schema import validate as validate_schema
 from ..agent.pipeline import Pipeline
 
 
+# 单 NPU 上下文串行（硬件现实，非缺陷）：忙时明确告知客户端，别让它以为
+# 并行重试就能过。两个路由共用，放共享层避免各写一份文案而漂移。
+BUSY_MESSAGE = "model busy (single NPU context: requests are serialized)"
+
+
 class SchemaError(Exception):
     """json_schema 重试耗尽（供路由转 422）。"""
 
@@ -77,6 +82,13 @@ def run_blocking(svc, pipe: Pipeline) -> dict:
     metrics["duration_sum"] = metrics.get("duration_sum", 0.0) + elapsed
     metrics["last_ttft_s"] = ((first_token_at - started)
                               if first_token_at else 0.0)
+    # token 计数（/health stats 兼容字段的来源；perf 的 exact counts 优先）
+    perf = meta.get("perf") or {}
+    metrics["prompt_tokens_total"] = (metrics.get("prompt_tokens_total", 0)
+                                      + int(perf.get("prefill_tokens") or 0))
+    metrics["completion_tokens_total"] = (
+        metrics.get("completion_tokens_total", 0)
+        + int(perf.get("generate_tokens") or 0))
     return {"text": "".join(parts), **meta}
 
 
@@ -112,3 +124,36 @@ def run_blocking_checked(svc, raw: dict, max_tokens: int,
              "不要包含解释或代码块标记。" % "；".join(last_errors[:5])},
         ]
     raise SchemaError("；".join(last_errors[:5]) or "unknown")
+
+
+class StreamTimer:
+    """流式路径的计时（此前只有非流式更新 last_ttft_s / duration_sum）。
+
+    指标名不区分路径，流式却是主要用法（客户端几乎都开 stream），不更新的话
+    `/metrics` 里的 TTFT 与耗时长期停在 0，容量判断会失真。用法：进入生成器
+    时 `t = StreamTimer()`，收到第一个 token 时 `t.first_token()`，收尾时
+    `t.finish(svc, pipe)`。
+    """
+
+    def __init__(self) -> None:
+        self.started = time.monotonic()
+        self.first_token_at: float | None = None
+
+    def first_token(self) -> None:
+        if self.first_token_at is None:
+            self.first_token_at = time.monotonic()
+
+    def finish(self, svc, pipe) -> None:
+        metrics = svc.queue.metrics
+        metrics["duration_sum"] = (metrics.get("duration_sum", 0.0)
+                                   + (time.monotonic() - self.started))
+        if self.first_token_at is not None:
+            metrics["last_ttft_s"] = self.first_token_at - self.started
+        perf = pipe.last_perf() if hasattr(pipe, "last_perf") else None
+        if perf:
+            metrics["prompt_tokens_total"] = (
+                metrics.get("prompt_tokens_total", 0)
+                + int(perf.get("prefill_tokens") or 0))
+            metrics["completion_tokens_total"] = (
+                metrics.get("completion_tokens_total", 0)
+                + int(perf.get("generate_tokens") or 0))

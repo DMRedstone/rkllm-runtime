@@ -68,13 +68,15 @@ def test_every_key_has_a_reader():
 
 
 def test_no_key_is_marked_implemented_while_unwired():
-    """`implemented=False` 只允许出现在"确实不实现"的键上，且必须是显式声明。"""
+    """`implemented=False` 只允许出现在"确实不实现"的键上，且必须是显式声明。
+
+    queue.max_concurrent 是唯一例外：单 NPU 恒夹紧为 1，配置值不生效，
+    故诚实标注未接线（10-25 审计启用该机制）。新增其他未接线键必须改这里。
+    """
     unwired = [k.full for k in SCHEMA if not k.implemented]
-    # 当前 80 键全部接线；将来若要加回"未接线"键，必须同时改这条断言并在
-    # config show/docs 里标出来（不静默）。
-    assert unwired == []
+    assert unwired == ["queue.max_concurrent"]
 
 
 def test_key_count_is_frozen():
-    """80 键是对外契约（文档、conffile 注释、README 都引用了这个数字）。"""
-    assert len(SCHEMA) == 80
+    """82 键是对外契约（文档、conffile 注释、README 都引用了这个数字）。"""
+    assert len(SCHEMA) == 82

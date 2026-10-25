@@ -108,10 +108,12 @@ class PromptCache:
     """管理一个缓存目录下的单槽前缀缓存。"""
 
     def __init__(self, directory: str | None = None, max_mb: int = 512,
-                 ttl_s: int = 604800):
+                 ttl_s: int = 604800, similarity: float = PROMPT_SIMILARITY):
         self.dir = _pick_cache_dir(directory)
         self.max_mb = max_mb
         self.ttl_s = ttl_s
+        # 是否接管单槽的判据，可配（cache.similarity）；默认与 llama.cpp 一致。
+        self.similarity = float(similarity)
         self.cache_path = os.path.join(self.dir, _CACHE_NAME)
         self.meta_path = os.path.join(self.dir, _META_NAME)
         self.stats_path = os.path.join(self.dir, _STATS_NAME)
@@ -152,7 +154,7 @@ class PromptCache:
             self.hits += 1
             self._write_stats()
             return self.cache_path, 0
-        if self.last_similarity >= PROMPT_SIMILARITY:
+        if self.last_similarity >= self.similarity:
             # 同一会话的延续（例如用户改了最后一句）：允许本轮重建缓存。
             # save=1 会覆盖缓存文件，commit 随后同步 meta，配对保持一致。
             self.misses += 1

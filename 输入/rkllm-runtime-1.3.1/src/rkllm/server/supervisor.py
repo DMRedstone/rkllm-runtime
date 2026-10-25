@@ -89,6 +89,13 @@ class WorkerClient:
             if op == OP_TOKEN:
                 yield frame["text"]
             elif op == OP_END:
+                # end 帧带 perf（prefill/generate tokens）——此前直接 return
+                # 把它丢了，usage 的 exact counts 从未生效（永远估算值），
+                # finish_reason 的 length 判定也没有依据。作为管线元数据
+                # dict 产出（与 tool_calls/parse_error 同一条路）。
+                perf = frame.get("perf")
+                if perf:
+                    yield {"perf": perf}
                 return
             elif op == OP_ERROR:
                 # worker 明确报告本次请求失败：进程活着，绝不走重启路径
@@ -425,6 +432,13 @@ class LocalSupervisor:
                 prompt, role=role, enable_thinking=enable_thinking,
                 sampling=sampling, max_new_tokens=max_new_tokens,
                 cache_hint=cache_hint)
+            # 对齐 worker 的 end 帧：产出 perf 元数据（usage exact counts 与
+            # finish_reason 的 length 判定的依据）。此前进程内模式没有这段，
+            # 与 subprocess 路径行为不一致。
+            perf = self.engine.last_perf()
+            if perf:
+                yield {"perf": {"prefill_tokens": perf[0],
+                                "generate_tokens": perf[1]}}
         except WorkerDown:
             raise
         except Exception as exc:      # 与 worker 路径的错误语义对齐：结构 503；

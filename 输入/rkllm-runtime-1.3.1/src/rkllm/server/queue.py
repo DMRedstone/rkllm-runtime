@@ -49,7 +49,10 @@ class InferenceQueue:
         self._lock = threading.Lock()
         # 指标（Prometheus 文本由 routes/ops 渲染）
         self.metrics = {"requests_total": 0, "rejected_total": 0,
-                        "queue_wait_seconds_sum": 0.0, "tokens_total": 0}
+                        "errors_total": 0, "queue_wait_seconds_sum": 0.0,
+                        "infer_seconds_sum": 0.0, "tokens_total": 0,
+                        "prompt_tokens_total": 0,
+                        "completion_tokens_total": 0}
 
     @property
     def queue_depth(self) -> int:
@@ -80,7 +83,8 @@ class InferenceQueue:
                 self.metrics["requests_total"] += 1
         try:
             if not acquired:
-                deadline = time.monotonic() + self.wait_timeout_s
+                enqueued_at = time.monotonic()
+                deadline = enqueued_at + self.wait_timeout_s
                 while True:
                     if cancelled and cancelled():
                         raise QueueTimeout("cancelled while waiting")
@@ -91,16 +95,28 @@ class InferenceQueue:
                         self.metrics["rejected_total"] += 1
                         raise QueueTimeout("queue wait timeout %ds"
                                            % self.wait_timeout_s)
-            start = time.monotonic()
+                # 排队时长 = 入队到拿槽（此前 start 记在拿槽之后，
+                # queue_wait_seconds_sum 实际累加的是推理执行时长）
+                self.metrics["queue_wait_seconds_sum"] += (time.monotonic()
+                                                          - enqueued_at)
+            infer_start = time.monotonic()
             try:
                 for token in submit():
                     if cancelled and cancelled():
                         break
                     yield token
                     self.metrics["tokens_total"] += 1
-                self.metrics["queue_wait_seconds_sum"] += time.monotonic() - start
+                self.metrics["infer_seconds_sum"] += (time.monotonic()
+                                                     - infer_start)
             finally:
                 self._slot.release()
+        except (QueueBusy, QueueTimeout):
+            raise                      # 已计 rejected，不重复计 errors
+        except Exception:
+            # 请求级失败（RequestFailed/WorkerDown 等）：errors 计数供
+            # /health stats 兼容字段与 Prometheus 使用
+            self.metrics["errors_total"] += 1
+            raise
         finally:
             if waiting_counted:
                 with self._lock:

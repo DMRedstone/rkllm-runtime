@@ -209,7 +209,12 @@ def function_call_item(call: dict, *, index: int = 0) -> dict:
     }
 
 
-def _usage(chat_usage: dict | None) -> dict:
+def usage_of(chat_usage: dict | None) -> dict:
+    """chat 的 usage 转 responses 口径（input/output tokens）。
+
+    公开名：`server/routes/responses.py` 需要它，此前直接调本模块的私有
+    `_usage`（跨模块用私有符号，改名即断链）。
+    """
     chat_usage = chat_usage or {}
     prompt = int(chat_usage.get("prompt_tokens") or 0)
     completion = int(chat_usage.get("completion_tokens") or 0)

@@ -21,7 +21,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ...agent import responses as tr
 from ...agent.pipeline import Pipeline
-from ..pipeline_runner import (SchemaError as _SchemaError,
+from ..pipeline_runner import (BUSY_MESSAGE, SchemaError as _SchemaError,
+                               StreamTimer,
                                build_pipeline as _pipeline,
                                http_error as _http_error,
                                run_blocking_checked as _run_blocking_checked,
@@ -105,7 +106,7 @@ def create_response(request: Request, body: dict):
                            "response did not match response_format.json_schema "
                            "after retries: %s" % exc, code="schema_mismatch")
     except QueueBusy as exc:
-        return _error(503, "model busy", "queue_full",
+        return _error(503, BUSY_MESSAGE, "queue_full",
                       retry_after_s=exc.retry_after_s)
     except QueueTimeout:
         return _error(503, "queue timeout", "queue_timeout")
@@ -121,7 +122,7 @@ def create_response(request: Request, body: dict):
     payload = tr.response_object(
         resp_id=resp_id, model=body.get("model", svc.model_name),
         created_at=created, status="completed", output=output,
-        usage=tr._usage(pipe.usage(result)), request_body=body)
+        usage=tr.usage_of(pipe.usage(result)), request_body=body)
     return JSONResponse(payload, headers=headers)
 
 
@@ -141,6 +142,7 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
                      "output_index": index, "item": item})
 
     async def generate():
+        timer = StreamTimer()
         seq = 0
 
         def ev(name: str, payload: dict) -> str:
@@ -172,7 +174,8 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
                 yield ": ping\n\n"        # 长 prefill 保活（与 chat 一致）
                 continue
             if kind == DISCONNECT:
-                return                    # 已两段式取消并归还 NPU
+                timer.finish(svc, pipe)   # 已两段式取消并归还 NPU
+                return
             if kind == DONE:
                 break
             if isinstance(item, BaseException):
@@ -182,6 +185,7 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
                 if item.get("tool_calls"):
                     calls = item["tool_calls"]
                 continue
+            timer.first_token()
             parts.append(item)
             yield ev("response.output_text.delta", {
                 "item_id": message_id, "output_index": 0,
@@ -195,6 +199,7 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
             yield ev("response.failed", {
                 "response": {**shell, "status": "failed",
                              "error": {"code": "stream_error", "message": err}}})
+            timer.finish(svc, pipe)
             yield "data: [DONE]\n\n"
             stream.mark_settled()         # 已发终帧：收尾不再 abort
             return
@@ -229,7 +234,8 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
         final = tr.response_object(
             resp_id=resp_id, model=body.get("model", svc.model_name),
             created_at=created, status="completed", output=output,
-            usage=tr._usage(pipe.usage({"text": text})), request_body=body)
+            usage=tr.usage_of(pipe.usage({"text": text})), request_body=body)
+        timer.finish(svc, pipe)
         yield ev("response.completed", {"response": final})
         yield "data: [DONE]\n\n"
 

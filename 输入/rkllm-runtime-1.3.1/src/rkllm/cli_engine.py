@@ -67,7 +67,8 @@ def _build_supervisor(cfg, *, use_fake: bool):
             cache = None
             if cfg.cache.enabled:
                 cache = PromptCache(cfg.cache.dir, max_mb=cfg.cache.max_mb,
-                                    ttl_s=cfg.cache.ttl_s)
+                                    ttl_s=cfg.cache.ttl_s,
+                                    similarity=cfg.cache.similarity)
             engine = RealEngine(
                 model_path=cfg.model.path, platform=platform,
                 context_len=cfg.model.context, max_new_tokens=max_tokens,

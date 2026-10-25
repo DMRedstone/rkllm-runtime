@@ -3,7 +3,7 @@
 设计约束（用户 2026-10-21 明确）：
 - 命令名仍是 `/usr/bin/rkllm`，systemd 单元仍是 `rkllm-server.service`，
   conffile 仍是 `/etc/default/rkllm-server`——**运维视角零变化**；
-- 实现是新的：FastAPI + 推理子进程 + UDS 帧协议 + 80 键配置；
+- 实现是新的：FastAPI + 推理子进程 + UDS 帧协议 + 82 键配置；
 - 旧 CLI 的每个子命令与每个 serve 参数都保留（包括从 `RKLLM_*` 环境变量取
   默认值的语义，这是 conffile 驱动服务的方式）。
 
@@ -38,6 +38,7 @@ __all__ = ["main", "build_parser", "PROGRAM",
 # A-4：实现按职责拆到 cli_env / cli_engine / cli_info / cli_serve。
 # 下面 re-export 旧名字是**有意为之**（pyflakes 会报 F401）：`rkllm.cli._xxx`
 # 是测试与外部脚本的既有访问路径，拆分不应让它们 AttributeError。
+from . import VERSION
 from .cli_engine import (_apply_memory_budget, _build_supervisor,  # noqa: F401
                          _make_engine, _resolve_model_path, _search_dirs)
 from .cli_env import (_env_default, _env_flag, _legacy_cli_overrides,  # noqa: F401
@@ -133,7 +134,7 @@ def _add_sampling_args(parser, env: bool = False) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=PROGRAM,
                                      description="RKLLM runtime + OpenAI 兼容服务")
-    parser.add_argument("--version", action="version", version="rkllm 1.3.1-16")
+    parser.add_argument("--version", action="version", version="rkllm " + VERSION)
     sub = parser.add_subparsers(dest="command")
 
     serve = sub.add_parser("serve", help="启动 OpenAI 兼容 HTTP 服务")

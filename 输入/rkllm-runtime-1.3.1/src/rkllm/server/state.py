@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 
+from .. import VERSION
 from ..platform import derive_class, max_tokens_for
 
 __all__ = ["PolicyView", "ServiceState"]
@@ -52,6 +53,7 @@ class PolicyView:
             log.warning("openai.tools_mode=native 不受支持（ADR-06），已按 prompt 处理")
         self.reasoning_field = cfg.openai.reasoning_field
         self.json_schema_retries = cfg.openai.json_schema_retries
+        self.json_hint = cfg.openai.json_hint
         self.stream_heartbeat_s = cfg.openai.stream_heartbeat_s
         self.include_usage_default = cfg.openai.include_usage_default
 
@@ -78,7 +80,7 @@ class ServiceState:
         # 由 cli 在启动时填入；空 dict 表示全用 runtime 默认。
         self.default_sampling: dict = {}
         self.system_prompt = ""
-        self.version = "1.3.1-16"
+        self.version = VERSION
         self.lib_fingerprint: dict | None = None
 
     def __getattr__(self, name: str):

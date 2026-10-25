@@ -95,13 +95,19 @@ def test_queue_rejects_when_full():
 
 
 class FakeSupervisor:
-    """确定 token 流；不 spawn 子进程（帧协议已被 test_worker_frames 覆盖）。"""
+    """确定 token 流；不 spawn 子进程（帧协议已被 test_worker_frames 覆盖）。
+
+    `perf` 非空时在 token 流末尾产出发 end 帧同款 {"perf": ...} 元数据
+    （真路径由 WorkerClient.run 在 OP_END 时产出）——usage 的 exact counts
+    与 finish_reason 的 length 判定都依赖它。
+    """
 
     state = "ready"
     metrics = {"worker_restarts_total": 0}
 
-    def __init__(self, tokens=None):
+    def __init__(self, tokens=None, perf=None):
         self.tokens = tokens or ["你", "好"]
+        self.perf = perf
         self.model_name = "fake"
 
     def is_ready(self):
@@ -110,6 +116,8 @@ class FakeSupervisor:
     def execute(self, prompt, **kwargs):
         for t in self.tokens:
             yield t
+        if self.perf:
+            yield {"perf": self.perf}
 
     def abort(self):
         pass

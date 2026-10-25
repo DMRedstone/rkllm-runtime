@@ -267,7 +267,10 @@ def load_library(lib_path: str | None = None) -> tuple[ctypes.CDLL, str, dict]:
     env = os.environ.get("RKLLM_LIB")
     if env:
         candidates.append(env)
-    candidates += ["librkllmrt.so", "/usr/lib/rkllm-runtime/librkllmrt.so"]
+    # 新布局（deb 打进 multiarch 目录 /usr/lib/aarch64-linux-gnu/）在
+    # 默认搜索路径里就能命中；旧布局 /usr/lib/rkllm-runtime/ 已不再安装，
+    # 留着只会让"找不到库"的报错多一条误导性尝试（10-25 审计 P2）。
+    candidates += ["librkllmrt.so"]
     errors = []
     for candidate in candidates:
         try:

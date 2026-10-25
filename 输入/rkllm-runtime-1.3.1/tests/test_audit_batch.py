@@ -151,20 +151,26 @@ def test_health_reports_model_class():
 # ---------------------------------------------------------------------------
 
 
-def test_config_show_has_no_unwired_keys():
-    """2026-10-21：cache 与 freq 接线后，80 键全部生效，不应再有 [未接线] 标记。"""
+def test_config_show_marks_unwired_key():
+    """未接线键必须在 config show 里显式标出来（不静默）。
+
+    2026-10-26：queue.max_concurrent 标注为未接线（单 NPU 恒为 1），是全表
+    唯一的例外，其余键都必须生效。
+    """
     from rkllm.config import SCHEMA
 
-    assert [k.full for k in SCHEMA if not k.implemented] == []
+    assert [k.full for k in SCHEMA if not k.implemented] == ["queue.max_concurrent"]
     text = config_show(load_config(env={}))
-    assert "[未接线]" not in text
+    assert "queue.max_concurrent" in text
+    assert text.count("[未接线]") == 1
     assert "enabled" in text
 
 
 def test_config_docs_lists_all_cache_keys():
     docs = config_docs()
-    assert docs.count("`cache.") == 4
-    assert "（未接线）" not in docs
+    assert docs.count("`cache.") == 5
+    # 唯一允许出现的未接线标注（queue.max_concurrent）
+    assert docs.count("（未接线）") == 1
 
 
 def test_config_init_board_parses(tmp_path):

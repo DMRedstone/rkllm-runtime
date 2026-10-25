@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 
+from . import VERSION
 from .cli_engine import (_apply_memory_budget, _build_supervisor,
                          _resolve_model_path)
 from .cli_env import _legacy_cli_overrides, _sampling_from_args
@@ -55,12 +56,13 @@ def _cmd_serve(args) -> int:
     app.state.svc.default_sampling = _sampling_from_args(args)
 
     sys.stderr.write(
-        "rkllm 1.3.1-16 服务模型 '%s'，监听 http://%s:%d\n"
+        "rkllm %s 服务模型 '%s'，监听 http://%s:%d\n"
         "  endpoints : GET /health /ready /v1/capabilities /metrics, "
         "GET /v1/models, POST /v1/chat/completions /v1/completions /v1/reset\n"
         "  history   : %s   api key : %s   推理进程 : %s\n"
         "  freq lock : %s   档位 : %s   context : %d\n"
-        % (app.state.svc.model_name, cfg.server.bind_host, cfg.server.port,
+        % (VERSION, app.state.svc.model_name, cfg.server.bind_host,
+           cfg.server.port,
            "on" if cfg.model.keep_history else "off",
            "set" if (cfg.server.api_key or cfg.server.api_key_file) else "none",
            "in_process" if cfg.engine.mode == "in_process" else "subprocess",
@@ -80,7 +82,7 @@ def _cmd_serve(args) -> int:
             log_level=cfg.logging.level,
             timeout_graceful_shutdown=cfg.server.shutdown_grace_s,
             access_log=cfg.server.access_log,
-            # 以下四项此前是死键，现按 80 键表接线
+            # 以下四项此前是死键，现按 82 键表接线
             limit_concurrency=cfg.server.max_connections,
             timeout_keep_alive=cfg.server.read_timeout_s,
             backlog=cfg.server.request_queue_size,

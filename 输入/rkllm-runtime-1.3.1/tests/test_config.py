@@ -12,16 +12,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from rkllm.config import (SCHEMA, ConfigError, config_docs, load_config,
-                          migrate_conffile)
+from rkllm.config import SCHEMA, ConfigError, config_docs, load_config
 
-# 80 键分组计数（与《MCP 接入与配置设计》§7.2 一致）
+# 82 键分组计数（与《MCP 接入与配置设计》§7.2 一致）
 GROUP_COUNTS = {"server": 13, "model": 11, "engine": 8, "queue": 5,
-                "openai": 8, "cache": 4, "mcp": 24, "logging": 5, "metrics": 2}
+                "openai": 9, "cache": 5, "mcp": 24, "logging": 5, "metrics": 2}
 
 
-def test_schema_is_exactly_80_keys():
-    assert len(SCHEMA) == 80
+def test_schema_is_exactly_82_keys():
+    assert len(SCHEMA) == 82
     counts: dict[str, int] = {}
     for key in SCHEMA:
         counts[key.section] = counts.get(key.section, 0) + 1
@@ -122,19 +121,6 @@ def test_legacy_env_migration():
     cfg2 = load_config(env={"RKLLM_MODEL": "/old.rkllm",
                             "RKLLM_MODEL_PATH": "/new.rkllm"})
     assert cfg2.model.path == "/new.rkllm"
-
-
-def test_migrate_conffile(tmp_path):
-    f = tmp_path / "rkllm-server"
-    f.write_text(textwrap.dedent("""
-        # comment
-        RKLLM_MODEL=/var/lib/rkllm/models/qwen3-4b.rkllm
-        RKLLM_PORT=8081
-        UNRELATED=yes
-    """), encoding="utf-8")
-    out = migrate_conffile(str(f))
-    assert out == {"model.path": "/var/lib/rkllm/models/qwen3-4b.rkllm",
-                   "server.port": "8081"}
 
 
 def test_require_model_path():

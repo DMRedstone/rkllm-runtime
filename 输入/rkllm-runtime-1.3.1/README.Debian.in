@@ -115,6 +115,18 @@ Service configuration
   at the beginning of a line, quote values containing spaces, no $VAR expansion,
   and an empty value means "use the built-in default".
 
+  The full 82-key table (queue limits, prefix cache, MCP, logging, ...) is NOT
+  in that file - it would be unreadable as KEY=value. Generate a documented TOML
+  template instead and edit what you need:
+
+    rkllm config init --board --path /etc/rkllm/rkllm.toml
+    rkllm config docs                  # the same 82 keys as a Markdown table
+    rkllm config show                  # effective values + where each came from
+
+  @SERVER_DEFAULTS@ remains the only file the unit reads; /etc/rkllm/rkllm.toml
+  is picked up automatically when it exists (or point RKLLM_TOML at another
+  path). Priority: built-in default < TOML < RKLLM_* environment < command line.
+
 Getting a model
 ---------------
   The runtime executes .rkllm files only. They are produced on an x86_64 host,

@@ -1,4 +1,4 @@
-"""80 键 TOML 配置表（MCP 接入设计 §7 / 总体设计 §7.1，需求 N11/F13）。
+"""82 键 TOML 配置表（MCP 接入设计 §7 / 总体设计 §7.1，需求 N11/F13）。
 
 设计要点：
 - 所有影响行为的参数必须进表；代码中不得出现魔法数（协议常量与安全下限除外）。
@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 __all__ = ["Key", "SCHEMA", "Config", "ConfigError", "load_config",
-           "config_docs", "config_init", "config_show", "migrate_conffile"]
+           "config_docs", "config_init", "config_show"]
 
 # ---------------------------------------------------------------------------
 # schema 定义
@@ -58,7 +58,7 @@ def _k(section: str, name: str, type_: type, default: Any, *,
                implemented=implemented)
 
 
-# 80 键全量 schema。分组顺序与《MCP 接入与配置设计》§7.2 一致。
+# 82 键全量 schema。分组顺序与《MCP 接入与配置设计》§7.2 一致。
 SCHEMA: tuple[Key, ...] = (
     # -- server（13）--------------------------------------------------------
     _k("server", "bind_host", str, "127.0.0.1", desc="监听地址；默认只本机，对外需显式改"),
@@ -118,9 +118,12 @@ SCHEMA: tuple[Key, ...] = (
        desc="单请求总时长上限"),
     _k("queue", "busy_retry_after_s", int, 5, min_v=0, max_v=120,
        desc="忙时 Retry-After 秒数"),
+    # implemented=False：键保留（旧的排队配置在这里有落点），但运行时恒夹紧
+    # 为 1——单 NPU 单引擎串行，>1 只会有害无益。值与行为无关，故诚实标注
+    # 「未接线」，config show/docs 会带 [未接线] 标记。
     _k("queue", "max_concurrent", int, 1, min_v=1, max_v=1,
-       desc="单 NPU 固定 1（安全下限，不可放宽）"),
-    # -- openai（8）---------------------------------------------------------
+       desc="并发上限；单 NPU 恒为 1（配置值不生效）", implemented=False),
+    # -- openai（9）---------------------------------------------------------
     _k("openai", "param_policy", str, "warn", choices=("warn", "reject"),
        desc="不支持参数的处理策略（语义关键项恒为 reject）"),
     _k("openai", "tools_mode", str, "prompt", choices=("prompt", "native"),
@@ -136,7 +139,13 @@ SCHEMA: tuple[Key, ...] = (
     _k("openai", "max_tool_calls", int, 8, min_v=1, max_v=32,
        desc="单条消息允许的最大 tool_call 数"),
     _k("openai", "include_usage_default", bool, False, desc="默认是否在流末尾发 usage 帧"),
-    # -- cache（4）----------------------------------------------------------
+    # 1.3.1-15 的 conffile 变量 RKLLM_JSON_HINT：json_object 追加的提示语。
+    # 此前 pipeline 直读 os.environ，绕过本表（违反「影响行为的参数必须进表」），
+    # 现已进表；旧变量名经 LEGACY_ENV_MAP 继续生效。
+    _k("openai", "json_hint", str, "",
+       desc="response_format=json_object 时追加的提示语；空=内置默认，"
+            "填 none=不追加"),
+    # -- cache（5）----------------------------------------------------------
     # 单槽前缀缓存（ADR-07）：上一轮 prompt 是新 prompt 的前缀时复用其 KV，
     # 避免多轮对话反复全量 prefill。worker/promptcache.py 实现，加载失败自动
     # 清槽重试一次不带缓存的推理（R5 的兜底）。
@@ -149,6 +158,10 @@ SCHEMA: tuple[Key, ...] = (
        desc="缓存目录容量上限；超出按最旧淘汰；0=不限"),
     _k("cache", "ttl_s", int, 604800, min_v=0, max_v=2592000,
        desc="缓存文件 TTL；0=不过期"),
+    # 是否接管单槽的判据：低于阈值视为「另一个会话」，不加载也不覆盖缓存
+    # （worker/promptcache.py）。此前是模块级常量，不可配。
+    _k("cache", "similarity", float, 0.5, min_v=0.0, max_v=1.0,
+       desc="前缀相似度阈值；低于该值判定为无关会话（llama.cpp 默认 0.5）"),
     # -- mcp（24）-----------------------------------------------------------
     _k("mcp", "enabled", bool, True, desc="MCP 连接器总开关"),
     _k("mcp", "transport", str, "stdio", choices=("stdio", "http"), desc="传输方式"),
@@ -201,7 +214,12 @@ SCHEMA: tuple[Key, ...] = (
     _k("metrics", "path", str, "/metrics", desc="metrics 路径"),
 )
 
-assert len(SCHEMA) == 80, f"配置键必须为 80 个，当前 {len(SCHEMA)}（N11 完备性契约）"
+assert len(SCHEMA) == len(set(k.full for k in SCHEMA)), "配置键名重复（N11）"
+
+# 板端默认 TOML 落点。此前 82 键表只有 RKLLM_TOML 环境变量一个入口，deb 也不
+# 提供模板，运维根本看不见这张表；现在 load_config 会自动读它（不存在则静默
+# 跳过，默认行为零变化），模板由 `rkllm config init --board` 生成。
+DEFAULT_TOML_PATH = "/etc/rkllm/rkllm.toml"
 
 _BY_SECTION: dict[str, list[Key]] = {}
 for _key in SCHEMA:
@@ -232,6 +250,8 @@ LEGACY_ENV_MAP: dict[str, str] = {
     # 1.3.1-15 的 conffile 用的是单数 RKLLM_CORS_ORIGIN：新栈的对应键是
     # server.cors_origins（列表），加载时按逗号切分，旧设置继续生效。
     "RKLLM_CORS_ORIGIN": "server.cors_origins",
+    # 1.3.1-15 的 json_object 提示语变量：新键 openai.json_hint（进表后仍认旧名）
+    "RKLLM_JSON_HINT": "openai.json_hint",
 }
 
 
@@ -385,12 +405,17 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
                 env[new_env] = raw
 
     file_data: dict[str, Any] = {}
-    if file:
+    # 未显式指定时，板端的默认 TOML 存在就用它（82 键的落点；此前只有
+    # RKLLM_TOML 环境变量一条路，deb 也没打模板，等于运维看不见这张表）。
+    # 文件不存在是正常状态，不算错误。
+    path = file or DEFAULT_TOML_PATH
+    if path and (file or os.path.isfile(path)):
         try:
-            with open(file, "rb") as fh:
+            with open(path, "rb") as fh:
                 file_data = tomllib.load(fh)
         except FileNotFoundError:
-            errors.append(f"配置文件不存在：{file}")
+            if file:
+                errors.append(f"配置文件不存在：{file}")
         except tomllib.TOMLDecodeError as exc:
             errors.append(f"配置文件 TOML 语法错误：{exc}")
 
@@ -479,7 +504,7 @@ def config_docs() -> str:
 def config_init(target: str = "board") -> str:
     """生成 TOML 模板（设计 §7.2 `rkllm config init --board|--client`）。
 
-    只输出注释 + 少量必填项，保持与 `config docs` 的 80 键同源但不重复抄写
+    只输出注释 + 少量必填项，保持与 `config docs` 的 82 键同源但不重复抄写
     全部默认值——默认值本来就不需要写进文件（优先级链已保证）。
     """
     if target == "client":
@@ -502,7 +527,7 @@ max_input_chars = 12000
 """
     return """# /etc/rkllm/rkllm.toml - 板端 FastAPI 栈配置（`rkllm-serve serve`）
 # 优先级：内置默认 < 本文件 < RKLLM_* 环境变量 < 命令行
-# 全部 80 键与默认值：  rkllm-serve config docs
+# 全部 82 键与默认值：  rkllm-serve config docs
 # 生效值与来源：        rkllm-serve config show
 # 只填需要改的项即可。
 
@@ -541,21 +566,3 @@ path = "/var/lib/rkllm/models/your-model.rkllm"
 #format = "text"            # json 便于采集
 #file = ""                  # 空 = 只 stderr/journal
 """
-
-
-def migrate_conffile(path: str) -> dict[str, Any]:
-    """解析旧 /etc/default/rkllm-server 的 KEY=VALUE，映射为 TOML 键值。"""
-    out: dict[str, Any] = {}
-    try:
-        with open(path, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                name, _, val = line.partition("=")
-                target = LEGACY_ENV_MAP.get(name.strip())
-                if target:
-                    out[target] = val.strip().strip('"')
-    except OSError:
-        pass
-    return out

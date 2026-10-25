@@ -10,26 +10,38 @@ __all__ = ["SseSession"]
 
 
 class SseSession:
-    """一次 chat completion 的 SSE 状态：id/created 全程一致（D4）。"""
+    """一次 completion 的 SSE 状态：id/created 全程一致（D4）。
+
+    `object_name` / `delta_field` 区分两种 OpenAI 信封：chat 是
+    chat.completion.chunk + delta.content；completions 是
+    text_completion + delta.text（无 role 首帧）。
+    """
 
     def __init__(self, completion_id: str | None = None, model: str = "rkllm",
-                 reasoning_field: str = "reasoning_content"):
+                 reasoning_field: str = "reasoning_content",
+                 object_name: str = "chat.completion.chunk",
+                 delta_field: str = "content"):
         self.id = completion_id or ("chatcmpl-" + id(self).__format__("x"))
         self.created = int(time.time())
         self.model = model
         # openai.reasoning_field：reasoning_content（DeepSeek 约定）/reasoning/none
         self.reasoning_field = reasoning_field
+        self.object_name = object_name
+        self.delta_field = delta_field
         self.index = 0
 
-    def first_frame(self, role: str = "assistant") -> str:
-        return self._frame({"role": role, "content": ""}, finish_reason=None)
+    def first_frame(self, role: str | None = "assistant") -> str:
+        delta = {self.delta_field: ""}
+        if role:
+            delta["role"] = role
+        return self._frame(delta, finish_reason=None)
 
     def delta_frame(self, content: str | None = None, *,
                     reasoning: str | None = None,
                     tool_calls: list | None = None) -> str:
         delta: dict[str, Any] = {}
         if content is not None:
-            delta["content"] = content
+            delta[self.delta_field] = content
         if reasoning is not None and self.reasoning_field != "none":
             delta[self.reasoning_field] = reasoning
         if tool_calls is not None:
@@ -57,7 +69,7 @@ class SseSession:
     def _frame(self, delta: dict, finish_reason: str | None,
                usage: dict | None = None) -> str:
         chunk: dict[str, Any] = {
-            "id": self.id, "object": "chat.completion.chunk",
+            "id": self.id, "object": self.object_name,
             "created": self.created, "model": self.model,
             "choices": [{"index": self.index, "delta": delta,
                          "finish_reason": finish_reason}],
