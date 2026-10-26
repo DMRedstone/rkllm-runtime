@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from rkllm.agent import responses as tr          # noqa: E402
 from rkllm.config import load_config              # noqa: E402
 from rkllm.server.app import create_app           # noqa: E402
+from rkllm.server.routes import responses as rr   # noqa: E402
 
 
 class FakeSupervisor:
@@ -162,3 +163,33 @@ def test_streaming_event_sequence():
                      "response.content_part.added", "response.output_text.done",
                      "response.content_part.done", "response.output_item.done"):
         assert required in events
+
+
+def test_streaming_truncation_marks_incomplete(monkeypatch):
+    """泵因背压截断时，Responses 不能伪装成正常 completed。"""
+    async def fake_iterate(request, stream, heartbeat_s):
+        yield "item", "部分"
+        yield "item", {"truncated": True}
+        yield "done", None
+
+    monkeypatch.setattr(rr, "iterate_stream", fake_iterate)
+    events, payloads = [], {}
+    current = None
+    with _client(["ignored"]).stream(
+            "POST", "/v1/responses",
+            json={"input": "x", "stream": True}) as r:
+        assert r.status_code == 200
+        for line in r.iter_lines():
+            if line.startswith("event: "):
+                current = line[7:].strip()
+                events.append(current)
+            elif (line.startswith("data: ") and current
+                  and line[6:].strip() != "[DONE]"):
+                payloads[current] = json.loads(line[6:])
+    assert events[-1] == "response.incomplete"
+    body = payloads["response.incomplete"]["response"]
+    assert body["status"] == "incomplete"
+    assert body["incomplete_details"]["reason"] == "max_output_tokens"
+    assert body["output"][0]["status"] == "incomplete"
+    assert body["output_text"] == "部分"
+

@@ -29,6 +29,13 @@ rkllm-runtime (@VERSION@) unstable; urgency=medium
   * Engineering: single-source version (DEFAULT_VERSION), dead-code cleanup,
     route/pipeline shared layer, and an expanded selftest covering the HTTP
     surface.
+  * Responses: streaming backpressure truncation is reported as
+    response.incomplete with incomplete_details.reason=max_output_tokens
+    instead of a false completed; non-streaming Responses builds the
+    pipeline once (no duplicate prompt construction).
+  * MCP: 2026 result shaping (resultType, tools/list cache metadata) is
+    centralized in protocol.py; the stdio transport no longer carries a
+    version-specific branch.
 
 rkllm-runtime (1.3.1-16) unstable; urgency=medium
 

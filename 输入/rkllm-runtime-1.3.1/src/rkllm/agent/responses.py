@@ -192,8 +192,9 @@ def message_item(text: str, *, item_id: str | None = None,
         "type": "message",
         "status": status,
         "role": "assistant",
+        # incomplete 也要带已生成的部分文本；只有 failed 等状态才为空。
         "content": ([{"type": "output_text", "text": text, "annotations": []}]
-                    if status == "completed" else []),
+                    if status in ("completed", "incomplete") else []),
     }
 
 
@@ -231,7 +232,8 @@ def usage_of(chat_usage: dict | None) -> dict:
 def response_object(*, resp_id: str, model: str, created_at: int,
                     status: str, output: list[dict],
                     usage: dict | None = None,
-                    request_body: dict | None = None) -> dict:
+                    request_body: dict | None = None,
+                    incomplete_details: dict | None = None) -> dict:
     text = "".join(
         part.get("text", "")
         for item in output if item.get("type") == "message"
@@ -248,7 +250,7 @@ def response_object(*, resp_id: str, model: str, created_at: int,
         "tool_choice": (request_body or {}).get("tool_choice", "auto"),
         "tools": (request_body or {}).get("tools") or [],
         "error": None,
-        "incomplete_details": None,
+        "incomplete_details": incomplete_details,
         "instructions": (request_body or {}).get("instructions"),
         "max_output_tokens": (request_body or {}).get("max_output_tokens"),
         "metadata": (request_body or {}).get("metadata") or {},

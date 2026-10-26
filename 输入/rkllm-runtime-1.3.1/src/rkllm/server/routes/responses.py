@@ -76,24 +76,25 @@ def create_response(request: Request, body: dict):
                            code="unsupported_parameter")
     headers = _headers(ignored + warn)
 
-    try:
-        pipe = _pipeline(svc, chat_body, chat=True)
-    except ValueError as exc:
-        return _http_error(400, "invalid_request_error", str(exc))
-
     resp_id = tr.response_id()
     created = tr.now()
 
-    if pipe.max_tokens_clamped:
-        headers["X-RKLLM-Max-Tokens-Clamped"] = str(pipe.max_tokens)
     if streaming:
+        try:
+            pipe = _pipeline(svc, chat_body, chat=True)
+        except ValueError as exc:
+            return _http_error(400, "invalid_request_error", str(exc))
+        if pipe.max_tokens_clamped:
+            headers["X-RKLLM-Max-Tokens-Clamped"] = str(pipe.max_tokens)
         return StreamingResponse(
             _stream(request, svc, pipe, body, resp_id, created),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
                      **headers})
 
-    # 非流式：复用 chat 的 json_schema 校验重试（审计 P3-7）
+    # 非流式：复用 chat 的 json_schema 校验重试（审计 P3-7）。
+    # 这里只构造一次 Pipeline（此前先建一次做预算、再交给
+    # _run_blocking_checked 建第二次，效率项「双构造」在 Responses 未收口）。
     max_tokens = (chat_body.get("max_tokens")
                   or svc.default_max_tokens)
     rf = chat_body.get("response_format") or {}
@@ -174,6 +175,7 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
 
         parts: list[str] = []
         calls: list[dict] = []
+        truncated = False
         failure: BaseException | None = None
         async for kind, item in iterate_stream(request, stream, heartbeat_s):
             if kind == HEARTBEAT:
@@ -188,6 +190,8 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
                 failure = item
                 break
             if isinstance(item, dict):
+                if item.get("truncated"):
+                    truncated = True
                 if item.get("tool_calls"):
                     calls = item["tool_calls"]
                 continue
@@ -211,6 +215,7 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
             return
 
         # 文本消息收尾
+        item_status = "incomplete" if truncated else "completed"
         yield ev("response.output_text.done", {
             "item_id": message_id, "output_index": 0,
             "content_index": 0, "text": text})
@@ -220,9 +225,11 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
                      "annotations": []}})
         yield ev("response.output_item.done", {
             "output_index": 0,
-            "item": tr.message_item(text, item_id=message_id)})
+            "item": tr.message_item(text, item_id=message_id,
+                                    status=item_status)})
 
-        output = [tr.message_item(text, item_id=message_id)]
+        output = [tr.message_item(text, item_id=message_id,
+                                  status=item_status)]
         for offset, call in enumerate(calls, start=1):
             fc = tr.function_call_item(call)
             output.append(fc)
@@ -239,10 +246,15 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
 
         final = tr.response_object(
             resp_id=resp_id, model=body.get("model", svc.model_name),
-            created_at=created, status="completed", output=output,
-            usage=tr.usage_of(pipe.usage({"text": text})), request_body=body)
+            created_at=created, status=item_status, output=output,
+            usage=tr.usage_of(pipe.usage({"text": text})), request_body=body,
+            incomplete_details=({"reason": "max_output_tokens"}
+                                if truncated else None))
         timer.finish(svc, pipe)
-        yield ev("response.completed", {"response": final})
+        # 背压截断不是正常完成：按 Responses 契约发 response.incomplete，
+        # 让客户端能区分「模型说完了」与「服务端没来得及送完」。
+        yield ev("response.incomplete" if truncated else "response.completed",
+                 {"response": final})
         yield "data: [DONE]\n\n"
 
     return generate()

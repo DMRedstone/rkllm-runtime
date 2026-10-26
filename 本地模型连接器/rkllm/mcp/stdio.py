@@ -25,7 +25,8 @@ from typing import Any, Callable
 
 from .jobs import JobTable, estimate_seconds
 from .protocol import (Dispatcher, JsonRpcError, PARSE_ERROR,
-                       SERVER_INFO, detect_protocol)
+                       PROTOCOL_2026, SERVER_INFO,
+                       TOOLS_LIST_CACHE_META_2026, detect_protocol)
 from . import tools as tools_mod
 
 MAX_MESSAGE_BYTES = 8 * 1024 * 1024
@@ -131,9 +132,10 @@ class StdioServer:
 
         def tools_list(params: dict) -> dict:
             result = {"tools": tools_mod.tool_definitions(prefix)}
-            if version == "2026-07-28":
-                # 2026 列表结果必须带缓存元数据（设计 §1.1；工具表是静态的）
-                result.update({"ttlMs": 3600000, "cacheScope": "global"})
+            if version == PROTOCOL_2026:
+                # 2026 列表结果必须带缓存元数据（设计 §1.1；工具表是静态的）。
+                # 元数据常量集中在 protocol.py，传输层不再写版本分支。
+                result.update(TOOLS_LIST_CACHE_META_2026)
             return result
 
         def server_discover(params: dict) -> dict:

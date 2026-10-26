@@ -17,7 +17,8 @@ import threading
 from typing import Any, Callable
 
 __all__ = ["JsonRpcError", "PROTOCOL_VERSIONS", "DEFAULT_PROTOCOL_VERSION",
-           "Dispatcher", "result_payload"]
+           "Dispatcher", "result_payload", "PROTOCOL_2026",
+           "TOOLS_LIST_CACHE_META_2026"]
 
 # 协议常量
 PARSE_ERROR = -32700
@@ -35,15 +36,23 @@ SERVER_INFO = {"name": "rkllm-mcp", "version": "1.0.0"}
 # 作为新客户端的探针与旧客户端的兼容探测（设计 §1.2）。
 #
 # A-7：这张表此前是空表——「四版差异收敛一张表」的承诺落空，2026 特判散在
-# 两处。当前真实差异只有一处：
-#   - initialize 是**有状态握手**，2026-07-28 是无状态协议（请求自带
-#     `_meta.protocolVersion`，用 server/discover 探测），没有握手阶段；
-#     旧三版必须握手。2026 版收到 initialize 会得到 -32601 + 支持版本列表，
-#     让「版本判定错了」显性化，而不是静默接受一个不该出现的握手。
-#   - server/discover 故意全版本实现（旧版的兼容探针），因此不进矩阵。
+# 业务代码里。当前 2026 与旧版的差异共三处，全部集中在本模块声明：
+#   1. initialize 是**有状态握手**，仅旧三版（本矩阵）；2026 是无状态协议
+#      （请求自带 `_meta.protocolVersion`，用 server/discover 探测），没有
+#      握手阶段。2026 版收到 initialize 会得到 -32601 + 支持版本列表，让
+#      「版本判定错了」显性化，而不是静默接受一个不该出现的握手。
+#   2. result_payload 为 2026 的所有结果补 `resultType`。
+#   3. tools/list 的 2026 缓存元数据由 TOOLS_LIST_CACHE_META_2026 提供，
+#      stdio 只做 `result.update(...)`，不再在传输层写版本分支。
+#   server/discover 故意全版本实现（旧版的兼容探针），因此不进矩阵。
 PROTOCOL_MATRIX: dict[str, tuple[str, ...]] = {
     "initialize": ("2025-11-25", "2025-06-18", "2024-11-05"),
 }
+
+PROTOCOL_2026 = "2026-07-28"
+
+# tools/list 在 2026 是静态工具表：允许客户端缓存，减少重复往返。
+TOOLS_LIST_CACHE_META_2026 = {"ttlMs": 3600000, "cacheScope": "global"}
 
 
 class JsonRpcError(Exception):
@@ -63,7 +72,7 @@ def result_payload(protocol_version: str, result: dict) -> dict:
     （tasks 另有 `task`）。本连接器没有需要人工补输入的流程，统一 `complete`；
     之前写成 `text`/`structured` 是错的（设计 §1.1）。
     """
-    if protocol_version == "2026-07-28" and "resultType" not in result:
+    if protocol_version == PROTOCOL_2026 and "resultType" not in result:
         merged = dict(result)
         merged["resultType"] = "complete"
         return merged

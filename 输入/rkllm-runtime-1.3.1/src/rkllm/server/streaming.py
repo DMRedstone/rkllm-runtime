@@ -27,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-import time
 
 log = logging.getLogger("rkllm.server.streaming")
 
