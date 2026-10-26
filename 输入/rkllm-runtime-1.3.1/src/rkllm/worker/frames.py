@@ -8,7 +8,7 @@
 
 帧格式：4 字节大端长度前缀 + UTF-8 JSON。op 一览：
   客户端 → worker: run / abort / ping / shutdown
-  worker → 客户端: ready / token / end / error / state
+  worker → 客户端: ready / token / end / error / state / heartbeat
 """
 
 from __future__ import annotations
@@ -19,7 +19,8 @@ from typing import Any
 
 __all__ = ["FrameError", "read_frame", "write_frame", "MAX_FRAME_BYTES",
            "PROTOCOL_VERSION", "OP_RUN", "OP_ABORT", "OP_PING", "OP_SHUTDOWN",
-           "OP_TOKEN", "OP_END", "OP_ERROR", "OP_READY", "OP_STATE"]
+           "OP_TOKEN", "OP_END", "OP_ERROR", "OP_READY", "OP_STATE",
+           "OP_HEARTBEAT"]
 
 MAX_FRAME_BYTES = 8 * 1024 * 1024   # 与 MCP 消息上限同源
 
@@ -28,7 +29,7 @@ MAX_FRAME_BYTES = 8 * 1024 * 1024   # 与 MCP 消息上限同源
 # 两侧，改一个 op 要 grep 两个文件、拼错只会在运行期变成"未知帧"。收敛到
 # 这里，并在 ready 帧带 `v` 供 supervisor 校验版本错配（部署时 worker 与
 # server 来自同一 wheel，但灰度/回滚时会出现版本不一致）。
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 OP_RUN = "run"            # client → worker
 OP_ABORT = "abort"
@@ -39,6 +40,7 @@ OP_END = "end"
 OP_ERROR = "error"
 OP_READY = "ready"
 OP_STATE = "state"
+OP_HEARTBEAT = "heartbeat"    # worker → supervisor，推理期间周期性上报存活
 
 
 class FrameError(Exception):

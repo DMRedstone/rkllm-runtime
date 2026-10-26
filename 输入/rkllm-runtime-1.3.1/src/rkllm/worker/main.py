@@ -20,26 +20,55 @@ import os
 import queue
 import socket
 import threading
+import time
 
-from .frames import (OP_ABORT, OP_END, OP_ERROR, OP_PING, OP_READY, OP_RUN,
-                     OP_SHUTDOWN, OP_STATE, OP_TOKEN, PROTOCOL_VERSION,
-                     FrameError, read_frame, write_frame)
+from .frames import (OP_ABORT, OP_END, OP_ERROR, OP_HEARTBEAT, OP_PING,
+                     OP_READY, OP_RUN, OP_SHUTDOWN, OP_STATE, OP_TOKEN,
+                     PROTOCOL_VERSION, FrameError, read_frame, write_frame)
 
 
 class Worker:
-    def __init__(self, engine):
+    def __init__(self, engine, heartbeat_interval_s: float = 5.0):
         self.engine = engine
+        self.heartbeat_interval_s = max(1.0, float(heartbeat_interval_s))
         self._abort_requested = threading.Event()
         self._write_lock = threading.Lock()
         self._run_queue: queue.Queue = queue.Queue(maxsize=1)
         self._shutdown = threading.Event()      # 进程级：仅 shutdown 帧触发
         self._conn_closed = threading.Event()   # 连接级：EOF 触发，停推理等待
+        self._infer_active = threading.Event()  # 推理中：心跳线程据此发帧
 
     # -- 写回（锁保护） -----------------------------------------------------
 
     def _send(self, wfile, frame: dict) -> None:
         with self._write_lock:
             write_frame(wfile, frame)
+
+    # -- 心跳线程 -----------------------------------------------------------
+
+    def _heartbeat_loop(self, wfile) -> None:
+        """推理期间周期上报，供 supervisor 区分“长 prefill”与“NPU 卡死”。
+
+        只在 `_infer_active` 置位时发帧：空闲时 supervisor 没有读者，发心跳会
+        堆积在 socket 缓冲区，反而造成误判。C 调用期间 ctypes 释放 GIL，本线程
+        仍可写帧。
+        """
+        while not (self._shutdown.is_set() or self._conn_closed.is_set()):
+            if not self._infer_active.wait(0.5):
+                continue
+            while (self._infer_active.is_set()
+                   and not self._shutdown.is_set()
+                   and not self._conn_closed.is_set()):
+                # 首个心跳延后一个间隔：短请求不会多出 heartbeat 帧，
+                # 长 prefill 超过 interval 后才开始上报。
+                time.sleep(self.heartbeat_interval_s)
+                if not self._infer_active.is_set():
+                    break
+                try:
+                    self._send(wfile, {"op": OP_HEARTBEAT,
+                                      "ts": time.time()})
+                except (OSError, ValueError):
+                    return
 
     # -- 推理线程 -----------------------------------------------------------
 
@@ -57,26 +86,30 @@ class Worker:
             self._abort_requested.clear()
             try:
                 params = frame.get("params") or {}
-                for token in self.engine.stream(
-                        frame.get("prompt", ""),
-                        role=params.get("role", "user"),
-                        enable_thinking=bool(params.get("enable_thinking", False)),
-                        sampling=params.get("sampling"),
-                        max_new_tokens=params.get("max_new_tokens"),
-                        cache_hint=bool(params.get("cache_hint", True))):
-                    if self._abort_requested.is_set():
-                        self._send(wfile, {"op": OP_END, "id": req_id,
-                                           "aborted": True})
-                        break
-                    self._send(wfile, {"op": OP_TOKEN, "id": req_id,
-                                       "text": token})
-                else:
-                    perf = self.engine.last_perf()
-                    body: dict = {"op": OP_END, "id": req_id}
-                    if perf:
-                        body["perf"] = {"prefill_tokens": perf[0],
-                                        "generate_tokens": perf[1]}
-                    self._send(wfile, body)
+                self._infer_active.set()
+                try:
+                    for token in self.engine.stream(
+                            frame.get("prompt", ""),
+                            role=params.get("role", "user"),
+                            enable_thinking=bool(params.get("enable_thinking", False)),
+                            sampling=params.get("sampling"),
+                            max_new_tokens=params.get("max_new_tokens"),
+                            cache_hint=bool(params.get("cache_hint", True))):
+                        if self._abort_requested.is_set():
+                            self._send(wfile, {"op": OP_END, "id": req_id,
+                                               "aborted": True})
+                            break
+                        self._send(wfile, {"op": OP_TOKEN, "id": req_id,
+                                           "text": token})
+                    else:
+                        perf = self.engine.last_perf()
+                        body: dict = {"op": OP_END, "id": req_id}
+                        if perf:
+                            body["perf"] = {"prefill_tokens": perf[0],
+                                            "generate_tokens": perf[1]}
+                        self._send(wfile, body)
+                finally:
+                    self._infer_active.clear()
             except Exception as exc:             # 推理失败不拖垮 worker
                 self._send(wfile, {"op": OP_ERROR, "id": req_id,
                                    "message": str(exc)[:500]})
@@ -122,9 +155,14 @@ class Worker:
         self._conn_closed.clear()
         inference = threading.Thread(target=self._inference_loop, args=(wfile,),
                                      daemon=True)
+        heartbeat = threading.Thread(target=self._heartbeat_loop, args=(wfile,),
+                                     daemon=True, name="rkllm-worker-heartbeat")
         inference.start()
+        heartbeat.start()
         self._reader_loop(conn, wfile)           # 读循环跑在当前线程
+        self._conn_closed.set()
         inference.join(timeout=5)
+        heartbeat.join(timeout=self.heartbeat_interval_s + 1)
         try:
             conn.shutdown(socket.SHUT_RDWR)
         except OSError:
@@ -203,13 +241,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cache-ttl-s", type=int, default=604800)
     parser.add_argument("--delay", type=float, default=0.0,
                         help="fake 引擎每 token 延迟（压测/演示）")
+    parser.add_argument("--heartbeat-interval", type=float, default=5.0,
+                        help="推理期间心跳帧间隔秒数")
     args = parser.parse_args(argv)
     # P2：命令行范围校验，避免 --context=-1 / --max-tokens=0 直达 C 结构体
     if args.context <= 0 or args.max_tokens <= 0 or args.threads <= 0:
         parser.error("--context/--max-tokens/--threads 必须为正整数")
     engine = build_engine(args)
     try:
-        Worker(engine).serve_forever(args.address, tcp=args.tcp)
+        Worker(engine, heartbeat_interval_s=args.heartbeat_interval).serve_forever(
+            args.address, tcp=args.tcp)
     finally:
         # P1-7：任何退出路径都释放 NPU / dma-buf（与 cli / LocalSupervisor 对齐）
         try:

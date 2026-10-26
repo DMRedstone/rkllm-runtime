@@ -14,13 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from rkllm.config import SCHEMA, ConfigError, config_docs, load_config
 
-# 83 键分组计数（与《MCP 接入与配置设计》§7.2 一致）
-GROUP_COUNTS = {"server": 13, "model": 12, "engine": 8, "queue": 5,
+# 85 键分组计数（与《MCP 接入与配置设计》§7.2 一致）
+GROUP_COUNTS = {"server": 13, "model": 12, "engine": 10, "queue": 5,
                 "openai": 9, "cache": 5, "mcp": 24, "logging": 5, "metrics": 2}
 
 
-def test_schema_is_exactly_83_keys():
-    assert len(SCHEMA) == 83
+def test_schema_is_exactly_85_keys():
+    assert len(SCHEMA) == 85
     counts: dict[str, int] = {}
     for key in SCHEMA:
         counts[key.section] = counts.get(key.section, 0) + 1

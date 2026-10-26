@@ -97,13 +97,16 @@ def _build_supervisor(cfg, *, use_fake: bool):
             worker_args += ["--cache-dir", cfg.cache.dir,
                             "--cache-max-mb", str(cfg.cache.max_mb),
                             "--cache-ttl-s", str(cfg.cache.ttl_s)]
+    worker_args += ["--heartbeat-interval",
+                    str(cfg.engine.heartbeat_interval_s)]
     supervisor = Supervisor(
         worker_args,
         load_timeout_s=cfg.engine.load_timeout_s,
         restart_backoff_s=cfg.engine.restart_backoff_s,
         restart_backoff_max_s=cfg.engine.restart_backoff_max_s,
         restart_max_per_hour=cfg.engine.restart_max_per_hour,
-        health_interval_s=cfg.engine.health_interval_s)
+        health_interval_s=cfg.engine.health_interval_s,
+        heartbeat_timeout_s=cfg.engine.heartbeat_timeout_s)
     supervisor.start()
     return supervisor
 def _make_engine(args):

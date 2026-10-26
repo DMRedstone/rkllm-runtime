@@ -1,4 +1,4 @@
-"""83 键 TOML 配置表（MCP 接入设计 §7 / 总体设计 §7.1，需求 N11/F13）。
+"""85 键 TOML 配置表（MCP 接入设计 §7 / 总体设计 §7.1，需求 N11/F13）。
 
 设计要点：
 - 所有影响行为的参数必须进表；代码中不得出现魔法数（协议常量与安全下限除外）。
@@ -58,7 +58,7 @@ def _k(section: str, name: str, type_: type, default: Any, *,
                implemented=implemented)
 
 
-# 83 键全量 schema。分组顺序与《MCP 接入与配置设计》§7.2 一致。
+# 85 键全量 schema。分组顺序与《MCP 接入与配置设计》§7.2 一致。
 SCHEMA: tuple[Key, ...] = (
     # -- server（13）--------------------------------------------------------
     _k("server", "bind_host", str, "127.0.0.1", desc="监听地址；默认只本机，对外需显式改"),
@@ -98,7 +98,7 @@ SCHEMA: tuple[Key, ...] = (
     _k("model", "freq_lock", bool, True,
        desc="NPU/CPU 锁频（需 root；非 root 或 sysfs 不支持时告警跳过）"),
     _k("model", "keep_history", bool, False, desc="服务端保历史；默认无状态"),
-    # -- engine（8）---------------------------------------------------------
+    # -- engine（10）--------------------------------------------------------
     _k("engine", "mode", str, "subprocess", choices=("subprocess", "in_process"),
        desc="推理进程隔离；subprocess 崩溃不拖垮 HTTP"),
     _k("engine", "load_timeout_s", int, 300, min_v=30, max_v=900, desc="模型冷加载超时"),
@@ -113,6 +113,10 @@ SCHEMA: tuple[Key, ...] = (
        desc="给系统与 NPU 驱动的内存预留"),
     _k("engine", "health_interval_s", int, 10, min_v=1, max_v=60,
        desc="supervisor 巡检间隔"),
+    _k("engine", "heartbeat_interval_s", int, 5, min_v=1, max_v=60,
+       desc="worker 推理期间心跳帧间隔"),
+    _k("engine", "heartbeat_timeout_s", int, 20, min_v=5, max_v=300,
+       desc="推理中无心跳多久判定 NPU 卡死并杀 worker"),
     # -- queue（5）----------------------------------------------------------
     _k("queue", "max_wait", int, 32, min_v=0, max_v=256, desc="允许等待的请求数；0=不排队"),
     _k("queue", "wait_timeout_s", int, 600, min_v=1, max_v=3600, desc="排队超时"),
@@ -218,7 +222,7 @@ SCHEMA: tuple[Key, ...] = (
 
 assert len(SCHEMA) == len(set(k.full for k in SCHEMA)), "配置键名重复（N11）"
 
-# 板端默认 TOML 落点。此前 83 键表只有 RKLLM_TOML 环境变量一个入口，deb 也不
+# 板端默认 TOML 落点。此前 85 键表只有 RKLLM_TOML 环境变量一个入口，deb 也不
 # 提供模板，运维根本看不见这张表；现在 load_config 会自动读它（不存在则静默
 # 跳过，默认行为零变化），模板由 `rkllm config init --board` 生成。
 DEFAULT_TOML_PATH = "/etc/rkllm/rkllm.toml"
@@ -407,7 +411,7 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
                 env[new_env] = raw
 
     file_data: dict[str, Any] = {}
-    # 未显式指定时，板端的默认 TOML 存在就用它（83 键的落点；此前只有
+    # 未显式指定时，板端的默认 TOML 存在就用它（85 键的落点；此前只有
     # RKLLM_TOML 环境变量一条路，deb 也没打模板，等于运维看不见这张表）。
     # 文件不存在是正常状态，不算错误。
     path = file or DEFAULT_TOML_PATH
@@ -506,7 +510,7 @@ def config_docs() -> str:
 def config_init(target: str = "board") -> str:
     """生成 TOML 模板（设计 §7.2 `rkllm config init --board|--client`）。
 
-    只输出注释 + 少量必填项，保持与 `config docs` 的 83 键同源但不重复抄写
+    只输出注释 + 少量必填项，保持与 `config docs` 的 85 键同源但不重复抄写
     全部默认值——默认值本来就不需要写进文件（优先级链已保证）。
     """
     if target == "client":
@@ -529,7 +533,7 @@ max_input_chars = 12000
 """
     return """# /etc/rkllm/rkllm.toml - 板端 FastAPI 栈配置（`rkllm-serve serve`）
 # 优先级：内置默认 < 本文件 < RKLLM_* 环境变量 < 命令行
-# 全部 83 键与默认值：  rkllm-serve config docs
+# 全部 85 键与默认值：  rkllm-serve config docs
 # 生效值与来源：        rkllm-serve config show
 # 只填需要改的项即可。
 
@@ -554,6 +558,8 @@ path = "/var/lib/rkllm/models/your-model.rkllm"
 #mode = "subprocess"        # in_process 为排障/回滚开关（崩溃不隔离）
 #memory_check = true        # 启动前内存预算校验
 #memory_reserve_mb = 1024
+#heartbeat_interval_s = 5   # worker 推理中心跳间隔
+#heartbeat_timeout_s = 20   # 推理中无心跳判定 NPU 卡死
 
 [queue]
 #max_wait = 32

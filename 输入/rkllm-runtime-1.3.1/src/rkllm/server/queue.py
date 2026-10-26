@@ -11,6 +11,9 @@ import threading
 import time
 from typing import Callable, Iterator
 
+from .metricsutil import (QUEUE_WAIT_BUCKETS, TTFT_BUCKETS, init_hist,
+                          observe)
+
 __all__ = ["QueueBusy", "QueueTimeout", "InferenceQueue"]
 
 log = logging.getLogger("rkllm.server.queue")
@@ -52,7 +55,10 @@ class InferenceQueue:
                         "errors_total": 0, "queue_wait_seconds_sum": 0.0,
                         "infer_seconds_sum": 0.0, "tokens_total": 0,
                         "prompt_tokens_total": 0,
-                        "completion_tokens_total": 0}
+                        "completion_tokens_total": 0,
+                        "max_tokens_clamped_total": 0}
+        init_hist(self.metrics, "ttft", TTFT_BUCKETS)
+        init_hist(self.metrics, "queue_wait", QUEUE_WAIT_BUCKETS)
 
     @property
     def queue_depth(self) -> int:
@@ -97,8 +103,9 @@ class InferenceQueue:
                                            % self.wait_timeout_s)
                 # 排队时长 = 入队到拿槽（此前 start 记在拿槽之后，
                 # queue_wait_seconds_sum 实际累加的是推理执行时长）
-                self.metrics["queue_wait_seconds_sum"] += (time.monotonic()
-                                                          - enqueued_at)
+                waited = time.monotonic() - enqueued_at
+                self.metrics["queue_wait_seconds_sum"] += waited
+                observe(self.metrics, "queue_wait", QUEUE_WAIT_BUCKETS, waited)
             infer_start = time.monotonic()
             try:
                 for token in submit():

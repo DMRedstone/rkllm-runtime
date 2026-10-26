@@ -84,6 +84,8 @@ def create_response(request: Request, body: dict):
     resp_id = tr.response_id()
     created = tr.now()
 
+    if pipe.max_tokens_clamped:
+        headers["X-RKLLM-Max-Tokens-Clamped"] = str(pipe.max_tokens)
     if streaming:
         return StreamingResponse(
             _stream(request, svc, pipe, body, resp_id, created),
@@ -115,6 +117,8 @@ def create_response(request: Request, body: dict):
     except WorkerDown as exc:
         return _error(503, str(exc)[:300], "worker_down")
 
+    if pipe.max_tokens_clamped:
+        headers["X-RKLLM-Max-Tokens-Clamped"] = str(pipe.max_tokens)
     chat_payload = {"choices": [{"message": {
         "role": "assistant",
         "content": result.get("text", ""),

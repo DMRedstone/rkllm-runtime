@@ -1,5 +1,19 @@
 rkllm-runtime (@VERSION@) unstable; urgency=medium
 
+  [ 1.3.1-18 reliability and observability ]
+  * Worker heartbeat: the worker emits heartbeat frames during inference; the
+    supervisor kills a worker whose C call is stuck (process alive but no
+    heartbeat), releasing the NPU; the next request restarts it. New
+    engine.heartbeat_interval_s / heartbeat_timeout_s keys (config 85 keys).
+  * Metrics: TTFT and queue-wait histograms plus max_tokens clamp counter;
+    the last-TTFT gauge remains for compatibility.
+  * Token estimates now share one byte-based estimator between context budget
+    and usage fallback; /v1/responses also exposes the clamp header.
+  * release_check.py checks version/changelog/config/caps/deb consistency.
+  * Frame protocol version 2 (heartbeat op).
+
+rkllm-runtime (1.3.1-17) unstable; urgency=medium
+
   [ 1.3.1-17 audit remediation ]
   * OpenAI compatibility: finish_reason=length with exact usage from the
     runtime end frame; streaming /v1/completions (text_completion envelope,
@@ -13,7 +27,7 @@ rkllm-runtime (@VERSION@) unstable; urgency=medium
     moves to memory with byte-LCP + similarity; tool-call content and batch
     truncation edge cases fixed.
   * Engineering: single-source version (DEFAULT_VERSION), dead-code cleanup,
-    route/pipeline shared layer, config keys 83 with model.max_tokens_limit,
+    route/pipeline shared layer, config keys 85 with model.max_tokens_limit,
     and an expanded selftest covering the HTTP surface.
 
 rkllm-runtime (1.3.1-16) unstable; urgency=medium

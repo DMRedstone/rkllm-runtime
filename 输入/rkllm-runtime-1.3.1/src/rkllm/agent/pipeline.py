@@ -14,6 +14,7 @@ from typing import Iterator
 from .conversation import build_prompt
 from .gateway import InferenceGateway
 from .reasoning import ReasoningSplitter
+from .tokens import BYTES_PER_TOKEN, estimate_tokens
 from .tools import ToolCallParser, build_tools_prefix, detect_parser
 
 
@@ -22,7 +23,7 @@ _SAMPLING_KEYS = ("top_k", "top_p", "temperature", "repeat_penalty",
 
 # 预算估算：按 UTF-8 字节 / 3 保守折算 token（中文 ≈1 token/字，英文高估 33%）。
 # 宁可少生成，也不把 prompt+max_tokens 送过 context 让 rkllm_run 返回 -1。
-PROMPT_BYTES_PER_TOKEN = 3
+PROMPT_BYTES_PER_TOKEN = BYTES_PER_TOKEN
 CONTEXT_MARGIN_TOKENS = 32
 MIN_NEW_TOKENS = 8
 
@@ -107,8 +108,7 @@ class Pipeline:
             raise ValueError(
                 "max_tokens=%d exceeds model.max_tokens_limit=%d; lower "
                 "max_tokens or raise model.max_tokens_limit" % (requested, limit))
-        self.prompt_tokens = max(
-            1, len(self._prompt.encode("utf-8")) // PROMPT_BYTES_PER_TOKEN)
+        self.prompt_tokens = estimate_tokens(self._prompt)
         self.max_tokens_clamped = False
         context = int(getattr(self.svc, "context_len", 0) or 0)
         if context <= 0:
@@ -129,6 +129,12 @@ class Pipeline:
             wanted = available
             self.max_tokens_clamped = True
         self.max_tokens = wanted
+        if self.max_tokens_clamped:
+            queue = getattr(self.svc, "queue", None)
+            metrics = getattr(queue, "metrics", None)
+            if isinstance(metrics, dict):
+                metrics["max_tokens_clamped_total"] = (
+                    metrics.get("max_tokens_clamped_total", 0) + 1)
 
     # -- token 流 -----------------------------------------------------------
 
@@ -299,9 +305,9 @@ class Pipeline:
 
     def usage(self, result: dict | None = None) -> dict:
         text = "".join(self._content_before)
-        reasoning_chars = len("".join(self._reasoning))
-        usage = {"prompt_tokens": max(1, len(self._prompt) // 2),
-                 "completion_tokens": max(1, (len(text) + reasoning_chars) // 2),
+        usage = {"prompt_tokens": estimate_tokens(self._prompt),
+                 "completion_tokens": estimate_tokens(
+                     text + "".join(self._reasoning)),
                  "total_tokens": 0}
         usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
         usage["estimated"] = True      # 无 tokenizer：估算并标注（设计 §4.3）

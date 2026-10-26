@@ -203,6 +203,9 @@ def _render_metrics(request: Request) -> str:
         "rkllm_tokens_total %d" % m["tokens_total"],
         "# TYPE rkllm_worker_restarts_total counter",
         "rkllm_worker_restarts_total %d" % sup.get("worker_restarts_total", 0),
+        "# TYPE rkllm_worker_heartbeat_timeouts_total counter",
+        "rkllm_worker_heartbeat_timeouts_total %d"
+        % sup.get("worker_heartbeat_timeouts_total", 0),
         "# TYPE rkllm_cache_hits_total counter",
         "rkllm_cache_hits_total %d" % cache["hits"],
         "# TYPE rkllm_cache_bytes gauge",
@@ -214,5 +217,15 @@ def _render_metrics(request: Request) -> str:
         "rkllm_ttft_seconds %f" % m.get("last_ttft_s", 0.0),
         "# TYPE rkllm_request_duration_seconds_sum counter",
         "rkllm_request_duration_seconds_sum %f" % m.get("duration_sum", 0.0),
+        "# TYPE rkllm_max_tokens_clamped_total counter",
+        "rkllm_max_tokens_clamped_total %d"
+        % m.get("max_tokens_clamped_total", 0),
     ]
+    from .metricsutil import (QUEUE_WAIT_BUCKETS, TTFT_BUCKETS, render_hist)
+    lines.append("# TYPE rkllm_ttft_histogram_seconds histogram")
+    lines.extend(render_hist(m, "rkllm_ttft_histogram_seconds", "ttft",
+                             TTFT_BUCKETS))
+    lines.append("# TYPE rkllm_queue_wait_histogram_seconds histogram")
+    lines.extend(render_hist(m, "rkllm_queue_wait_histogram_seconds",
+                             "queue_wait", QUEUE_WAIT_BUCKETS))
     return "\n".join(lines) + "\n"

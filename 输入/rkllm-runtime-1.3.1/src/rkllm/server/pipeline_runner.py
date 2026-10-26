@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 
 from ..agent.json_schema import validate as validate_schema
 from ..agent.pipeline import Pipeline
+from .metricsutil import TTFT_BUCKETS, observe
 
 
 # 单 NPU 上下文串行（硬件现实，非缺陷）：忙时明确告知客户端，别让它以为
@@ -82,6 +83,8 @@ def run_blocking(svc, pipe: Pipeline) -> dict:
     metrics["duration_sum"] = metrics.get("duration_sum", 0.0) + elapsed
     metrics["last_ttft_s"] = ((first_token_at - started)
                               if first_token_at else 0.0)
+    if first_token_at is not None:
+        observe(metrics, "ttft", TTFT_BUCKETS, first_token_at - started)
     # token 计数（/health stats 兼容字段的来源；perf 的 exact counts 优先）
     perf = meta.get("perf") or {}
     metrics["prompt_tokens_total"] = (metrics.get("prompt_tokens_total", 0)
@@ -149,6 +152,8 @@ class StreamTimer:
                                    + (time.monotonic() - self.started))
         if self.first_token_at is not None:
             metrics["last_ttft_s"] = self.first_token_at - self.started
+            observe(metrics, "ttft", TTFT_BUCKETS,
+                    self.first_token_at - self.started)
         perf = pipe.last_perf() if hasattr(pipe, "last_perf") else None
         if perf:
             metrics["prompt_tokens_total"] = (

@@ -45,7 +45,7 @@ def test_serve_keeps_legacy_arguments():
 def test_config_docs_lists_all_keys(capsys):
     code, out, _ = _run(["config", "docs"], capsys)
     assert code == 0
-    assert out.count("| `") >= 82
+    assert out.count("| `") >= 85
 
 
 def test_config_show_json(capsys):
@@ -53,7 +53,7 @@ def test_config_show_json(capsys):
     assert code == 0
     payload = json.loads(out)
     assert "values" in payload and "sources" in payload
-    assert len(payload["values"]) == 83
+    assert len(payload["values"]) == 85
 
 
 def test_config_show_text(capsys):

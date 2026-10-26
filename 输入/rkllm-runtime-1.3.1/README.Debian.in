@@ -120,7 +120,7 @@ Service configuration
   template instead and edit what you need:
 
     rkllm config init --board --path /etc/rkllm/rkllm.toml
-    rkllm config docs                  # the same 83 keys as a Markdown table
+    rkllm config docs                  # the same 85 keys as a Markdown table
     rkllm config show                  # effective values + where each came from
 
   @SERVER_DEFAULTS@ remains the only file the unit reads; /etc/rkllm/rkllm.toml

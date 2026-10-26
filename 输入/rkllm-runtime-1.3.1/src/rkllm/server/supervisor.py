@@ -12,6 +12,7 @@ kill -9 worker 后 HTTP 存活并在飞请求 503，120 s 内恢复）。
 from __future__ import annotations
 
 import collections
+import logging
 import os
 import socket
 import subprocess
@@ -22,11 +23,12 @@ import uuid
 from pathlib import Path
 from typing import Iterator
 
-from ..worker.frames import (OP_ABORT, OP_END, OP_ERROR, OP_READY, OP_RUN,
-                             OP_TOKEN, PROTOCOL_VERSION, FrameError,
-                             read_frame, write_frame)
+from ..worker.frames import (OP_ABORT, OP_END, OP_ERROR, OP_HEARTBEAT,
+                             OP_READY, OP_RUN, OP_TOKEN, PROTOCOL_VERSION,
+                             FrameError, read_frame, write_frame)
 
 SRC_DIR = str(Path(__file__).resolve().parents[2])
+log = logging.getLogger("rkllm.server.supervisor")
 
 
 class WorkerDown(Exception):
@@ -50,56 +52,68 @@ class WorkerClient:
         self._rfile = conn.makefile("rb")
         self._wfile = conn.makefile("wb")
         self._write_lock = threading.Lock()
+        # 心跳：仅在本次 run 进行期间要求 worker 上报（空闲时没有读者，
+        # worker 也不会发帧，避免 socket 缓冲区堆积）。
+        self.active = False
+        self.last_heartbeat = time.monotonic()
 
     def run(self, prompt: str, *, role: str = "user",
             enable_thinking: bool = False, max_new_tokens: int | None = None,
             sampling: dict | None = None, cache_hint: bool = True,
             request_timeout_s: int = 900) -> Iterator[str]:
         req_id = uuid.uuid4().hex[:10]
+        self.active = True
+        self.last_heartbeat = time.monotonic()
         try:
-            with self._write_lock:
-                write_frame(self._wfile, {"op": OP_RUN, "id": req_id,
-                                          "prompt": prompt,
-                                          "params": {"role": role,
-                                                     "enable_thinking": enable_thinking,
-                                                     "max_new_tokens": max_new_tokens,
-                                                     "sampling": sampling,
-                                                     "cache_hint": cache_hint}})
-        except OSError as exc:
-            # worker 被 kill -9 后第一次写帧是 BrokenPipeError，不是 EOF：
-            # 不转成 WorkerDown 的话，自愈逻辑不会触发，路由层还会把它当 500。
-            raise WorkerDown("worker write failed: %s" % exc)
-        deadline = time.monotonic() + request_timeout_s
-        while True:
-            if time.monotonic() > deadline:
-                self.abort()
-                raise RequestFailed("request timeout")
             try:
-                frame = read_frame(self._rfile)
-            except (FrameError, OSError) as exc:
-                raise WorkerDown("worker connection lost: %s" % exc)
-            if not frame:
-                raise WorkerDown("worker closed connection")
-            op = frame.get("op")
-            fid = frame.get("id")
-            # P1-9：单 socket FIFO 上可能残留上一请求的帧；只处理本请求的帧，
-            # 否则会把残留 end 当成当前请求完成而立即返回空响应。
-            if fid is not None and fid != req_id:
-                continue
-            if op == OP_TOKEN:
-                yield frame["text"]
-            elif op == OP_END:
-                # end 帧带 perf（prefill/generate tokens）——此前直接 return
-                # 把它丢了，usage 的 exact counts 从未生效（永远估算值），
-                # finish_reason 的 length 判定也没有依据。作为管线元数据
-                # dict 产出（与 tool_calls/parse_error 同一条路）。
-                perf = frame.get("perf")
-                if perf:
-                    yield {"perf": perf}
-                return
-            elif op == OP_ERROR:
-                # worker 明确报告本次请求失败：进程活着，绝不走重启路径
-                raise RequestFailed(frame.get("message", "worker error"))
+                with self._write_lock:
+                    write_frame(self._wfile, {"op": OP_RUN, "id": req_id,
+                                              "prompt": prompt,
+                                              "params": {"role": role,
+                                                         "enable_thinking": enable_thinking,
+                                                         "max_new_tokens": max_new_tokens,
+                                                         "sampling": sampling,
+                                                         "cache_hint": cache_hint}})
+            except OSError as exc:
+                # worker 被 kill -9 后第一次写帧是 BrokenPipeError，不是 EOF：
+                # 不转成 WorkerDown 的话，自愈逻辑不会触发，路由层还会把它当 500。
+                raise WorkerDown("worker write failed: %s" % exc)
+            deadline = time.monotonic() + request_timeout_s
+            while True:
+                if time.monotonic() > deadline:
+                    self.abort()
+                    raise RequestFailed("request timeout")
+                try:
+                    frame = read_frame(self._rfile)
+                except (FrameError, OSError) as exc:
+                    raise WorkerDown("worker connection lost: %s" % exc)
+                if not frame:
+                    raise WorkerDown("worker closed connection")
+                op = frame.get("op")
+                fid = frame.get("id")
+                # P1-9：单 socket FIFO 上可能残留上一请求的帧；只处理本请求的帧，
+                # 否则会把残留 end 当成当前请求完成而立即返回空响应。
+                if fid is not None and fid != req_id:
+                    continue
+                if op == OP_HEARTBEAT:
+                    self.last_heartbeat = time.monotonic()
+                    continue
+                if op == OP_TOKEN:
+                    yield frame["text"]
+                elif op == OP_END:
+                    # end 帧带 perf（prefill/generate tokens）——此前直接 return
+                    # 把它丢了，usage 的 exact counts 从未生效（永远估算值），
+                    # finish_reason 的 length 判定也没有依据。作为管线元数据
+                    # dict 产出（与 tool_calls/parse_error 同一条路）。
+                    perf = frame.get("perf")
+                    if perf:
+                        yield {"perf": perf}
+                    return
+                elif op == OP_ERROR:
+                    # worker 明确报告本次请求失败：进程活着，绝不走重启路径
+                    raise RequestFailed(frame.get("message", "worker error"))
+        finally:
+            self.active = False
 
     def abort(self) -> None:
         with self._write_lock:
@@ -123,7 +137,8 @@ class Supervisor:
     def __init__(self, worker_args: list[str], *, transport: str = "auto",
                  load_timeout_s: int = 300, restart_backoff_s: int = 5,
                  restart_backoff_max_s: int = 120, restart_max_per_hour: int = 3,
-                 health_interval_s: int = 10, request_timeout_s: int = 900):
+                 health_interval_s: int = 10, request_timeout_s: int = 900,
+                 heartbeat_timeout_s: int = 20):
         self.worker_args = worker_args
         self.transport = transport        # auto | unix | tcp
         self.load_timeout_s = load_timeout_s
@@ -133,10 +148,12 @@ class Supervisor:
         self.backoff_max_s = restart_backoff_max_s
         self.restart_max_per_hour = restart_max_per_hour
         self.health_interval_s = health_interval_s
+        self.heartbeat_timeout_s = heartbeat_timeout_s
         self._health_stop = threading.Event()
         self.state = "loading"            # loading / ready / error / stopped
         self.restarts: list[float] = []
-        self.metrics = {"worker_restarts_total": 0}
+        self.metrics = {"worker_restarts_total": 0,
+                        "worker_heartbeat_timeouts_total": 0}
         self._proc: subprocess.Popen | None = None
         self._client: WorkerClient | None = None
         self._lock = threading.Lock()
@@ -267,11 +284,22 @@ class Supervisor:
         """WorkerDown 时替代原来的 stderr.read()（那个会再次死锁）。"""
         return "".join(getattr(self, "_stderr_tail_buf", []))[-limit:]
 
+    def _heartbeat_expired(self, now: float | None = None) -> bool:
+        """推理中超过 heartbeat_timeout_s 没有心跳 → 认为 NPU 卡死。"""
+        client = self._client
+        if not (self.state == "ready" and client is not None
+                and getattr(client, "active", False)):
+            return False
+        now = time.monotonic() if now is None else now
+        return (now - getattr(client, "last_heartbeat", now)
+                > self.heartbeat_timeout_s)
+
     def _start_health(self) -> None:
         """P2：健康监测线程——消费 health_interval_s / _health_stop。
 
         定期检查 worker 进程是否已死；发现后置 state=error，让下一次请求触发
-        自愈重启（此前这两个配置项定义了却无人消费）。
+        自愈重启。另检查推理期心跳：C 调用卡死时进程仍活着（poll 为 None），
+        只能靠心跳缺失判定；发现后杀掉 worker 释放 NPU，下一次请求自动重启。
         """
         if getattr(self, "_health_thread", None) is not None:
             return
@@ -283,6 +311,21 @@ class Supervisor:
                     if (self.state == "ready" and proc is not None
                             and proc.poll() is not None):
                         self.state = "error"
+                        continue
+                    if self._heartbeat_expired():
+                        self.metrics["worker_heartbeat_timeouts_total"] += 1
+                        log.error("worker heartbeat timeout after %ss "
+                                  "(inference stuck); killing worker",
+                                  self.heartbeat_timeout_s)
+                        self.state = "error"
+                        if proc is not None and proc.poll() is None:
+                            proc.kill()
+                            try:
+                                proc.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                pass
+                        if self._client is not None:
+                            self._client.close()
                 except Exception:
                     pass
 

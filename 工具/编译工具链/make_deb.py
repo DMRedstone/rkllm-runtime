@@ -67,7 +67,7 @@ def _source_version() -> tuple[str, str]:
     version = match.group(1)
     if "-" not in version:
         raise SystemExit(
-            f"DEFAULT_VERSION={version!r} must look like 1.3.1-17")
+            f"DEFAULT_VERSION={version!r} must look like 1.3.1-18")
     upstream, revision = version.split("-", 1)
     return upstream, revision
 
