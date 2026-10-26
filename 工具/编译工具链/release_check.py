@@ -2,7 +2,7 @@
 
 用法：
     python 工具/编译工具链/release_check.py
-    python 工具/编译工具链/release_check.py --deb 工具/dist/rkllm-runtime_1.3.1-18_arm64.deb
+    python 工具/编译工具链/release_check.py --deb 工具/dist/rkllm-runtime_1.3.1-17_arm64.deb
 """
 
 from __future__ import annotations
