@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rkllm-runtime"
-version = "1.3.1.16"
+# 版本不在此硬编码：由 src/rkllm/__init__.py 的 __version__ 推导（该值优先读取
+# 环境变量 RKLLM_RUNTIME_VERSION，未设置时回退 1.3.1-17）。构建 / 发布流水线可经
+# 该环境变量注入确定版本，保持 wheel 版本与运行时自报版本单一事实源一致。
+dynamic = ["version"]
 description = "RKLLM board-side model service (OpenAI subset)"
 requires-python = ">=3.13"
 license = { text = "MIT" }
@@ -15,3 +18,6 @@ include = ["rkllm*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.dynamic]
+version = { attr = "rkllm.__version__" }
