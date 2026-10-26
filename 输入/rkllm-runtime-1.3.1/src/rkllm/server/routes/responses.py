@@ -101,6 +101,8 @@ def create_response(request: Request, body: dict):
         schema = spec.get("schema") if isinstance(spec, dict) else None
     try:
         result, pipe = _run_blocking_checked(svc, chat_body, max_tokens, schema)
+    except ValueError as exc:
+        return _error(400, str(exc), "invalid_request")
     except _SchemaError as exc:
         return _http_error(422, "invalid_request_error",
                            "response did not match response_format.json_schema "

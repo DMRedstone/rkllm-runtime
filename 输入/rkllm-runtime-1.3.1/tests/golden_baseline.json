@@ -25,10 +25,10 @@
    }
   ],
   "usage": {
-   "prompt_tokens": 13,
-   "completion_tokens": 20,
-   "total_tokens": 33,
-   "estimated": true
+   "prompt_tokens": 15,
+   "completion_tokens": 10,
+   "total_tokens": 25,
+   "estimated": false
   }
  },
  "POST /v1/chat/completions|{\"max_tokens\": 64, \"messages\": [{\"content\": \"回答保持一句话\", \"role\": \"system\"}, {\"content\": \"天空为什么是蓝的\", \"role\": \"user\"}], \"temperature\": 0.5}": {
@@ -45,10 +45,10 @@
    }
   ],
   "usage": {
-   "prompt_tokens": 21,
-   "completion_tokens": 28,
-   "total_tokens": 49,
-   "estimated": true
+   "prompt_tokens": 24,
+   "completion_tokens": 14,
+   "total_tokens": 38,
+   "estimated": false
   }
  },
  "POST /v1/chat/completions|{\"max_tokens\": 48, \"messages\": [{\"content\": \"写三行诗\", \"role\": \"user\"}], \"stream\": true}": {
@@ -106,10 +106,10 @@
    }
   ],
   "usage": {
-   "prompt_tokens": 2,
-   "completion_tokens": 8,
-   "total_tokens": 10,
-   "estimated": true
+   "prompt_tokens": 4,
+   "completion_tokens": 4,
+   "total_tokens": 8,
+   "estimated": false
   }
  }
 }

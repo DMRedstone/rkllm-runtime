@@ -48,13 +48,37 @@ PACKAGING = Path(os.environ.get("RKLLM_PACKAGING_DIR") or (ROOT.parent / "输入
 
 # 上游 release tarball 位置（软编码）：优先环境变量 RKLLM_RELEASE_TARBALL，
 # 未设置时使用仓库内随附的精简上游库。换机器 / 换版本只需设该环境变量，不必改脚本。
-SOURCE_TARBALL = Path(os.environ.get("RKLLM_RELEASE_TARBALL")
-                      or ROOT.parent / "输入" / "rknn-llm-release-v1.3.1-minimal.tar.gz")
-TARBALL_PREFIX = "rknn-llm-release-v1.3.1"
+SOURCE_VERSION_FILE = PACKAGING / "src" / "rkllm" / "__init__.py"
 
-UPSTREAM_VERSION = "1.3.1"
+
+def _source_version() -> tuple[str, str]:
+    """版本唯一来源：src/rkllm/__init__.py 的 DEFAULT_VERSION。
+
+    返回 (upstream_version, revision)。构建器不再维护第二份版本号；显式
+    --revision 与源码不一致时直接报错，避免 dpkg 版本与运行时自报版本双源。
+    """
+    try:
+        text = SOURCE_VERSION_FILE.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(f"cannot read {SOURCE_VERSION_FILE}: {exc}")
+    match = re.search(r'^DEFAULT_VERSION\s*=\s*"([^"]+)"', text, re.M)
+    if not match:
+        raise SystemExit(f"DEFAULT_VERSION not found in {SOURCE_VERSION_FILE}")
+    version = match.group(1)
+    if "-" not in version:
+        raise SystemExit(
+            f"DEFAULT_VERSION={version!r} must look like 1.3.1-17")
+    upstream, revision = version.split("-", 1)
+    return upstream, revision
+
+
+UPSTREAM_VERSION, DEFAULT_REVISION = _source_version()
+SOURCE_TARBALL = Path(
+    os.environ.get("RKLLM_RELEASE_TARBALL")
+    or ROOT.parent / "输入" / ("rknn-llm-release-v%s-minimal.tar.gz"
+                               % UPSTREAM_VERSION))
+TARBALL_PREFIX = "rknn-llm-release-v%s" % UPSTREAM_VERSION
 DEFAULT_PACKAGE = "rkllm-runtime"
-DEFAULT_REVISION = "13"
 DEFAULT_MAINTAINER = "RedStone <DMRedStone@users.noreply.github.com>"
 
 # multiarch triplet -> upstream directory naming inside the release tarball
@@ -656,7 +680,8 @@ def main() -> int:
     ap.add_argument("--profile", choices=("full", "slim"), default="full",
                     help="full: 自带 OpenCV,示例开箱可编译; slim: 依赖系统 libopencv-dev")
     ap.add_argument("--package", default=DEFAULT_PACKAGE)
-    ap.add_argument("--revision", default=DEFAULT_REVISION)
+    ap.add_argument("--revision", default=DEFAULT_REVISION,
+                    help="默认取 src/rkllm/__init__.py DEFAULT_VERSION 的修订号")
     ap.add_argument("--maintainer", default=DEFAULT_MAINTAINER)
     ap.add_argument("--source", default=str(SOURCE_TARBALL))
     ap.add_argument("--out", default=str(ROOT / "dist"))
@@ -666,6 +691,12 @@ def main() -> int:
     ap.add_argument("--tree-dir", default=None,
                     help="staging 目录位置(默认 build/tree-<arch>)")
     args = ap.parse_args()
+
+    if args.revision != DEFAULT_REVISION:
+        raise SystemExit(
+            "--revision %s != src/rkllm/__init__.py DEFAULT_VERSION revision %s; "
+            "bump DEFAULT_VERSION instead of overriding the revision"
+            % (args.revision, DEFAULT_REVISION))
 
     source_path = Path(args.source)
     if not source_path.exists():

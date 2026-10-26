@@ -42,8 +42,8 @@ class ChatCompletionRequest(_OpenAICompat, BaseModel):
     model: str = "rkllm"
     messages: list[dict]
     stream: bool = False
-    max_tokens: int | None = Field(default=None, ge=1, le=32768)
-    max_completion_tokens: int | None = Field(default=None, ge=1, le=32768)
+    max_tokens: int | None = Field(default=None, ge=1)
+    max_completion_tokens: int | None = Field(default=None, ge=1)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
     top_k: int | None = Field(default=None, ge=1, le=128)
@@ -75,7 +75,7 @@ class CompletionRequest(_OpenAICompat, BaseModel):
     model: str = "rkllm"
     prompt: str
     stream: bool = False
-    max_tokens: int | None = Field(default=None, ge=1, le=32768)
+    max_tokens: int | None = Field(default=None, ge=1)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
     stop: str | list[str] | None = None

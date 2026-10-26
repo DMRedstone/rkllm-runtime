@@ -204,6 +204,69 @@ def streaming_vs_blocking(board, quick):
 # A3. 响应归属（串包）
 # ---------------------------------------------------------------------------
 
+def completions_and_length(board, quick):
+    """A4：/v1/completions 流式信封 + finish_reason=length 契约实测。
+
+    这两项是 1.3.1-17 才修好的对外契约，之前压测只覆盖 chat 流式，导致
+    “服务端不遵守 max_tokens”的旧结论在报告里多活了一轮。
+    """
+    header("A4. completions streaming + finish_reason=length")
+
+    # 1) max_tokens 触顶必须报 length，而不是 stop/静默超发
+    status, body, elapsed, usage = board.call(
+        payload={"messages": [{"role": "user", "content": "写一段介绍 RK3588 的文字"}],
+                 "max_tokens": 4}, timeout=180)
+    finish = None
+    if status == 200:
+        try:
+            finish = json.loads(body)["choices"][0].get("finish_reason")
+        except Exception:                                       # noqa: BLE001
+            finish = "BAD"
+    note("A4", "max_tokens=4 finish_reason",
+         "PASS %s (%.2fs)" % (finish, elapsed) if finish == "length"
+         else "FAIL/WARN status=%s finish=%s" % (status, finish))
+
+    # 2) completions 流式：text_completion 信封 + include_usage
+    payload = {"prompt": "用一句话介绍 NPU", "max_tokens": 16, "stream": True,
+               "stream_options": {"include_usage": True}}
+    request = board._request("/completions", payload)
+    started = time.time()
+    ttft = None
+    chunks = []
+    usage_seen = False
+    obj = None
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            for raw in response:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                obj = chunk.get("object") or obj
+                if chunk.get("usage"):
+                    usage_seen = True
+                for choice in chunk.get("choices") or []:
+                    text = choice.get("text") or ""
+                    if text:
+                        if ttft is None:
+                            ttft = time.time() - started
+                        chunks.append(text)
+        ok = bool(chunks) and obj == "text_completion" and usage_seen
+        note("A4", "completions stream",
+             "%s object=%s ttft=%.2fs chars=%d usage=%s"
+             % ("PASS" if ok else "FAIL", obj, ttft or -1.0,
+                len("".join(chunks)), usage_seen))
+    except Exception as exc:                                    # noqa: BLE001
+        note("A4", "completions stream", "EXC %r" % (exc,))
+    return alive(board, "A4")[0]
+
+
 def attribution(board, quick):
     """A3 段：并发下每个响应是否回到了发起它的那个请求。
 
@@ -614,6 +677,7 @@ def main():
         ("A", lambda: baseline(board, args.quick)),
         ("A2", lambda: streaming_vs_blocking(board, args.quick)),
         ("A3", lambda: attribution(board, args.quick)),
+        ("A4", lambda: completions_and_length(board, args.quick)),
         ("A5", lambda: output_shape(board, args.quick)),
         ("B", lambda: concurrency_curve(board, args.quick, levels,
                                         args.concurrency_requests, args.concurrency_tokens)),

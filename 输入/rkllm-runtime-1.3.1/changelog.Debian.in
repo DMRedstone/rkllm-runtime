@@ -1,3 +1,21 @@
+rkllm-runtime (@VERSION@) unstable; urgency=medium
+
+  [ 1.3.1-17 audit remediation ]
+  * OpenAI compatibility: finish_reason=length with exact usage from the
+    runtime end frame; streaming /v1/completions (text_completion envelope,
+    include_usage); /health stats counters restored; ignored/unsupported
+    request fields are accepted by the schema and dispatched through caps
+    instead of being rejected by pydantic (store/metadata/etc.).
+  * Streaming: remove the heartbeat-throttling bug, use a two-stage cancel
+    and backpressure truncation, and record TTFT/duration/token metrics on
+    streaming paths as well as non-streaming ones.
+  * Robustness: client errors no longer restart the worker; prompt cache
+    moves to memory with byte-LCP + similarity; tool-call content and batch
+    truncation edge cases fixed.
+  * Engineering: single-source version (DEFAULT_VERSION), dead-code cleanup,
+    route/pipeline shared layer, config keys 83 with model.max_tokens_limit,
+    and an expanded selftest covering the HTTP surface.
+
 rkllm-runtime (1.3.1-16) unstable; urgency=medium
 
   [ New FastAPI stack (grey release, apt route) ]
@@ -14,8 +32,7 @@ rkllm-runtime (1.3.1-16) unstable; urgency=medium
   * rkllm-server-next.service: TimeoutStartSec=300 (27B cold load), graceful
     drain, explicit opt-in (not enabled by the package).
 
-rkllm-runtime (@VERSION@) unstable; urgency=medium
-
+rkllm-runtime (1.3.1-15) unstable; urgency=medium
   [ API server and CLI ]
   * Refuse chunked request bodies with 411 instead of reading them as empty.
     The API speaks HTTP/1.1 keep-alive but only understood Content-Length, so

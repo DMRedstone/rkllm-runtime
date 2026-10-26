@@ -42,7 +42,8 @@ def finish_reason_stats(samples):
     """统计 finish_reason 分布 → {"stop": n, "length": n, "other": {...}, "truncated_pct": x}。
 
     `length` 是"被硬截断"，也是内容不可用最常见的形态：模型还没说完就被切断。
-    服务端不遵守 max_tokens，所以 `stop` 也不等于"长度符合请求"——那要看 overrun。
+    服务端遵守 max_tokens：触顶时 `finish_reason=length`；`stop` 只表示模型
+    自然结束，是否超过请求上限仍要看 overrun。
     """
     counts = Counter()
     for s in samples:

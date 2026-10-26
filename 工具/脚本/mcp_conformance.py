@@ -174,31 +174,46 @@ class Connector:
 def check_version(version: str, port: int) -> None:
     conn = Connector(port)
     try:
-        init = conn.call("initialize", {"protocolVersion": version,
-                                        "capabilities": {},
-                                        "clientInfo": {"name": "conformance",
-                                                       "version": "1"}})
-        result = (init or {}).get("result") or {}
-        check("%s initialize ok" % version, bool(result), str(init)[:120])
-        check("%s serverInfo" % version,
-              (result.get("serverInfo") or {}).get("name") == "rkllm-mcp",
-              str(result.get("serverInfo")))
-        check("%s capabilities.tools" % version,
-              "tools" in (result.get("capabilities") or {}))
+        meta = {"protocolVersion": version}
         if version == "2026-07-28":
+            # 2026 是无状态协议：没有 initialize；首帧用 _meta 声明版本。
+            discover = (conn.call("server/discover", {"_meta": meta}) or {}).get("result") or {}
+            check("%s server/discover" % version,
+                  (discover.get("serverInfo") or {}).get("name") == "rkllm-mcp",
+                  str(discover)[:120])
+            check("%s discover.supportedVersions" % version,
+                  "2026-07-28" in (discover.get("supportedVersions") or []),
+                  str(discover.get("supportedVersions")))
             check("2026-07-28 resultType=complete",
-                  result.get("resultType") == "complete", str(result)[:100])
+                  discover.get("resultType") == "complete", str(discover)[:100])
+            # initialize 必须被拒绝，显性化版本误用（A-7）。
+            init = conn.call("initialize", {"protocolVersion": version})
+            check("2026-07-28 initialize rejected",
+                  (init or {}).get("error", {}).get("code") == -32601,
+                  str(init)[:100])
+            listed = (conn.call("tools/list", {"_meta": meta}) or {}).get("result") or {}
+        else:
+            init = conn.call("initialize", {"protocolVersion": version,
+                                            "capabilities": {},
+                                            "clientInfo": {"name": "conformance",
+                                                           "version": "1"}})
+            result = (init or {}).get("result") or {}
+            check("%s initialize ok" % version, bool(result), str(init)[:120])
+            check("%s serverInfo" % version,
+                  (result.get("serverInfo") or {}).get("name") == "rkllm-mcp",
+                  str(result.get("serverInfo")))
+            check("%s capabilities.tools" % version,
+                  "tools" in (result.get("capabilities") or {}))
+            discover = (conn.call("server/discover", {}) or {}).get("result") or {}
+            check("%s server/discover" % version,
+                  (discover.get("serverInfo") or {}).get("name") == "rkllm-mcp",
+                  str(discover)[:120])
+            check("%s discover.supportedVersions" % version,
+                  "2026-07-28" in (discover.get("supportedVersions") or []),
+                  str(discover.get("supportedVersions")))
+            conn.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            listed = (conn.call("tools/list", {}) or {}).get("result") or {}
 
-        discover = (conn.call("server/discover", {}) or {}).get("result") or {}
-        check("%s server/discover" % version,
-              (discover.get("serverInfo") or {}).get("name") == "rkllm-mcp",
-              str(discover)[:120])
-        check("%s discover.supportedVersions" % version,
-              "2026-07-28" in (discover.get("supportedVersions") or []),
-              str(discover.get("supportedVersions")))
-
-        conn.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        listed = (conn.call("tools/list", {}) or {}).get("result") or {}
         names = [t.get("name") for t in listed.get("tools") or []]
         expected = ["local_llm_" + t for t in TOOLS]
         check("%s tools/list 6 个" % version,
@@ -217,7 +232,9 @@ def check_version(version: str, port: int) -> None:
         called = conn.call("tools/call",
                            {"name": "local_llm_ask",
                             "arguments": {"prompt": "说一句话",
-                                          "max_tokens": 8}}, timeout=60)
+                                          "max_tokens": 8},
+                            **({"_meta": meta} if version == "2026-07-28" else {})},
+                           timeout=60)
         text = ((called or {}).get("result") or {}).get("content") or []
         check("%s tools/call 返回 content" % version,
               bool(text) and "text" in (text[0] or {}), str(called)[:120])

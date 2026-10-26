@@ -27,6 +27,10 @@ class InferenceGateway(Protocol):
     max_tool_calls: int
     tools_mode: str
     system_prompt: str
+    context_len: int
+    default_max_tokens: int
+    max_tokens_limit: int
+    json_hint: str
     supervisor: Any        # 提供 execute()/abort()；None = 未配置推理
     queue: Any             # 提供 run(cancelled=) 与 request_timeout_s
 

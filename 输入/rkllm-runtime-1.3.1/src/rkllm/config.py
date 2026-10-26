@@ -1,4 +1,4 @@
-"""82 键 TOML 配置表（MCP 接入设计 §7 / 总体设计 §7.1，需求 N11/F13）。
+"""83 键 TOML 配置表（MCP 接入设计 §7 / 总体设计 §7.1，需求 N11/F13）。
 
 设计要点：
 - 所有影响行为的参数必须进表；代码中不得出现魔法数（协议常量与安全下限除外）。
@@ -58,7 +58,7 @@ def _k(section: str, name: str, type_: type, default: Any, *,
                implemented=implemented)
 
 
-# 82 键全量 schema。分组顺序与《MCP 接入与配置设计》§7.2 一致。
+# 83 键全量 schema。分组顺序与《MCP 接入与配置设计》§7.2 一致。
 SCHEMA: tuple[Key, ...] = (
     # -- server（13）--------------------------------------------------------
     _k("server", "bind_host", str, "127.0.0.1", desc="监听地址；默认只本机，对外需显式改"),
@@ -77,7 +77,7 @@ SCHEMA: tuple[Key, ...] = (
     _k("server", "tls_cert", str, "", desc="TLS 证书；与 tls_key 成对给出才启用"),
     _k("server", "tls_key", str, "", desc="TLS 私钥"),
     _k("server", "access_log", bool, True, desc="访问日志开关"),
-    # -- model（11）---------------------------------------------------------
+    # -- model（12）---------------------------------------------------------
     _k("model", "path", str, "", desc=".rkllm 模型路径；serve 必填"),
     _k("model", "search_dirs", list, (), desc="裸模型名的搜索目录"),
     _k("model", "freq_helper", str, "auto",
@@ -88,8 +88,10 @@ SCHEMA: tuple[Key, ...] = (
        desc="上下文长度；与内存预算联动校验"),
     _k("model", "min_context", int, 1024, min_v=256, max_v=8192,
        desc="内存不足时最低降到此值，再低则拒绝启动"),
-    _k("model", "max_tokens", int, 0, min_v=0, max_v=32768,
-       desc="0=按档位（small 2048 / medium 1024 / large 512）"),
+    _k("model", "max_tokens", int, 0, min_v=0, max_v=1_000_000,
+       desc="默认生成长度；0=按档位（small 2048 / medium 1024 / large 512）"),
+    _k("model", "max_tokens_limit", int, 0, min_v=0, max_v=1_000_000,
+       desc="请求 max_tokens 上限；0=不额外限制（仅受 context 预算约束）"),
     _k("model", "threads", int, 4, min_v=1, max_v=8, desc="CPU 线程数"),
     _k("model", "platform", str, "auto",
        choices=("auto", "rk3588", "rk3576", "rk3562", "rv1126b"), desc="SoC 平台"),
@@ -216,7 +218,7 @@ SCHEMA: tuple[Key, ...] = (
 
 assert len(SCHEMA) == len(set(k.full for k in SCHEMA)), "配置键名重复（N11）"
 
-# 板端默认 TOML 落点。此前 82 键表只有 RKLLM_TOML 环境变量一个入口，deb 也不
+# 板端默认 TOML 落点。此前 83 键表只有 RKLLM_TOML 环境变量一个入口，deb 也不
 # 提供模板，运维根本看不见这张表；现在 load_config 会自动读它（不存在则静默
 # 跳过，默认行为零变化），模板由 `rkllm config init --board` 生成。
 DEFAULT_TOML_PATH = "/etc/rkllm/rkllm.toml"
@@ -405,7 +407,7 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
                 env[new_env] = raw
 
     file_data: dict[str, Any] = {}
-    # 未显式指定时，板端的默认 TOML 存在就用它（82 键的落点；此前只有
+    # 未显式指定时，板端的默认 TOML 存在就用它（83 键的落点；此前只有
     # RKLLM_TOML 环境变量一条路，deb 也没打模板，等于运维看不见这张表）。
     # 文件不存在是正常状态，不算错误。
     path = file or DEFAULT_TOML_PATH
@@ -504,7 +506,7 @@ def config_docs() -> str:
 def config_init(target: str = "board") -> str:
     """生成 TOML 模板（设计 §7.2 `rkllm config init --board|--client`）。
 
-    只输出注释 + 少量必填项，保持与 `config docs` 的 82 键同源但不重复抄写
+    只输出注释 + 少量必填项，保持与 `config docs` 的 83 键同源但不重复抄写
     全部默认值——默认值本来就不需要写进文件（优先级链已保证）。
     """
     if target == "client":
@@ -527,7 +529,7 @@ max_input_chars = 12000
 """
     return """# /etc/rkllm/rkllm.toml - 板端 FastAPI 栈配置（`rkllm-serve serve`）
 # 优先级：内置默认 < 本文件 < RKLLM_* 环境变量 < 命令行
-# 全部 82 键与默认值：  rkllm-serve config docs
+# 全部 83 键与默认值：  rkllm-serve config docs
 # 生效值与来源：        rkllm-serve config show
 # 只填需要改的项即可。
 
@@ -546,6 +548,7 @@ path = "/var/lib/rkllm/models/your-model.rkllm"
 #context = 4096            # 内存不足时按 2048 / 1024 逐级降，不低于 min_context
 #min_context = 1024
 #max_tokens = 0            # 0 = 按档位（small 2048 / medium 1024 / large 512）
+#max_tokens_limit = 0      # 请求 max_tokens 上限；0=仅受 context 预算约束
 
 [engine]
 #mode = "subprocess"        # in_process 为排障/回滚开关（崩溃不隔离）

@@ -425,7 +425,8 @@ footer{margin-top:38px;padding-top:14px;border-top:1px solid var(--line);color:v
     P.append("<h3>工程建议</h3>")
     P.append("<ul>"
              "<li><b>长文一律分段处理</b>：按段落切到 200~300 字/段，逐段调用（见 B 组），避免长生成退化。</li>"
-             "<li><b>严格限制 max_tokens</b>并配合客户端硬超时；服务端不遵守 max_tokens，需客户端兜底截断。</li>"
+             "<li><b>严格限制 max_tokens</b>并配合客户端硬超时；服务端遵守 max_tokens，"
+             "触顶时返回 finish_reason=length，客户端仍应保留兜底截断。</li>"
              "<li><b>控制上下文总量</b>：服务上下文约 4096 token，输入+输出须远小于该值；"
              "输入建议不超过 ~2000 字。</li>"
              "<li><b>加崩溃容错</b>：捕获连接中断并等待守护进程拉起后重试（本套脚本已内置）。</li>"

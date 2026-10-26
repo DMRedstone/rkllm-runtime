@@ -19,7 +19,7 @@ import os
 import sys
 import time
 
-BASE = os.environ.get("F10_BASE", "http://10.0.0.14:8080/v1")
+BASE = os.environ.get("F10_BASE", "http://192.0.2.10:8080/v1")
 KEY = os.environ["F10_KEY"]
 
 

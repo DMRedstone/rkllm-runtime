@@ -74,7 +74,10 @@ def test_queue_rejects_when_full():
         def submit():
             gate.wait(5)
             return iter(["x"])
-        list(q.run(submit))
+        try:
+            list(q.run(submit))
+        except QueueBusy:
+            pass          # 第二个占位线程被拒是测试预期路径
 
     threads = [threading.Thread(target=hold_tokens, daemon=True) for _ in range(2)]
     threads[0].start()

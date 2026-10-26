@@ -41,6 +41,8 @@ class PolicyView:
                                        getattr(cfg.model, "class", "auto"))
         self.default_max_tokens = (cfg.model.max_tokens
                                    or max_tokens_for(self.model_class))
+        # 请求 max_tokens 的部署级上限；0=不额外限制，由 context 预算裁剪
+        self.max_tokens_limit = cfg.model.max_tokens_limit
         self.param_policy = cfg.openai.param_policy
         self.tool_parser = cfg.openai.tool_parser
         self.max_tool_calls = cfg.openai.max_tool_calls

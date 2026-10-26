@@ -639,6 +639,47 @@ def check_data(members: dict[str, bytes], control_info: dict) -> None:
         else:
             ok("data payload content", "no stray build artefacts outside examples")
 
+        # --- version single-source consistency -------------------------------
+        # control / changelog / packaged DEFAULT_VERSION must agree; otherwise a
+        # revision bump leaves a package that reports a different version at
+        # runtime than dpkg thinks it installed.
+        package = control_info["fields"].get("Package", "")
+        control_version = control_info["fields"].get("Version", "")
+        changelog_rel = "usr/share/doc/%s/changelog.Debian.gz" % package
+        if changelog_rel in regulars:
+            try:
+                text = gzip.decompress(
+                    tf.extractfile(regulars[changelog_rel]).read()
+                ).decode("utf-8", "replace")
+                first = text.splitlines()[0] if text.splitlines() else ""
+            except (OSError, EOFError) as exc:
+                fail("changelog readable", str(exc))
+            else:
+                m = re.match(r"%s \(([^)]+)\)" % re.escape(package), first)
+                if not m:
+                    fail("changelog top version", first[:80])
+                elif m.group(1) != control_version:
+                    fail("changelog top version",
+                         f"{m.group(1)} != control {control_version}")
+                else:
+                    ok("changelog top version", m.group(1))
+        else:
+            fail("changelog present", changelog_rel)
+
+        init_rel = "usr/lib/rkllm/current/rkllm/__init__.py"
+        if init_rel in regulars:
+            body = tf.extractfile(regulars[init_rel]).read().decode("utf-8", "replace")
+            m = re.search(r'^DEFAULT_VERSION\s*=\s*"([^"]+)"', body, re.M)
+            if not m:
+                fail("packaged DEFAULT_VERSION", "not found in rkllm/__init__.py")
+            elif m.group(1) != control_version:
+                fail("packaged DEFAULT_VERSION",
+                     f"{m.group(1)} != control {control_version}")
+            else:
+                ok("packaged DEFAULT_VERSION", m.group(1))
+        else:
+            fail("packaged rkllm/__init__.py", init_rel + " missing")
+
         mtimes = {m.mtime for m in tf.getmembers()}
         if len(mtimes) == 1:
             ok("reproducible timestamps", f"all members share mtime {mtimes.pop()}")

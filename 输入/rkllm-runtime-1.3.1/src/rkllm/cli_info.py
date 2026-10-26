@@ -104,7 +104,7 @@ def _cmd_selftest(args) -> int:
             pass
     checks.append(("model files", bool(models), "%d 个" % len(models)))
     from .config import SCHEMA
-    checks.append(("config schema", len(SCHEMA) == 82, "%d 键" % len(SCHEMA)))
+    checks.append(("config schema", len(SCHEMA) == 83, "%d 键" % len(SCHEMA)))
     checks.extend(_selftest_http())
 
     failed = 0

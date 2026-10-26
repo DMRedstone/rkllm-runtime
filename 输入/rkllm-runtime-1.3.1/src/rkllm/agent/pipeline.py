@@ -20,6 +20,12 @@ from .tools import ToolCallParser, build_tools_prefix, detect_parser
 _SAMPLING_KEYS = ("top_k", "top_p", "temperature", "repeat_penalty",
                   "presence_penalty", "frequency_penalty")
 
+# 预算估算：按 UTF-8 字节 / 3 保守折算 token（中文 ≈1 token/字，英文高估 33%）。
+# 宁可少生成，也不把 prompt+max_tokens 送过 context 让 rkllm_run 返回 -1。
+PROMPT_BYTES_PER_TOKEN = 3
+CONTEXT_MARGIN_TOKENS = 32
+MIN_NEW_TOKENS = 8
+
 
 class Pipeline:
     def __init__(self, svc: InferenceGateway, body: dict, *, chat: bool):
@@ -78,10 +84,51 @@ class Pipeline:
                        "this JSON Schema and nothing else:\n"
                        + json.dumps(schema or {}, ensure_ascii=False))
         self._prompt = prompt
+        self._apply_token_budget()
         self._reasoning: list[str] = []
         self._content_before: list[str] = []
         self._tool_calls: list[dict] = []
         self._perf: dict = {}      # end 帧 perf（generate_tokens 等）
+
+    def _apply_token_budget(self) -> None:
+        """把 prompt + max_tokens 约束在 context 内（P0：修 rkllm_run -1）。
+
+        runtime 在 prompt+max_new_tokens 超过 max_context_len 时直接返回 -1；
+        此前这里原样透传客户端 max_tokens，DSH 作为主模型带长 system prompt
+        时必现。规则：
+        - model.max_tokens_limit > 0 时，显式请求超过该值直接 400（部署策略）；
+        - 剩余预算 = context - prompt_est - margin，< MIN_NEW_TOKENS 则 400；
+        - 否则把 max_tokens 裁到剩余预算（max_tokens 未给时按默认生成长度，
+          再按预算裁剪）。裁剪结果经 `max_tokens_clamped` 暴露给路由。
+        """
+        requested = self.max_tokens
+        limit = int(getattr(self.svc, "max_tokens_limit", 0) or 0)
+        if limit and requested and requested > limit:
+            raise ValueError(
+                "max_tokens=%d exceeds model.max_tokens_limit=%d; lower "
+                "max_tokens or raise model.max_tokens_limit" % (requested, limit))
+        self.prompt_tokens = max(
+            1, len(self._prompt.encode("utf-8")) // PROMPT_BYTES_PER_TOKEN)
+        self.max_tokens_clamped = False
+        context = int(getattr(self.svc, "context_len", 0) or 0)
+        if context <= 0:
+            return
+        available = context - self.prompt_tokens - CONTEXT_MARGIN_TOKENS
+        if available < MIN_NEW_TOKENS:
+            raise ValueError(
+                "prompt too long: about %d tokens, context=%d, margin=%d; "
+                "shorten the prompt (max_new_tokens would be %d)"
+                % (self.prompt_tokens, context, CONTEXT_MARGIN_TOKENS,
+                   max(0, available)))
+        wanted = requested or int(getattr(self.svc, "default_max_tokens", 0)
+                                   or available)
+        if limit and wanted > limit:
+            wanted = limit
+            self.max_tokens_clamped = True
+        if wanted > available:
+            wanted = available
+            self.max_tokens_clamped = True
+        self.max_tokens = wanted
 
     # -- token 流 -----------------------------------------------------------
 

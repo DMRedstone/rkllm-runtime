@@ -3,7 +3,7 @@
 设计约束（用户 2026-10-21 明确）：
 - 命令名仍是 `/usr/bin/rkllm`，systemd 单元仍是 `rkllm-server.service`，
   conffile 仍是 `/etc/default/rkllm-server`——**运维视角零变化**；
-- 实现是新的：FastAPI + 推理子进程 + UDS 帧协议 + 82 键配置；
+- 实现是新的：FastAPI + 推理子进程 + UDS 帧协议 + 83 键配置；
 - 旧 CLI 的每个子命令与每个 serve 参数都保留（包括从 `RKLLM_*` 环境变量取
   默认值的语义，这是 conffile 驱动服务的方式）。
 

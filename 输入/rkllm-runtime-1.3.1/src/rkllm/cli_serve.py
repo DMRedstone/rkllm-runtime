@@ -82,7 +82,7 @@ def _cmd_serve(args) -> int:
             log_level=cfg.logging.level,
             timeout_graceful_shutdown=cfg.server.shutdown_grace_s,
             access_log=cfg.server.access_log,
-            # 以下四项此前是死键，现按 82 键表接线
+            # 以下四项此前是死键，现按 83 键表接线
             limit_concurrency=cfg.server.max_connections,
             timeout_keep_alive=cfg.server.read_timeout_s,
             backlog=cfg.server.request_queue_size,

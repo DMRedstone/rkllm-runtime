@@ -73,6 +73,13 @@ def check_basic(base, key, prompt, timeout):
             print("[PASS] /health           %.2fs  model=%s  requests=%s errors=%s"
                   % (elapsed, info.get("model"), info.get("stats", {}).get("requests"),
                      info.get("stats", {}).get("errors")))
+            stats = info.get("stats") or {}
+            required = ("requests", "rejected", "errors",
+                        "prompt_tokens", "completion_tokens")
+            missing = [name for name in required if name not in stats]
+            if missing:
+                print("[FAIL] /health stats     缺少字段：%s" % ", ".join(missing))
+                healthy = False
         except Exception:  # noqa: BLE001
             print("[WARN] /health           返回 200 但响应无法解析：%s" % body[:80])
             healthy = False

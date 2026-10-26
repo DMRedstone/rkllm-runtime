@@ -90,6 +90,8 @@ def chat_completions(body: ChatCompletionRequest, request: Request):
             pipe = _pipeline(svc, {**raw, "max_tokens": max_tokens}, chat=True)
         except ValueError as exc:
             return _http_error(400, "invalid_request_error", str(exc))
+        if pipe.max_tokens_clamped:
+            headers["X-RKLLM-Max-Tokens-Clamped"] = str(pipe.max_tokens)
         return StreamingResponse(
             _stream_chat(request, svc, pipe, raw),
             media_type="text/event-stream",
@@ -97,6 +99,8 @@ def chat_completions(body: ChatCompletionRequest, request: Request):
 
     try:
         result, pipe = _run_blocking_checked(svc, raw, max_tokens, schema)
+    except ValueError as exc:
+        return _http_error(400, "invalid_request_error", str(exc))
     except _SchemaError as exc:
         return _http_error(422, "invalid_request_error",
                            "response did not match response_format.json_schema "
@@ -112,7 +116,10 @@ def chat_completions(body: ChatCompletionRequest, request: Request):
         return _http_error(503, "server_error", str(exc)[:300],
                            code="worker_down",
                            **{"Retry-After": str(svc.queue.busy_retry_after_s)})
-    return JSONResponse(_completion_payload(svc, pipe, result, max_tokens),
+    if pipe.max_tokens_clamped:
+        headers["X-RKLLM-Max-Tokens-Clamped"] = str(pipe.max_tokens)
+    return JSONResponse(_completion_payload(svc, pipe, result,
+                                            pipe.max_tokens or max_tokens),
                         headers=headers)
 
 
@@ -222,12 +229,17 @@ def completions(body: CompletionRequest, request: Request):
             pipe = _pipeline(svc, {**raw, "max_tokens": max_tokens}, chat=False)
         except ValueError as exc:
             return _http_error(400, "invalid_request_error", str(exc))
+        if pipe.max_tokens_clamped:
+            headers["X-RKLLM-Max-Tokens-Clamped"] = str(pipe.max_tokens)
         return StreamingResponse(
             _stream_completions(request, svc, pipe, raw),
             media_type="text/event-stream",
             headers={**sse_response_headers(), **headers})
 
-    pipe = _pipeline(svc, {**raw, "max_tokens": max_tokens}, chat=False)
+    try:
+        pipe = _pipeline(svc, {**raw, "max_tokens": max_tokens}, chat=False)
+    except ValueError as exc:
+        return _http_error(400, "invalid_request_error", str(exc))
     try:
         result = _run_blocking(svc, pipe)
     except QueueBusy as exc:
@@ -236,6 +248,8 @@ def completions(body: CompletionRequest, request: Request):
                            **{"Retry-After": str(exc.retry_after_s)})
     except (QueueTimeout, WorkerDown) as exc:
         return _http_error(503, "server_error", str(exc)[:200])
+    if pipe.max_tokens_clamped:
+        headers["X-RKLLM-Max-Tokens-Clamped"] = str(pipe.max_tokens)
     return JSONResponse({
         "id": "cmpl-" + str(id(result))[-8:],
         "object": "text_completion",

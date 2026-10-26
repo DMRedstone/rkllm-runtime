@@ -26,6 +26,7 @@ class FakeEngine:
         self.delay = delay
         self.system_prompt = (system_prompt or "").strip()
         self._turns = 0
+        self._last_perf = (0, 0)
         self._destroyed = False
 
     def stream(self, prompt, role="user", enable_thinking=False,
@@ -34,13 +35,19 @@ class FakeEngine:
         if self.system_prompt:
             prompt = "%s\n\n%s" % (self.system_prompt, prompt)
         answer = "answer %d to: %s" % (self._turns, prompt)
+        # 与真 runtime 同口径给出非固定 perf：prompt 按 UTF-8 字节/3 保守折算，
+        # 输出按 4 字符/token 粗估。目的不是精确，而是让 golden 基线能反映
+        # prompt/输出长度变化，而不是永远锁死 (3, 9)。
+        prefill = max(1, len(prompt.encode("utf-8")) // 3)
+        generate = max(1, len(answer) // 4)
+        self._last_perf = (prefill, generate)
         for char in answer:
             if self.delay:
                 time.sleep(self.delay)
             yield char
 
     def last_perf(self):
-        return (3, len(str(self._turns)) + 9)   # 确定的假 perf，供 end 帧测试
+        return self._last_perf
 
     def abort(self):
         return None

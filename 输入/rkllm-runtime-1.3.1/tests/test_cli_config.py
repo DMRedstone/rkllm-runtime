@@ -53,7 +53,7 @@ def test_config_show_json(capsys):
     assert code == 0
     payload = json.loads(out)
     assert "values" in payload and "sources" in payload
-    assert len(payload["values"]) == 82
+    assert len(payload["values"]) == 83
 
 
 def test_config_show_text(capsys):

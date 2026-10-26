@@ -1,7 +1,7 @@
 """rkllm 板端模型服务 —— 模块化实现（改造设计 v2 / MCP 接入设计 v3）。
 
 模块划分（改造设计 §4.4 / §8）：
-- config      82 键 TOML 配置表：schema、加载、优先级、校验、config 命令
+- config      83 键 TOML 配置表：schema、加载、优先级、校验、config 命令
 - caps        OpenAI 能力三档表（单一事实源）
 - abi         ctypes 结构体镜像 + 上游库校验（S1）
 - worker/     推理子进程：UDS 帧协议、引擎、prefix cache、FakeEngine（S1）
