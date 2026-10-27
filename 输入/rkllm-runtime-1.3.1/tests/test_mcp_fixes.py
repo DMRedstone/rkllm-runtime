@@ -125,6 +125,28 @@ def test_job_progress_does_not_delay_start(monkeypatch):
         server._pool.shutdown(wait=False)
 
 
+def test_job_get_preserves_structured_content_and_errors():
+    """声明了 output_schema 的工具经 job 路径也必须带回 structuredContent。"""
+    server = StdioServer(_Backend(), _cfg(), protocol_version="2024-11-05")
+    server._refresh_model_class = lambda: None
+    try:
+        job = server.jobs.create()
+        job.complete({"content": [{"type": "text", "text": "raw"}],
+                      "structuredContent": {"ok": 1}})
+        reply = server._job_tool({"job_id": job.id, "action": "get"})
+        assert reply["structuredContent"] == {"ok": 1}
+        assert reply["content"][0]["text"] == "raw"
+
+        failed = server.jobs.create()
+        failed.fail("boom")
+        reply = server._job_tool({"job_id": failed.id, "action": "get"})
+        assert reply["isError"] is True
+        assert "boom" in reply["content"][0]["text"]
+    finally:
+        server._control_pool.shutdown(wait=False)
+        server._pool.shutdown(wait=False)
+
+
 def test_chat_session_keeps_history():
     backend = _Backend()
     handlers = build_handlers(backend, _cfg(), JobTable(),

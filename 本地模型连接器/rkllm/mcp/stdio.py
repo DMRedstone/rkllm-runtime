@@ -322,6 +322,24 @@ class StdioServer:
             return {"content": [{"type": "text",
                                  "text": json.dumps(job.summary(),
                                                     ensure_ascii=False)}]}
+        # 任务完成时把原始工具结果原样返回，尤其要保留 structuredContent /
+        # isError：声明了 output_schema 的工具（目前是 extract）如果只在
+        # content[0].text 里塞一段 JSON，客户端会判定「有 output schema 却没有
+        # structuredContent」并抛 -32600。同步路径本来就直通 handler 结果，
+        # 这里只修 job 轮询这条旁路。
+        if job.state == "completed" and isinstance(job.result, dict):
+            payload = dict(job.result)
+            payload.setdefault("content", [{
+                "type": "text",
+                "text": json.dumps({**job.summary(), "result": job.result},
+                                   ensure_ascii=False)}])
+            return payload
+        if job.state == "failed":
+            return {"content": [{"type": "text",
+                                 "text": job.error or "job failed"}],
+                    "isError": True,
+                    "job_id": job.id,
+                    "status": job.state}
         return {"content": [{"type": "text", "text": json.dumps(
             {**job.summary(),
              "result": job.result if job.state == "completed" else None,
