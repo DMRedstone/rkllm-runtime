@@ -301,13 +301,20 @@ class StdioServer:
         thread = threading.Thread(target=runner, daemon=True,
                                   name="mcp-job-" + job.id)
         thread.start()
-        return {"content": [{"type": "text", "text": json.dumps(
-            {"job_id": job.id, "status": "working",
-             "poll_hint_s": self.cfg.get("job_poll_hint_s", 2),
-             "message": "任务预计超过 %d 秒，已转后台任务；请用 %sjob 轮询"
-                        % (self.cfg.get("task_threshold_s", 45),
-                           self.cfg["tool_prefix"])},
-            ensure_ascii=False)}]}
+        info = {"job_id": job.id, "status": "working",
+                "poll_hint_s": self.cfg.get("job_poll_hint_s", 2),
+                "message": "任务预计超过 %d 秒，已转后台任务；请用 %sjob 轮询"
+                           % (self.cfg.get("task_threshold_s", 45),
+                              self.cfg["tool_prefix"])}
+        reply = {"content": [{"type": "text",
+                              "text": json.dumps(info, ensure_ascii=False)}]}
+        # MCP 客户端会对**每一次** tools/call 结果按 outputSchema 校验，包括
+        # 「已转 job、正在运行」这个首次响应。extract 声明了 outputSchema，
+        # 所以首帧也必须带 structuredContent；这里给出 job 信封（extract 的
+        # outputSchema 是宽松 object），客户端随后按 job_id 轮询最终结果。
+        if short == "extract":
+            reply["structuredContent"] = dict(info)
+        return reply
 
     def _job_tool(self, arguments: dict) -> dict:
         job_id = str(arguments.get("job_id", ""))

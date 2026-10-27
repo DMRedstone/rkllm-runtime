@@ -125,6 +125,26 @@ def test_job_progress_does_not_delay_start(monkeypatch):
         server._pool.shutdown(wait=False)
 
 
+def test_extract_job_start_has_structured_content():
+    """outputSchema 工具转 job 的首次响应也必须带 structuredContent。"""
+    server = StdioServer(_Backend(), _cfg(task_threshold_s=0),
+                         protocol_version="2024-11-05")
+    server._refresh_model_class = lambda: None
+    try:
+        reply = server._run_as_job(
+            "extract",
+            lambda arguments, should_cancel=None: {"content": [],
+                                                   "structuredContent": {}},
+            {}, None)
+        assert reply["structuredContent"]["job_id"]
+        assert reply["structuredContent"]["status"] == "working"
+    finally:
+        for job in server.jobs.all():
+            job.cancel()
+        server._control_pool.shutdown(wait=False)
+        server._pool.shutdown(wait=False)
+
+
 def test_job_get_preserves_structured_content_and_errors():
     """声明了 output_schema 的工具经 job 路径也必须带回 structuredContent。"""
     server = StdioServer(_Backend(), _cfg(), protocol_version="2024-11-05")

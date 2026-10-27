@@ -36,8 +36,8 @@ rkllm-runtime (@VERSION@) unstable; urgency=medium
   * MCP: 2026 result shaping (resultType, tools/list cache metadata) is
     centralized in protocol.py; the stdio transport no longer carries a
     version-specific branch.
-  * MCP connector: job polling preserves structuredContent/isError for tools
-    with output_schema (extract), fixing MCP -32600.
+  * MCP connector: extract job start and polling preserve structuredContent;
+    failed jobs preserve isError, fixing MCP -32600.
 
 rkllm-runtime (1.3.1-16) unstable; urgency=medium
 
