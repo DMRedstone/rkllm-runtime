@@ -14,6 +14,7 @@ S3 的 agent 能力（tools 解析 / reasoning / json_schema）在推理管线�
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 
@@ -21,11 +22,11 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ...agent.pipeline import Pipeline
+from ..errors import http_error as _http_error
 from ..pipeline_runner import (BUSY_MESSAGE,
                                SchemaError as _SchemaError,
                                StreamTimer,
                                build_pipeline as _pipeline,
-                               http_error as _http_error,
                                run_blocking as _run_blocking,
                                run_blocking_checked as _run_blocking_checked,
                                service_of as _svc)
@@ -72,7 +73,13 @@ def chat_completions(body: ChatCompletionRequest, request: Request):
     if reject:
         return _http_error(400, "invalid_request_error",
                            "unsupported parameter(s): %s" % ", ".join(reject),
-                           code="unsupported_parameter")
+                           code="unsupported_parameter",
+                           param=reject[0])
+    if raw.get("tool_choice") == "none":
+        # tool_choice=none 的契约是“禁止调用工具”。runtime 没有请求级工具开关，
+        # 这里做等效实现：不向 Pipeline 注入工具（也就不会装解析器），模型即使
+        # 输出 <tool_call> 文本也只作为普通 content 返回，不会产生 tool_calls。
+        raw["tools"] = None
     max_tokens = raw.get("max_tokens") or raw.get("max_completion_tokens") \
         or svc.default_max_tokens
     headers = {"X-RKLLM-Unsupported": ",".join(warn)} if warn else {}
@@ -108,14 +115,17 @@ def chat_completions(body: ChatCompletionRequest, request: Request):
     except QueueBusy as exc:
         return _http_error(503, "server_error", BUSY_MESSAGE,
                            code="queue_full",
-                           **{"Retry-After": str(exc.retry_after_s)})
+                           headers={"Retry-After": str(exc.retry_after_s)})
     except QueueTimeout:
         return _http_error(503, "server_error", "queue timeout",
-                           code="queue_timeout")
+                           code="queue_timeout",
+                           headers={"Retry-After":
+                                    str(svc.queue.busy_retry_after_s)})
     except WorkerDown as exc:
         return _http_error(503, "server_error", str(exc)[:300],
                            code="worker_down",
-                           **{"Retry-After": str(svc.queue.busy_retry_after_s)})
+                           headers={"Retry-After":
+                                    str(svc.queue.busy_retry_after_s)})
     if pipe.max_tokens_clamped:
         headers["X-RKLLM-Max-Tokens-Clamped"] = str(pipe.max_tokens)
     return JSONResponse(_completion_payload(svc, pipe, result,
@@ -183,9 +193,15 @@ def _stream_chat(request: Request, svc, pipe: Pipeline, raw: dict):
 def _completion_payload(svc, pipe: Pipeline, result: dict,
                         max_tokens: int) -> dict:
     usage = pipe.usage(result)
-    message: dict = {"role": "assistant", "content": result["text"]}
-    if result.get("reasoning") and svc.reasoning_field != "none":
-        message[svc.reasoning_field] = result["reasoning"]
+    content = result["text"]
+    if "json" in result:
+        # json_schema 校验成功后用解析结果回填，保证 content 本身是合法 JSON
+        # （原始 result["text"] 可能带 ``` 围栏；校验器已剥壳，此处同步剥壳）。
+        content = json.dumps(result["json"], ensure_ascii=False)
+    message: dict = {"role": "assistant", "content": content}
+    reasoning = result.get("reasoning") or getattr(pipe, "reasoning_text", "")
+    if reasoning and svc.reasoning_field != "none":
+        message[svc.reasoning_field] = reasoning
     if result.get("tool_calls"):
         # OpenAI 语义：带 tool_calls 时 content 是模型**调用前**输出的文本。
         # `result["text"]` 正是这部分——Pipeline._route_content 只把
@@ -220,7 +236,8 @@ def completions(body: CompletionRequest, request: Request):
     if reject:
         return _http_error(400, "invalid_request_error",
                            "unsupported parameter(s): %s" % ", ".join(reject),
-                           code="unsupported_parameter")
+                           code="unsupported_parameter",
+                           param=reject[0])
     headers = {"X-RKLLM-Unsupported": ",".join(warn)} if warn else {}
     max_tokens = raw.get("max_tokens") or svc.default_max_tokens
 
@@ -245,9 +262,17 @@ def completions(body: CompletionRequest, request: Request):
     except QueueBusy as exc:
         return _http_error(503, "server_error", BUSY_MESSAGE,
                            code="queue_full",
-                           **{"Retry-After": str(exc.retry_after_s)})
-    except (QueueTimeout, WorkerDown) as exc:
-        return _http_error(503, "server_error", str(exc)[:200])
+                           headers={"Retry-After": str(exc.retry_after_s)})
+    except QueueTimeout:
+        return _http_error(503, "server_error", "queue timeout",
+                           code="queue_timeout",
+                           headers={"Retry-After":
+                                    str(svc.queue.busy_retry_after_s)})
+    except WorkerDown as exc:
+        return _http_error(503, "server_error", str(exc)[:200],
+                           code="worker_down",
+                           headers={"Retry-After":
+                                    str(svc.queue.busy_retry_after_s)})
     if pipe.max_tokens_clamped:
         headers["X-RKLLM-Max-Tokens-Clamped"] = str(pipe.max_tokens)
     return JSONResponse({

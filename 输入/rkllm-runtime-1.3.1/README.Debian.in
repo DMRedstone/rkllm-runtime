@@ -115,7 +115,7 @@ Service configuration
   at the beginning of a line, quote values containing spaces, no $VAR expansion,
   and an empty value means "use the built-in default".
 
-  The full 82-key table (queue limits, prefix cache, MCP, logging, ...) is NOT
+  The full 85-key table (queue limits, prefix cache, MCP, logging, ...) is NOT
   in that file - it would be unreadable as KEY=value. Generate a documented TOML
   template instead and edit what you need:
 

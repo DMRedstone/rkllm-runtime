@@ -44,6 +44,17 @@ class RequestFailed(WorkerDown):
     """
 
 
+class RequestAborted(WorkerDown):
+    """本请求被 abort 打断（worker 的 `op:"end"` 帧带 `aborted: true`）。
+
+    F-3（2026-10-27 审核 P1）：此前 `WorkerClient.run` 收到 aborted end 帧时
+    与正常结束一样直接 return——被 `/v1/reset` 或别的请求误杀（P1-1）的响应
+    会伪装成 HTTP 200 + `finish_reason="stop"` 的"完整答案"。现在显式抛本
+    异常：路由的 `except WorkerDown` / 流式错误帧能区分"被打断"与"正常结束"。
+    继承 WorkerDown 以沿用既有 503 + Retry-After 契约，且不触发 worker 重启。
+    """
+
+
 class WorkerClient:
     """与单个 worker 连接的帧客户端：run 请求逐 token 产出。"""
 
@@ -56,12 +67,19 @@ class WorkerClient:
         # worker 也不会发帧，避免 socket 缓冲区堆积）。
         self.active = False
         self.last_heartbeat = time.monotonic()
+        # F-3：最近一次 run 的请求 id。abort 帧带上它，供 worker 侧按 id
+        # 匹配（worker/main.py 的匹配属另一人的心跳/取消改造范围，本侧先按
+        # 协议带字段；worker 当前忽略未知字段，向后兼容）。
+        # 不随 run 结束清空：abort 可能发生在"生成器已关闭、worker 仍在算"
+        # 的窗口（背压截断/断连），此时仍需要把 abort 发给最后一个 run。
+        self._run_id: str | None = None
 
     def run(self, prompt: str, *, role: str = "user",
             enable_thinking: bool = False, max_new_tokens: int | None = None,
             sampling: dict | None = None, cache_hint: bool = True,
             request_timeout_s: int = 900) -> Iterator[str]:
         req_id = uuid.uuid4().hex[:10]
+        self._run_id = req_id
         self.active = True
         self.last_heartbeat = time.monotonic()
         try:
@@ -101,6 +119,11 @@ class WorkerClient:
                 if op == OP_TOKEN:
                     yield frame["text"]
                 elif op == OP_END:
+                    # F-3：aborted end 帧不能当正常结束（此前伪装 200+stop）。
+                    if frame.get("aborted"):
+                        raise RequestAborted(
+                            "inference aborted before completion "
+                            "(cancelled or reset)")
                     # end 帧带 perf（prefill/generate tokens）——此前直接 return
                     # 把它丢了，usage 的 exact counts 从未生效（永远估算值），
                     # finish_reason 的 length 判定也没有依据。作为管线元数据
@@ -116,9 +139,13 @@ class WorkerClient:
             self.active = False
 
     def abort(self) -> None:
+        """给 worker 发 abort；帧里带最近一次 run 的 id（F-3，向后兼容）。"""
+        frame: dict = {"op": OP_ABORT}
+        if self._run_id:
+            frame["id"] = self._run_id
         with self._write_lock:
             try:
-                write_frame(self._wfile, {"op": OP_ABORT})
+                write_frame(self._wfile, frame)
             except OSError:
                 pass
 
@@ -387,8 +414,10 @@ class Supervisor:
             client = self._client
         try:
             yield from client.run(prompt, **kwargs)
-        except RequestFailed:
-            raise                          # worker 健康，路由层转 503 即可
+        except (RequestFailed, RequestAborted):
+            # 请求级失败/被打断：worker 本身健康，绝不走重启路径
+            # （RequestAborted 继承 WorkerDown，必须在这里先拦下）。
+            raise
         except WorkerDown:
             self.state = "loading"
             try:

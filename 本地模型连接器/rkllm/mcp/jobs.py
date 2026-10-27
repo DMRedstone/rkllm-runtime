@@ -15,7 +15,10 @@ import time
 import uuid
 from typing import Any
 
-__all__ = ["JobTable", "estimate_seconds", "DECODE_TOK_S"]
+__all__ = ["JobTable", "estimate_seconds", "sync_token_cap", "job_timeout_s",
+           "DECODE_TOK_S"]
+
+MIN_SYNC_TOKENS = 8
 
 # 解码速度（tok/s）：设计 §5.3 给的是 8 / 5 / 2，2026-10-21 真机校准后下调——
 # OrangePi 5 Plus / qwen3.5-4b W8A8 实测 45 token / 9.3 s ≈ 4.8 tok/s（单发），
@@ -32,16 +35,44 @@ def estimate_seconds(model_class: str, prefill_tokens: int,
     return prefill_tokens / PREFILL_TOK_S + max_tokens / decode
 
 
+def sync_token_cap(model_class: str, prefill_tokens: int,
+                   threshold_s: float) -> int:
+    """同步调用的安全生成上限（token）。
+
+    同步路径传给后端/工具的 max_tokens 会被夹到这个值：让最坏情况下的估算
+    耗时仍落在 task_threshold_s 内（留 1 s 余量），从而不会因为"默认 max_tokens
+    很大"而把短任务误判成 job，也不会让同步调用真的跑过客户端 60 s 硬超时。
+    被夹断时后端会返回 finish_reason=length，工具层会给出明确提示。
+    """
+    decode = DECODE_TOK_S.get(model_class, 5)
+    room_s = float(threshold_s) - prefill_tokens / PREFILL_TOK_S - 1.0
+    return max(MIN_SYNC_TOKENS, int(room_s * decode))
+
+
+def job_timeout_s(estimate_s: float, base_s: float = 120.0,
+                  factor: float = 1.5, max_s: float = 1800.0) -> float:
+    """job 的读超时：估算的 factor 倍 + 30 s 余量，但不小于 base。
+
+    旧实现 job 与同步共用 target_timeout_s=120：27B/large 512 token 的估算
+    约 341 s，必然被 120 s 总超时掐断。job 是后台任务，读超时应按估算放宽。
+    """
+    return min(float(max_s),
+               max(float(base_s), float(estimate_s) * float(factor) + 30.0))
+
+
 class Job:
-    __slots__ = ("id", "state", "result", "error", "created",
+    __slots__ = ("id", "state", "result", "error", "created", "short",
                  "_cancel_requested", "_cond")
 
-    def __init__(self, job_id: str):
+    def __init__(self, job_id: str, short: str = ""):
         self.id = job_id
         self.state = "working"
         self.result: Any = None
         self.error: str | None = None
         self.created = time.monotonic()
+        # 工具短名（extract 等声明了 outputSchema 的工具，终帧需要补
+        # structuredContent；失败/取消轮询也按它决定是否塑形）
+        self.short = short
         self._cancel_requested = threading.Event()
         self._cond = threading.Condition()
 
@@ -87,12 +118,12 @@ class JobTable:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
 
-    def create(self) -> Job:
+    def create(self, short: str = "") -> Job:
         with self._lock:
             self._evict_locked()
             if len(self._jobs) >= self.max_jobs:
                 self._drop_oldest_locked()
-            job = Job(uuid.uuid4().hex[:12])
+            job = Job(uuid.uuid4().hex[:12], short)
             self._jobs[job.id] = job
             return job
 

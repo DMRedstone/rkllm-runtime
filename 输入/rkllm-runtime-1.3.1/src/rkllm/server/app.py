@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 
 from .. import VERSION
 from .auth import make_auth_middleware
+from .errors import install_handlers as install_error_handlers
 from .logsetup import request_id_var
 from .state import ServiceState
 
@@ -103,29 +104,9 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
             path = request.url.path
             if request.method == "OPTIONS":
                 return await call_next(request)      # 预检交给 CORS 处理
-            if path == "/":
-                state = app.state.svc
-                if state is None:
-                    return JSONResponse({"service": "rkllm-server",
-                                         "version": VERSION})
-                return JSONResponse({
-                    "service": "rkllm-server",
-                    "version": state.version,
-                    "model": state.model_name,
-                    "state": (state.supervisor.state
-                              if state.supervisor else "unconfigured"),
-                    "endpoints": {
-                        "health": "/health",
-                        "ready": "/ready",
-                        "models": ["/v1/models", "/models"],
-                        "chat_completions": ["/v1/chat/completions",
-                                             "/chat/completions"],
-                        "completions": ["/v1/completions", "/completions"],
-                        "responses": ["/v1/responses", "/responses"],
-                        "capabilities": "/v1/capabilities",
-                        "reset": "/v1/reset",
-                    },
-                })
+            # 根路径信息不再在本中间件里直接返回：鉴权中间件在内层，直接 return
+            # 会绕过鉴权（启用 api_key 时 `/` 曾匿名可访问）。现在由下方真实路由
+            # 提供，和 /health 一样受“仅 /ready 豁免”的鉴权口径保护。
             if path in _ROOT_ALIASES:
                 request.scope["path"] = "/v1" + path
             return await call_next(request)
@@ -161,6 +142,34 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
     # 未实现的 OpenAI/Anthropic 端点：显式 501，不落框架 404（G5）
     app.include_router(unsupported.router)
 
+    # -- 根路径信息（与数据面同级鉴权）--------------------------------------
+    # 路由注册在鉴权中间件之后，因此启用 api_key 时 `GET /` 也返回 401；
+    # 只有 /ready 在 auth.EXEMPT_PATHS 里豁免。此前在 root_alias 中间件里直接
+    # return 会绕过鉴权，泄露模型名/状态/版本。
+    @app.get("/", include_in_schema=False)
+    def root_info(request: Request):
+        state = request.app.state.svc
+        if state is None:
+            return {"service": "rkllm-server", "version": VERSION}
+        return {
+            "service": "rkllm-server",
+            "version": state.version,
+            "model": state.model_name,
+            "state": (state.supervisor.state if state.supervisor
+                      else "unconfigured"),
+            "endpoints": {
+                "health": "/health",
+                "ready": "/ready",
+                "models": ["/v1/models", "/models"],
+                "chat_completions": ["/v1/chat/completions",
+                                     "/chat/completions"],
+                "completions": ["/v1/completions", "/completions"],
+                "responses": ["/v1/responses", "/responses"],
+                "capabilities": "/v1/capabilities",
+                "reset": "/v1/reset",
+            },
+        }
+
     # -- /metrics 的开关与路径来自配置（N5；键不再空转）----------------------
     if cfg is not None:
         if cfg.metrics.enabled:
@@ -179,6 +188,9 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
         logging.getLogger("rkllm.server").exception("unhandled: %s", exc)
         return JSONResponse({"error": {"type": "server_error",
                                        "message": str(exc)[:300]}}, status_code=500)
+
+    # 参数校验失败：FastAPI 默认 422 {"detail": ...}；改注册为 OpenAI 400 形状。
+    install_error_handlers(app)
 
     return app
 

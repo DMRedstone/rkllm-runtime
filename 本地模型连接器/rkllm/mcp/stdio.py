@@ -23,8 +23,9 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
-from .jobs import JobTable, estimate_seconds
-from .protocol import (Dispatcher, JsonRpcError, PARSE_ERROR,
+from .jobs import (JobTable, estimate_seconds, job_timeout_s,
+                   sync_token_cap)
+from .protocol import (Dispatcher, JsonRpcError, INVALID_PARAMS, PARSE_ERROR,
                        PROTOCOL_2026, SERVER_INFO,
                        TOOLS_LIST_CACHE_META_2026, detect_protocol)
 from . import tools as tools_mod
@@ -94,6 +95,11 @@ class StdioServer:
                 found = info.get("model_class")
                 if found in ("small", "medium", "large"):
                     self.model_class = found
+                    self.cfg["model_class"] = found
+                context_len = info.get("context_len")
+                if isinstance(context_len, int) and context_len > 0:
+                    # 工具层的输入预算按板端实际上下文收窄（避免 4k+ 汉字 400）
+                    self.cfg["context_len"] = context_len
         except Exception:
             pass
 
@@ -172,33 +178,49 @@ class StdioServer:
     # -- tools/call 编排：job 判定 + 进度 + 取消 ------------------------------
 
     def _tools_call(self, params: dict) -> dict:
+        if not isinstance(params, dict):
+            raise JsonRpcError(INVALID_PARAMS, "tools/call params 必须是对象")
         name = str(params.get("name", ""))
-        progress_token = params.get("_meta", {}).get("progressToken")
+        meta = params.get("_meta")
+        progress_token = (meta.get("progressToken")
+                          if isinstance(meta, dict) else None)
         request_id = self.dispatcher.current_request_id
         prefix = self.cfg["tool_prefix"]
         short = name[len(prefix):] if name.startswith(prefix) else name
-        arguments = params.get("arguments") or {}
+        arguments = params.get("arguments")
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            raise JsonRpcError(INVALID_PARAMS, "arguments 必须是对象")
 
         if short == "job":
             return self._job_tool(arguments)
         handler = self._handlers.get(short)
         if handler is None:
-            raise JsonRpcError(-32602, f"unknown tool: {name}")
+            raise JsonRpcError(INVALID_PARAMS, f"unknown tool: {name}")
 
         # status 只读不推理，恒同步秒回（实测发现：job 化判定按 max_tokens
         # 估算会把 status 也转后台，违反设计 §4.1「秒回」语义）
         if short == "status":
             return handler(arguments)
 
-        # job 化判定：估算耗时超过阈值（task_mode=never 强制同步）
+        # job 化判定：估算耗时超过阈值（task_mode=never 强制同步 / always 强制 job）
         estimator = self._job_estimate
         estimate = (estimator(arguments) if estimator
                     else self._default_estimate(arguments, short))
         task_mode = self.cfg.get("task_mode", "auto")
-        threshold = self.cfg.get("task_threshold_s", 45)
-        if task_mode != "never" and estimate > threshold:
+        try:
+            threshold = float(self.cfg.get("task_threshold_s", 45))
+        except (TypeError, ValueError):
+            threshold = 45.0
+        force_job = task_mode == "always"
+        if task_mode != "never" and (force_job or estimate > threshold):
+            # job 的读超时必须覆盖"真的生成满 max_tokens"的最坏情况，而不是
+            # 只覆盖判定用的预期值（否则 large 默认 ask 判 job 后仍会被超时掐断）。
+            worst = self._job_worst_estimate(arguments, short)
             return self._run_as_job(short, handler, arguments, progress_token,
-                                    request_id)
+                                    request_id, estimate=estimate,
+                                    timeout_s=self._job_timeout(worst))
 
         # 同步执行：复用 reader 在入池前预注册的 CancelFlag（排队期间也能
         # 被 notifications/cancelled 取消）。若未预注册则兜底新建。
@@ -212,35 +234,155 @@ class StdioServer:
                     self._inflight[key] = flag
         try:
             with self._infer_sem:
-                result = handler(arguments, should_cancel=flag.is_set)
+                # 同步调用的生成上限夹到"估算仍落在阈值内"的安全值：默认
+                # max_tokens=512 不再把短任务恒转 job，也不会真跑过客户端
+                # 60 s 硬超时；被夹断时 finish_reason=length 会给出提示。
+                result = handler(
+                    arguments, should_cancel=flag.is_set,
+                    max_tokens_cap=self._sync_token_cap(arguments, short),
+                    timeout_s=float(self.cfg.get("target_timeout_s", 120)))
             if flag.is_set():
                 return {"content": [{"type": "text", "text": "任务已取消"}],
-                        "isError": True}
+                        "isError": True, "_meta": {"cancelled": True}}
             return result
         except tools_mod.Cancelled:
             return {"content": [{"type": "text", "text": "任务已取消"}],
-                    "isError": True}
+                    "isError": True, "_meta": {"cancelled": True}}
         finally:
             if key is not None:
                 with self._lock:
                     self._inflight.pop(key, None)
 
-    def _default_estimate(self, arguments: dict, short: str | None = None) -> float:
-        max_tokens = int(arguments.get("max_tokens")
-                         or self.cfg.get("default_max_tokens", 512))
+    def _estimate_decode_tokens(self, arguments: dict,
+                                short: str | None) -> int:
+        """判定 job 时用的"预期生成 token"。
+
+        旧实现直接拿 max_tokens 当预期输出：默认 512 在 4B 上估算 114 s，
+        导致 ask/chat/batch/extract **恒转 job**。现在：
+        - 未显式传 max_tokens 时按 estimate_tokens_cap（默认 128）估；
+        - ask 显式传 max_tokens 时按显式值估（大请求继续转 job，避免超时）；
+        - extract 按 (重试次数+1) 次尝试估（校验重试是真实的多次推理）；
+        - batch 按段数估（串行逐段推理，旧估算漏乘段数）。
+        """
+        try:
+            cap = int(self.cfg.get("estimate_tokens_cap", 128) or 128)
+        except (TypeError, ValueError):
+            cap = 128
+        try:
+            default = int(self.cfg.get("default_max_tokens", 512) or 512)
+        except (TypeError, ValueError):
+            default = 512
+        per_call = min(default, cap)
+        explicit = arguments.get("max_tokens")
+        if explicit is not None:
+            try:
+                per_call = max(1, int(explicit))
+            except (TypeError, ValueError):
+                per_call = min(default, cap)
         if short == "extract":
-            # extract handler 用 default_max_tokens * 2；估算必须同口径，
-            # 否则会低估耗时、把该 job 化的请求留在同步路径撞 60 s。
-            max_tokens *= 2
+            try:
+                retries = max(0, int(self.cfg.get("extract_retries", 2) or 0))
+            except (TypeError, ValueError):
+                retries = 0
+            return min(default * 2, cap) * (retries + 1)
+        if short == "batch":
+            segments = arguments.get("segments")
+            count = len(segments) if isinstance(segments, list) else 1
+            try:
+                max_segments = max(1, int(self.cfg.get("batch_max_segments", 20) or 1))
+            except (TypeError, ValueError):
+                max_segments = 1
+            return per_call * max(1, min(count, max_segments))
+        return per_call
+
+    def _default_estimate(self, arguments: dict, short: str | None = None) -> float:
         text = json.dumps(arguments, ensure_ascii=False)
         prefill = max(1, len(text) // 2)   # 中文约 2 字符/token
-        return estimate_seconds(self.model_class, prefill, max_tokens)
+        return estimate_seconds(self.model_class, prefill,
+                                self._estimate_decode_tokens(arguments, short))
+
+    def _sync_token_cap(self, arguments: dict, short: str | None) -> int:
+        """同步路径的安全生成上限（见 jobs.sync_token_cap）。"""
+        text = json.dumps(arguments, ensure_ascii=False)
+        prefill = max(1, len(text) // 2)
+        try:
+            threshold = float(self.cfg.get("task_threshold_s", 45))
+        except (TypeError, ValueError):
+            threshold = 45.0
+        cap = sync_token_cap(self.model_class, prefill, threshold)
+        if short == "batch":
+            segments = arguments.get("segments")
+            count = len(segments) if isinstance(segments, list) else 1
+            try:
+                max_segments = max(1, int(self.cfg.get("batch_max_segments", 20) or 1))
+            except (TypeError, ValueError):
+                max_segments = 1
+            cap = max(8, cap // max(1, min(count, max_segments)))
+        return cap
+
+    def _job_worst_estimate(self, arguments: dict,
+                            short: str | None) -> float:
+        """job 的最坏耗时估算（按实际会请求的 max_tokens/段数/重试次数）。
+
+        判定 job 用"预期生成"（_estimate_decode_tokens，含 cap），但 job 路径
+        实际会按 default_max_tokens 生成：读超时必须按最坏值放宽，否则
+        large 默认 ask（预期 85 s 判 job、实际可能 341 s）仍会被 120 s 掐断。
+        """
+        try:
+            default = int(self.cfg.get("default_max_tokens", 512) or 512)
+        except (TypeError, ValueError):
+            default = 512
+        explicit = arguments.get("max_tokens")
+        if short == "extract":
+            try:
+                retries = max(0, int(self.cfg.get("extract_retries", 2) or 0))
+            except (TypeError, ValueError):
+                retries = 0
+            tokens = default * 2 * (retries + 1)
+        elif short == "batch":
+            segments = arguments.get("segments")
+            count = len(segments) if isinstance(segments, list) else 1
+            try:
+                max_segments = max(1, int(self.cfg.get("batch_max_segments", 20) or 1))
+            except (TypeError, ValueError):
+                max_segments = 1
+            tokens = default * max(1, min(count, max_segments))
+        else:
+            try:
+                tokens = max(1, int(explicit)) if explicit is not None else default
+            except (TypeError, ValueError):
+                tokens = default
+        text = json.dumps(arguments, ensure_ascii=False)
+        prefill = max(1, len(text) // 2)
+        return estimate_seconds(self.model_class, prefill, tokens)
+
+    def _job_timeout(self, estimate: float) -> float:
+        """job 读超时 = max(target_timeout, 估算×factor+30)，上限可配。
+
+        旧实现 job 与同步共用 120 s：27B/large 512 token（估算 341 s）必被掐断。
+        """
+        try:
+            base = float(self.cfg.get("target_timeout_s", 120) or 120)
+        except (TypeError, ValueError):
+            base = 120.0
+        try:
+            factor = float(self.cfg.get("job_timeout_factor", 1.5) or 1.5)
+        except (TypeError, ValueError):
+            factor = 1.5
+        try:
+            max_s = float(self.cfg.get("job_timeout_max_s", 1800) or 1800)
+        except (TypeError, ValueError):
+            max_s = 1800.0
+        return job_timeout_s(estimate, base_s=base, factor=factor, max_s=max_s)
 
     def _run_as_job(self, short: str, handler, arguments: dict,
-                    progress_token, request_id=None) -> dict:
-        job = self.jobs.create()
+                    progress_token, request_id=None, *,
+                    estimate: float | None = None,
+                    timeout_s: float | None = None) -> dict:
+        job = self.jobs.create(short=short)
         if self.jobs.get(job.id) is None:      # 防御：刚建即被逐出
             raise JsonRpcError(-32603, "job table overflow")
+        job_timeout = float(timeout_s or self.cfg.get("target_timeout_s", 120))
         key = str(request_id) if request_id is not None else None
         # 复用 reader 在入池前预注册的 CancelFlag：若已取消则立即 job.cancel()
         with self._lock:
@@ -281,7 +423,9 @@ class StdioServer:
                         return True
                     return job.cancel_requested
                 with self._infer_sem:
-                    result = handler(arguments, should_cancel=_should_cancel)
+                    result = handler(arguments, should_cancel=_should_cancel,
+                                     max_tokens_cap=None,
+                                     timeout_s=job_timeout)
                 if job.cancel_requested:
                     job.cancel()          # batch 等吞掉 Cancelled 时仍要记取消
                     return
@@ -303,6 +447,8 @@ class StdioServer:
         thread.start()
         info = {"job_id": job.id, "status": "working",
                 "poll_hint_s": self.cfg.get("job_poll_hint_s", 2),
+                "estimated_s": round(float(estimate), 1) if estimate else None,
+                "timeout_s": int(job_timeout),
                 "message": "任务预计超过 %d 秒，已转后台任务；请用 %sjob 轮询"
                            % (self.cfg.get("task_threshold_s", 45),
                               self.cfg["tool_prefix"])}
@@ -342,16 +488,26 @@ class StdioServer:
                                    ensure_ascii=False)}])
             return payload
         if job.state == "failed":
-            return {"content": [{"type": "text",
-                                 "text": job.error or "job failed"}],
-                    "isError": True,
-                    "job_id": job.id,
-                    "status": job.state}
-        return {"content": [{"type": "text", "text": json.dumps(
-            {**job.summary(),
-             "result": job.result if job.state == "completed" else None,
-             "error": job.error if job.state == "failed" else None},
-            ensure_ascii=False)}]}
+            reply = {"content": [{"type": "text",
+                                  "text": job.error or "job failed"}],
+                     "isError": True,
+                     "job_id": job.id,
+                     "status": job.state}
+            if job.short == "extract":
+                # extract 声明了 outputSchema：轮询结果也带宽松 object，避免
+                # 客户端对失败终帧做 schema 校验时报 -32600。
+                reply["structuredContent"] = {"error": job.error or "job failed",
+                                               "job_id": job.id}
+            return reply
+        summary = {**job.summary(),
+                   "result": job.result if job.state == "completed" else None,
+                   "error": job.error if job.state == "failed" else None}
+        reply = {"content": [{"type": "text",
+                              "text": json.dumps(summary, ensure_ascii=False)}]}
+        if job.short == "extract":
+            # working / cancelled 的轮询也返回宽松 object 形状
+            reply["structuredContent"] = dict(summary)
+        return reply
 
     # -- 主循环 ---------------------------------------------------------------
 
@@ -484,12 +640,10 @@ class StdioServer:
         except Exception as exc:              # 兜底：工作线程异常不能静默
             response = {"jsonrpc": "2.0", "id": None,
                         "error": {"code": -32603, "message": str(exc)[:300]}}
-        # P2：dispatcher 层拒绝（未知工具/非法参数）根本没进 _tools_call/
-        # _run_as_job，预注册的 _inflight 条目无人清理 → 长跑无界增长。
-        # 仅当条目仍是当初预注册的 flag（未被 Job 接管）且响应为错误时清，
-        # 避免误删异步 Job 的取消映射。
-        if request_id is not None and isinstance(response, dict) \
-                and response.get("error"):
+        # P2（task-8）：此前只在错误响应时清理预注册的 CancelFlag；status/job
+        # 的成功响应走控制池直通，导致 _inflight 永久残留（job 轮询按次数增长）。
+        # 仅当条目仍是当初预注册的 flag 时清理（Job 接管后身份不同，不能误删）。
+        if request_id is not None and isinstance(response, dict):
             key = str(request_id)
             with self._lock:
                 if self._inflight.get(key) is _flag:

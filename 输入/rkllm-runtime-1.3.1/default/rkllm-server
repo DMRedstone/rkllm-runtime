@@ -69,6 +69,18 @@ RKLLM_MODEL=
 RKLLM_HOST=0.0.0.0
 
 
+# -- --host legacy alias (1.3.1-15)                    default 127.0.0.1
+# EN: Older name of the listen address. The unit always passes --host from
+#     RKLLM_HOST, and a command line value wins over the environment, so under
+#     systemd keep using RKLLM_HOST above. RKLLM_BIND only applies when
+#     `rkllm serve` is run directly without --host.
+# 中文: 监听地址的旧变量名（1.3.1-15）。unit 总是把 RKLLM_HOST 作为 --host
+#     传入，而命令行优先于环境变量，因此 systemd 场景请继续用上面的
+#     RKLLM_HOST；RKLLM_BIND 仅在直接运行 `rkllm serve` 且未传 --host 时生效。
+# 可选写法 / optional form:
+#RKLLM_BIND=127.0.0.1
+
+
 # -- --port <number>                                 default 8080
 # EN: TCP port of the API. Clients use http://<host>:<port>/v1 as base URL.
 # 中文: API 的 TCP 端口。客户端以 http://<主机>:<端口>/v1 作为 Base URL。
@@ -99,6 +111,16 @@ RKLLM_PORT=8080
 # 可选写法 / optional form:
 #RKLLM_PLATFORM_ARG=--platform rk3588
 RKLLM_PLATFORM_ARG=
+
+
+# -- --platform legacy name (1.3.1-15)                default auto-detect
+# EN: Older name of the platform setting, read by the configuration layer.
+#     Equivalent to RKLLM_PLATFORM_ARG=--platform <soc>; use the latter when
+#     running under systemd.
+# 中文: 平台设置的旧变量名，由配置层读取；等价于
+#     RKLLM_PLATFORM_ARG=--platform <soc>。systemd 场景请用上面那一项。
+# 可选写法 / optional form:
+#RKLLM_PLATFORM=rk3588
 
 
 # -- --model-dir <dir>                               default empty
@@ -162,6 +184,15 @@ RKLLM_PLATFORM_ARG=
 #RKLLM_NO_FREQ_LOCK=1
 
 
+# -- --freq-helper legacy name                        default auto
+# EN: 1.3.1-15 name for the frequency-lock script. "auto" means the built-in
+#     sysfs implementation; point it at a script only when the board needs it.
+# 中文: 锁频脚本的 1.3.1-15 旧变量名。auto 表示用内建 sysfs 方案；只有板子需要
+#     专用脚本时才填路径。
+# 可选写法 / optional form:
+#RKLLM_FREQ_HELPER=/usr/bin/rkllm-fix-freq-rk3588
+
+
 # -- --system <text>                                 default empty
 # EN: System prompt prepended to every request. It shares the context window
 #     with the conversation, so keep it short. Do not use it to install a
@@ -210,6 +241,20 @@ RKLLM_PLATFORM_ARG=
 #RKLLM_REPEAT_PENALTY=1.1
 
 
+# -- --presence-penalty <float>                       default 0.0
+# EN: Penalises tokens that already appeared at least once. 0.0 disables it.
+# 中文: 对至少出现过一次的 token 施加惩罚；0.0 表示关闭。
+# 可选写法 / optional form:
+#RKLLM_PRESENCE_PENALTY=0.0
+
+
+# -- --frequency-penalty <float>                      default 0.0
+# EN: Penalises tokens by how often they already appeared. 0.0 disables it.
+# 中文: 按 token 已出现的次数施加惩罚；0.0 表示关闭。
+# 可选写法 / optional form:
+#RKLLM_FREQUENCY_PENALTY=0.0
+
+
 # -- --max-queue <n>                                 default 32
 # EN: How many requests may wait for the NPU. The NPU runs one request at a
 #     time; requests beyond this limit are refused with HTTP 503 plus a
@@ -228,11 +273,35 @@ RKLLM_PLATFORM_ARG=
 #RKLLM_QUEUE_TIMEOUT=600
 
 
+# -- --read-timeout legacy name (1.3.1-15)            default 30
+# EN: Older name for the socket read timeout (server.read_timeout_s).
+# 中文: socket 读超时的旧变量名（对应 server.read_timeout_s）。
+# 可选写法 / optional form:
+#RKLLM_READ_TIMEOUT=30
+
+
+# -- --max-body legacy name (1.3.1-15)                default 8388608
+# EN: Older name for the request body limit in bytes (server.max_body_bytes).
+# 中文: 请求体上限（字节）的旧变量名（对应 server.max_body_bytes）。
+# 可选写法 / optional form:
+#RKLLM_MAX_BODY=8388608
+
+
 # -- --quiet                                         default off
 # EN: 1 = log less to stderr (the journal). Errors are still reported.
 # 中文: 1 = 减少 stderr（即 journal）输出。错误信息仍会输出。
 # 可选写法 / optional form:
 #RKLLM_QUIET=1
+
+
+# -- --log-level legacy name (1.3.1-15)               default info
+# EN: Older name for logging.level (debug/info/warning/error). RKLLM_QUIET is a
+#     shorthand for warning; when both are set the environment value wins by
+#     the usual last-wins rule, so prefer one of them.
+# 中文: 日志级别的旧变量名（logging.level：debug/info/warning/error）。
+#     RKLLM_QUIET 是 warning 的简写；两项都设时按最后写入生效，建议只用一项。
+# 可选写法 / optional form:
+#RKLLM_LOG_LEVEL=info
 
 
 # -- --cors-origin via RKLLM_CORS_ORIGIN             default *
@@ -282,16 +351,16 @@ RKLLM_EXTRA_ARGS=
 #     name and this file's path are unchanged, so every entry above still
 #     works. This section only adds options the old file did not have; all of
 #     them are optional - leave them commented out to use the built-in default.
-#     80-key rule: any configuration key can also be set here as
+#     85-key rule: any configuration key can also be set here as
 #     RKLLM_<SECTION>_<NAME> (e.g. RKLLM_SERVER_MAX_BODY_BYTES=8388608).
-#     `rkllm config show` prints all 80 keys with effective value and source;
+#     `rkllm config show` prints all 85 keys with effective value and source;
 #     `rkllm config docs` prints the full table.
 # 中文: `rkllm serve` 的实现已换成新栈（FastAPI + 推理子进程）。
 #     命令、参数、systemd 单元名与本文件路径均未变化，上面的条目继续有效。
 #     本节只补充旧文件没有的选项，全部可选——保持注释即使用内置默认。
-#     80 键规则：任何配置键都可以在此以 RKLLM_<组>_<键名> 形式设置
+#     85 键规则：任何配置键都可以在此以 RKLLM_<组>_<键名> 形式设置
 #     （如 RKLLM_SERVER_MAX_BODY_BYTES=8388608）。`rkllm config show` 查看
-#     80 键的生效值与来源，`rkllm config docs` 打印完整键表。
+#     85 键的生效值与来源，`rkllm config docs` 打印完整键表。
 # ===========================================================================
 
 # -- 推理进程 / engine ---------------------------------------------
@@ -331,6 +400,9 @@ RKLLM_EXTRA_ARGS=
 # 中文: warn=放行并在 X-RKLLM-Unsupported 头里报告；reject=直接 400。
 #     语义关键项（n>1、tool_choice、流式 json_schema）恒为拒绝。
 #RKLLM_OPENAI_PARAM_POLICY=warn
+# EN: 1.3.1-15 name of the same switch (openai.param_policy).
+# 中文: 同一开关的 1.3.1-15 旧变量名（openai.param_policy）。
+#RKLLM_UNSUPPORTED_POLICY=warn
 #RKLLM_OPENAI_TOOL_PARSER=auto
 # EN: SSE heartbeat interval in seconds; a `: ping` comment is sent while no
 #     token arrives, so long prefill does not look like a timeout.

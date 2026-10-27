@@ -205,7 +205,7 @@ class _FakeBackend:
         self.received_cancel_check = False
 
     def chat(self, messages, *, max_tokens=512, temperature=0.3,
-             cancel_check=None):
+             cancel_check=None, timeout_s=None):
         from rkllm.mcp.backend import BackendError
         self.calls += 1
         self.received_cancel_check = cancel_check is not None

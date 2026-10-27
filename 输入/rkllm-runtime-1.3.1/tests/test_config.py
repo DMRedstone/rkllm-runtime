@@ -1,4 +1,4 @@
-"""config.py 单测：80 键契约、优先级、校验、迁移（N11/F13 验收）。"""
+"""config.py 单测：85 键契约、优先级、校验、迁移（N11/F13 验收）。"""
 
 from __future__ import annotations
 

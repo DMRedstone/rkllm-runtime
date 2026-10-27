@@ -64,6 +64,19 @@ FastAPI 服务，两者互不混放。
 `chat` 支持可选 `session` 记忆，`extract` 声明 `outputSchema`；job 进度不再阻塞
 启动，`status`/`job` 走独立控制池，长 ask 期间仍可轮询。
 
+## 定位（2026-10-27）
+
+本连接器是**保留 6 个工具的模型调用网关**，不是“完整子智能体”：不承诺任务分解、
+多步规划、自主工具循环或单实例多模型路由。单进程只绑定一个 endpoint；需要同时
+接 4B/27B 时，注册两个 connector 实例/两个 MCP server，用不同 `tool_prefix` 区分。
+
+2026-10-27 稳定性修复：同步取消不再返回 `-32603`；默认估算按 `estimate_tokens_cap`
+避免所有请求恒转 job；显式大 `max_tokens` 仍转 job，job 超时按最坏生成放宽；
+输入按 `context_window - context_margin_tokens - 生成预算` 裁剪；`_inflight` 成功
+路径也清理；reasoning 模型空正文且 `finish_reason=length` 返回 `isError`，并在
+`_meta` 透传 `finish_reason/usage/reasoning_chars`；invalid args 返回 `-32602`。
+新键见 `mcp.toml.example`。
+
 ## 测试
 
 服务端 pytest 通过 `tests/conftest.py` 把本目录挂进 `rkllm.__path__` 覆盖

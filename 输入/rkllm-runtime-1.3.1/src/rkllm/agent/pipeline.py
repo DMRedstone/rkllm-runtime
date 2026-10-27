@@ -326,14 +326,38 @@ class Pipeline:
     def reasoning_text(self) -> str:
         return "".join(self._reasoning)
 
+    @staticmethod
+    def _tool_call_delta(call: dict) -> dict:
+        """parser 的 tool_call → OpenAI `delta.tool_calls[]` 元素。
+
+        P0（2026-10-27 审核）：`agent/tools.py` 产出的是 OpenAI 标准的嵌套结构
+        `{"index","id","type","function":{"name","arguments"}}`，此前这里按扁平
+        字段 `c["name"]` / `c["arguments"]` 读取，流式 chat + tools 会在
+        `trailing_frames` 抛 KeyError：客户端只收到首帧，既没有 finish_reason
+        也没有 [DONE]，请求被静默截断。这里按嵌套结构读取，同时保留对早期扁平
+        结构的兼容（迁移期防御，避免再次 500）。
+        """
+        fn = call.get("function")
+        if not isinstance(fn, dict):
+            fn = {}
+        return {
+            "index": int(call.get("index", 0) or 0),
+            "id": call.get("id") or "",
+            "type": call.get("type") or "function",
+            "function": {
+                "name": fn.get("name") or call.get("name") or "",
+                "arguments": (fn.get("arguments")
+                              if fn.get("arguments") is not None
+                              else call.get("arguments") or ""),
+            },
+        }
+
     def trailing_frames(self, session) -> list[str]:
         """流式收尾附加帧：tool_calls 增量帧与 reasoning 帧。"""
         frames = []
         if self._tool_calls:
-            frames.append(session.delta_frame(tool_calls=[
-                {"index": c["index"], "id": c["id"], "type": "function",
-                 "function": {"name": c["name"], "arguments": c["arguments"]}}
-                for c in self._tool_calls]))
+            frames.append(session.delta_frame(
+                tool_calls=[self._tool_call_delta(c) for c in self._tool_calls]))
         if self._reasoning:
             frames.append(session.delta_frame(reasoning=self.reasoning_text))
         return frames

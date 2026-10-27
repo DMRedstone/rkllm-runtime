@@ -55,7 +55,7 @@ def _check_caps_doc() -> list[str]:
     result = subprocess.run(
         [sys.executable, str(HERE / "render_caps_doc.py"),
          "--check", str(doc)],
-        cwd=str(ROOT), capture_output=True, text=True)
+        cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
     return [] if result.returncode == 0 else [
         "caps doc check failed: %s" % result.stdout.strip()[:200]]
 
@@ -63,7 +63,7 @@ def _check_caps_doc() -> list[str]:
 def _check_deb(path: Path, version: str) -> list[str]:
     result = subprocess.run(
         [sys.executable, str(HERE / "verify_deb.py"), str(path)],
-        cwd=str(HERE), capture_output=True, text=True)
+        cwd=str(HERE), capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         return ["verify_deb failed: %s" % result.stdout.strip()[-300:]]
     if version not in result.stdout:

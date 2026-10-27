@@ -10,9 +10,12 @@
 - 第一段 `CancelToken.cancel()`：框架侧（客户端断开、生成器被外部关闭）
   只置位，幂等，任意线程可调；
 - 第二段 `CancelToken.abort_once()`：归还 NPU 推理槽（`supervisor.abort()`），
-  幂等、只执行一次，避免重复打断后续请求；
+  幂等、只执行一次，避免重复打断后续请求；**且只在本请求持有执行槽时执行**
+  （F-2，2026-10-27 审核 P1：排队期断连曾把无关的在飞请求打断）；
 - 取消后产生的异常不再作为帧发给客户端（客户端已经走了），泵只投
-  `STREAM_DONE`，主循环据 `DISCONNECT` 直接结束。
+  `STREAM_DONE`，主循环据 `DISCONNECT` 直接结束；
+- 背压截断（`_offer` 满）同样在归还执行槽之前 abort，不能只释放槽位让
+  worker 把旧请求继续算完（审核 P1-3：实测下一请求首 token 被拖 21.9 s）。
 
 与 llama.cpp `SERVER_TASK_TYPE_CANCEL` 的差别：worker 侧没有可插队的取消
 任务，取消靠 `abort()` 打断 worker 的 socket 读——这是本 runtime 的唯一
@@ -49,15 +52,22 @@ WATCH_IDLE_SLEEP_S = 0.05  # 断连监视：receive() 空转时的退避，见 w
 
 
 class CancelToken:
-    """取消的单一事实源（两段式契约，见模块 docstring）。"""
+    """取消的单一事实源（两段式契约，见模块 docstring）。
 
-    __slots__ = ("_supervisor", "_event", "_lock", "_aborted")
+    F-2（2026-10-27 审核 P1）：第二段 abort 只允许在**本请求真正持有执行槽**
+    时执行。排队期（`queue.run()` 尚未拿到 `_slot`）的断连只置位 + 让排队循环
+    退出；此前无条件调用 `supervisor.abort()` 会把正在生成的那个（无关）请求
+    打断，而且被打断方收到的是 200 + `finish_reason=stop` 的截断答案。
+    """
+
+    __slots__ = ("_supervisor", "_event", "_lock", "_aborted", "_slot_held")
 
     def __init__(self, supervisor=None):
         self._supervisor = supervisor
         self._event = threading.Event()
         self._lock = threading.Lock()
         self._aborted = False
+        self._slot_held = False
 
     def cancel(self) -> None:
         """第一段：置位。可在任意线程/事件循环调用，幂等。"""
@@ -67,9 +77,32 @@ class CancelToken:
     def cancelled(self) -> bool:
         return self._event.is_set()
 
-    def abort_once(self) -> bool:
-        """第二段：归还 NPU。返回本次是否真的执行了 abort。"""
+    # -- 执行槽归属（由 queue.run 的 on_acquire/on_release 回调维护） ---------
+    def hold_slot(self) -> None:
+        """标记：本请求已从 `InferenceQueue` 拿到执行槽。"""
         with self._lock:
+            self._slot_held = True
+
+    def release_slot(self) -> None:
+        """标记：执行槽已归还（此后不再允许 abort）。"""
+        with self._lock:
+            self._slot_held = False
+
+    @property
+    def slot_held(self) -> bool:
+        with self._lock:
+            return self._slot_held
+
+    def abort_once(self) -> bool:
+        """第二段：归还 NPU。仅在持有执行槽时执行一次，返回是否真的 abort。
+
+        未持槽（排队中/已归还）时返回 False 且不发 abort——这是本次修复的
+        核心契约，`_pump`/`_on_slot_releasing` 依赖它区分"取消排队"与
+        "取消在飞推理"。
+        """
+        with self._lock:
+            if not self._slot_held:
+                return False
             if self._aborted:
                 return False
             self._aborted = True
@@ -109,7 +142,7 @@ class TokenStream:
         self._thread.start()
 
     def cancel(self) -> None:
-        """两段式取消：置位 + 立即归还 NPU（幂等）。"""
+        """两段式取消：置位 + 归还 NPU（幂等；未持槽时不 abort）。"""
         self.token.cancel()
         self.token.abort_once()
 
@@ -117,17 +150,42 @@ class TokenStream:
         """调用方已发出终帧（错误帧等）：收尾不再 abort。"""
         self.settled = True
 
+    # -- 执行槽归属（F-2：只有持槽期间才允许 abort worker） ------------------
+    def _on_slot_acquired(self) -> None:
+        """queue.run 拿到执行槽：从这一刻起才允许 abort worker。"""
+        self.token.hold_slot()
+
+    def _on_slot_releasing(self) -> None:
+        """queue.run 即将归还执行槽（此刻槽仍归本请求）：补一次 abort 尝试。
+
+        覆盖「取消发生在 queue.run 的循环检查到之前」的窗口：例如取消标志刚
+        置位、但 submit 迭代器还没走到下一次检查——若此刻已取消而槽仍持有，
+        这里补发 abort（abort_once 幂等且在持槽语义内）。随后才清持槽标记，
+        此后任何 abort 都只会返回 False。
+        """
+        if self.token.cancelled:
+            self.token.abort_once()
+        self.token.release_slot()
+
     # -- 泵线程 -----------------------------------------------------------
     def _pump(self) -> None:
         truncated = False
         try:
             for item in self.svc.queue.run(
                     lambda: self.pipe.iter_tokens(),
-                    cancelled=lambda: self.token.cancelled):
+                    cancelled=lambda: self.token.cancelled,
+                    on_acquire=self._on_slot_acquired,
+                    on_release=self._on_slot_releasing):
                 if self.token.cancelled:
+                    # 取消：必须在归还执行槽之前 abort，worker 才会停止生成
+                    # （只退出循环会让 worker 把整个请求算完）。
+                    self.token.abort_once()
                     break
                 if not self._offer(item):
+                    # 背压截断：同样必须 abort。只释放槽位而让 worker 继续算，
+                    # 下一请求会被队列接纳却卡在旧帧上（审核 P1-3 实测 21.9 s）。
                     truncated = True
+                    self.token.abort_once()
                     break
         except BaseException as exc:
             # 取消导致的异常（QueueTimeout("cancelled while waiting") 等）
@@ -138,7 +196,8 @@ class TokenStream:
             if truncated:
                 self._put(TRUNCATED)
             self._put(STREAM_DONE)
-            # 兜底第二段：泵退出时若已取消，确保归还（abort_once 幂等）
+            # 兜底第二段：泵退出时若已取消，确保归还（abort_once 幂等；
+            # 槽已归还时它会直接返回 False，不会误伤后续请求）。
             if self.token.cancelled:
                 self.token.abort_once()
 
@@ -148,7 +207,8 @@ class TokenStream:
         此前这里用 `sleep(0.01)` 轮询等消费者最多 5s：泵线程被卡在投递上，
         NPU 那头却还在出 token——等的是永远不会及时消费的对端。截断语义本
         就在契约里（`TRUNCATED` → `finish_reason=length`），与其等满 5s 不
-        如立刻截断并归还 NPU（审计 P-背压去轮询）。
+        如立刻截断：调用方（`_pump`）会紧接着 `abort_once()`，真正让 worker
+        停止生成并归还 NPU（只释放队列槽位不够，见审核 P1-3）。
         """
         if self.token.cancelled:
             return False

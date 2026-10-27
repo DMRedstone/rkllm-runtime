@@ -8,10 +8,32 @@
 target_endpoint = "http://127.0.0.1:8080/v1"
 # 板端 server.api_key（留空表示板端未启用鉴权）
 target_api_key = ""
-# 单次 HTTP 读超时（秒）
+
+# --- 超时 / 长短任务 -------------------------------------------------------
+# 同步调用的单次 HTTP 读超时（秒）；必须 < 60 秒附近（客户端工具硬超时）。
+# 同步调用的生成上限会被连接器夹到"估算 ≤ task_threshold_s"的安全值，
+# 结果里 finish_reason=length 表示被截断；需要长输出时显式传大 max_tokens。
 target_timeout_s = 120
 # 超过此秒数转 job；必须 < 60（客户端工具硬超时）
 task_threshold_s = 45
-# 工具结果与输入上限（字符）
+# job（后台任务）的读超时 = min(job_timeout_max_s, max(target_timeout_s,
+#   估算秒数 × job_timeout_factor + 30))。
+# 慢模型（如板端 27B / large 档 1.5 tok/s）的 512 token 估算约 341 s，
+# 旧的固定 120 s 会必失败；job 现在自动放宽到约 541 s。
+job_timeout_factor = 1.5
+job_timeout_max_s = 1800
+
+# --- 估算 / 输入预算 -------------------------------------------------------
+# job 判定用的"预期生成 token"上限：未显式传 max_tokens 时按它估算，
+# 让默认短任务走同步（旧实现按 max_tokens=512 估算会把 ask/chat/batch 全部
+# 恒转 job）。ask 显式传更大的 max_tokens 时仍按显式值估算并转 job。
+estimate_tokens_cap = 128
+# 板端上下文（token）。连接器启动/status 时优先从 /health.context_len 刷新；
+# 不可达时用这里的值。工具输入会按 (context - 本次生成预算 - margin) 自动
+# 裁剪，避免 4k+ 汉字输入被板端固定 400。max_input_chars 只是字符硬上限。
+context_window = 4096
+context_margin_tokens = 32
+
+# --- 工具结果与输入硬上限（字符） ------------------------------------------
 max_result_chars = 20000
 max_input_chars = 12000

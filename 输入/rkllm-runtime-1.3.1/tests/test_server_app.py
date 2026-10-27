@@ -239,7 +239,10 @@ def test_completions_thin_wrapper(client):
 
 def test_param_validation_400(client):
     r = client.post("/v1/chat/completions", json={"messages": []})
-    assert r.status_code == 422                   # pydantic 校验失败
+    assert r.status_code == 400                   # OpenAI 契约：400 而非 FastAPI 422
+    body = r.json()
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "messages"
 
 
 # -- 根路径兼容：base_url 不带 /v1 的客户端（2026-10-22 板端反馈）----------

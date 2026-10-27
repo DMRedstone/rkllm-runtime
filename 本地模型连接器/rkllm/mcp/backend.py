@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import threading
 import urllib.error
 import urllib.parse
@@ -50,26 +51,36 @@ class HttpBackend:
         self._local = threading.local()
 
     # -- 连接管理 -----------------------------------------------------------
-    def _connection(self):
+    def _connection(self, timeout_s: float | None = None):
+        want = float(timeout_s or self.timeout_s)
         conn = getattr(self._local, "conn", None)
+        if conn is not None and want > float(
+                getattr(self._local, "conn_timeout", 0) or 0):
+            # 长 job 的读超时比同步调用大：换一条 socket timeout 更大的连接，
+            # 否则长 prefill 会在旧连接的 socket 超时上先被掐断。
+            self._drop_connection()
+            conn = None
         if conn is None:
             cls = (http.client.HTTPSConnection if self._scheme == "https"
                    else http.client.HTTPConnection)
-            conn = cls(self._host, self._port, timeout=self.timeout_s)
+            conn = cls(self._host, self._port, timeout=want)
             self._local.conn = conn
+            self._local.conn_timeout = want
         return conn
 
     def _drop_connection(self) -> None:
         """丢弃本线程的连接（复用连接可能已被对端关闭，或响应未读完）。"""
         conn = getattr(self._local, "conn", None)
         self._local.conn = None
+        self._local.conn_timeout = None
         if conn is not None:
             try:
                 conn.close()
             except Exception:
                 pass
 
-    def _request(self, path: str, body: bytes):
+    def _request(self, path: str, body: bytes,
+                 timeout_s: float | None = None):
         """POST 到板端并返回 `HTTPResponse`（复用 keep-alive 连接）。
 
         首次失败可能是复用的空闲连接已被对端关闭（keep-alive idle 超时），
@@ -79,9 +90,10 @@ class HttpBackend:
                    "Accept": "text/event-stream",
                    **({"Authorization": "Bearer " + self.api_key}
                       if self.api_key else {})}
+        t = float(timeout_s or self.timeout_s)
         last_exc: Exception | None = None
         for attempt in (0, 1):
-            conn = self._connection()
+            conn = self._connection(t)
             try:
                 conn.request("POST", self._prefix + path, body=body,
                              headers=headers)
@@ -95,12 +107,16 @@ class HttpBackend:
 
     def chat(self, messages: list[dict], *, max_tokens: int = 512,
              temperature: float = 0.3,
-             cancel_check: Callable[[], bool] | None = None) -> dict:
-        """返回 {"text": str, "usage": dict|None, "finish_reason": str}。
+             cancel_check: Callable[[], bool] | None = None,
+             timeout_s: float | None = None) -> dict:
+        """返回 {"text", "usage", "finish_reason", "reasoning_chars"}。
 
-        cancel_check 由调用方周期性置位（job 取消 / 客户端断开）；HTTP 层
-        无法中断已在途的请求，靠读循环在 chunk 边界检查。
+        - cancel_check：job 取消 / 客户端断开时返回 True；命中后必须抛
+          `BackendError(kind="cancelled")`——绝不能把底层读循环异常（跨线程
+          关闭 response 时的 AttributeError 等）裸露成 -32603；
+        - timeout_s：本次调用的**总读超时**（job 按估算放宽，见 stdio）。
         """
+        deadline_s = float(timeout_s or self.timeout_s)
         body = json.dumps({
             "model": "rkllm",
             "messages": messages,
@@ -108,7 +124,7 @@ class HttpBackend:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }).encode("utf-8")
-        resp = self._request("/chat/completions", body)
+        resp = self._request("/chat/completions", body, timeout_s=deadline_s)
         if resp.status >= 400:
             detail = resp.read(2000).decode("utf-8", "replace")
             self._drop_connection()   # 错误响应后连接状态不确定，不复用
@@ -121,6 +137,7 @@ class HttpBackend:
                                % (resp.status, detail[:200]))
 
         text_parts: list[str] = []
+        reasoning_chars = 0
         usage = None
         finish_reason = "stop"
         stop_watch = threading.Event()
@@ -129,9 +146,9 @@ class HttpBackend:
         def watchdog() -> None:
             """无输出期的取消检查（P2）。
 
-            原实现只在收到 chunk 后检查 `cancel_check()`——长 prefill 期间
-            板端一个 chunk 都没有，取消形同虚设，任务会一直算完。这里在
-            后台线程定期检查，命中即断流+`/reset`，主循环随后退出。
+            板端长 prefill 期间一个 chunk 都没有，主循环检查点进不来；由看门狗
+            定期检查。打断方式优先 socket shutdown（不跨线程改 response 状态），
+            再退化为静默 close，避免与主读循环的 `for raw in resp` 相互践踏。
             """
             while not stop_watch.wait(CANCEL_POLL_S):
                 if cancel_check is not None and cancel_check():
@@ -151,8 +168,8 @@ class HttpBackend:
             for raw in resp:
                 # P2：urlopen(timeout=) 只是单次 socket 超时；慢速滴流可无限挂住
                 # ——这里加总 deadline 兜底（finally 负责 close）。
-                if _time.monotonic() - _start > self.timeout_s:
-                    raise BackendError("板端响应超过总超时 %ss" % self.timeout_s)
+                if _time.monotonic() - _start > deadline_s:
+                    raise BackendError("板端响应超过总超时 %ss" % deadline_s)
                 if cancelled.is_set():
                     raise BackendError("任务已取消", kind="cancelled")
                 line = raw.decode("utf-8", "replace").strip()
@@ -179,16 +196,29 @@ class HttpBackend:
                 if choice.get("finish_reason"):
                     finish_reason = choice["finish_reason"]
                 delta = choice.get("delta") or {}
+                # reasoning 模型（Qwen3 / LM Studio 等）把思考放在
+                # reasoning_content；只统计长度用于"空正文"判定，不回传给上下文。
+                rc = delta.get("reasoning_content") or delta.get("reasoning")
+                if isinstance(rc, str) and rc:
+                    reasoning_chars += len(rc)
                 if delta.get("content"):
                     text_parts.append(delta["content"])
                 if chunk.get("usage"):
                     usage = chunk["usage"]
             finished = True
-        except (OSError, ValueError) as exc:
-            # 看门狗 close() 会让阻塞中的读抛异常——这是取消而不是板端故障
-            if cancelled.is_set():
+        except BackendError:
+            raise
+        except Exception as exc:
+            # P1：取消时 watchdog 打断读循环会抛 AttributeError/ValueError
+            # （"'NoneType' object has no attribute 'peek'"）——一律映射成 cancelled，
+            # 不再变成 -32603 裸内部错误。
+            if cancelled.is_set() or (cancel_check is not None and cancel_check()):
+                cancelled.set()
                 raise BackendError("任务已取消", kind="cancelled") from exc
-            raise BackendError("读板端流失败：%s" % exc) from exc
+            if isinstance(exc, (OSError, ValueError)):
+                raise BackendError("读板端流失败：%s" % exc) from exc
+            raise BackendError("读板端流失败：%s" % (exc or type(exc).__name__)
+                               ) from exc
         finally:
             stop_watch.set()
             if finished:
@@ -197,14 +227,36 @@ class HttpBackend:
             else:
                 self._drop_connection()   # 取消/异常：连接不可复用
         return {"text": "".join(text_parts), "usage": usage,
-                "finish_reason": finish_reason}
+                "finish_reason": finish_reason,
+                "reasoning_chars": reasoning_chars}
+
+    @staticmethod
+    def _close_quietly(obj) -> None:
+        try:
+            obj.close()
+        except Exception:
+            pass
+
+    def _interrupt_response(self, resp) -> None:
+        """打断阻塞中的 response 读取（取消用）。
+
+        优先 `socket.shutdown(SHUT_RDWR)`：只影响内核 socket，不改 http.client
+        的 fp 状态，主读循环会拿到 OSError 而不是 AttributeError；拿不到 socket
+        时才退化为 close（此后由 chat 的兜底 except 转成 cancelled）。
+        """
+        sock = getattr(getattr(getattr(resp, "fp", None), "raw", None),
+                       "_sock", None)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+                return
+            except OSError:
+                pass
+        self._close_quietly(resp)
 
     def _abort_remote(self, resp) -> None:
         """取消收尾：先断流、再 `/reset` 兜底（顺序反了会把请求留在服务端算完）。"""
-        try:
-            resp.close()
-        except OSError:
-            pass
+        self._interrupt_response(resp)
         req_abort = urllib.request.Request(
             self.endpoint + "/reset", data=b"{}", method="POST",
             headers={"Content-Type": "application/json",
@@ -212,7 +264,7 @@ class HttpBackend:
                         if self.api_key else {})})
         try:
             urllib.request.urlopen(req_abort, timeout=5)
-        except OSError:
+        except (OSError, ValueError):
             pass
 
     def status(self) -> dict:

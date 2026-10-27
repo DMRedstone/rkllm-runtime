@@ -87,6 +87,72 @@ def read_tar_xz(payload: bytes, label: str):
     return tarfile.open(fileobj=io.BytesIO(payload), mode="r:xz")
 
 
+# --------------------------------------------------------------------------
+# conffile <-> code cross-check (2026-10-27 audit P1-3 / P2-7)
+# --------------------------------------------------------------------------
+def conffile_env_coverage(conffile_text: str, unit_text: str,
+                          config_text: str, cli_texts) -> dict:
+    """逐键核对 conffile 里的 `RKLLM_*` 与「代码真的会读它」是否一致。
+
+    旧实现只从 unit/cli 文本里抓 5 个变量名（`option_default(` 正则在当前代码
+    里零命中），死键完全看不见，还打印"documents all 5 parameters"。这里按
+    三个方向真正逐键：
+
+    - consumed：unit 脚本变量 + `config.LEGACY_ENV_MAP` 旧名 + `cli*.py` 的
+      `_env_default/_env_flag/default(...)` 名 + `os.environ.get("RKLLM_*")` 字面量
+      + `SCHEMA` 由 (section,name) 推导出的新式 env 名；
+    - dead：conffile 文档化、但 consumed 里没有 → 该键是死键（P1-3 那一类）；
+    - forward_missing：unit / 旧名 / CLI 环境变量这类"运维可见入口"没写进
+      conffile；uncovered：这些入口没有 `#NAME=` 注释示例；
+    - bad_targets：LEGACY_ENV_MAP 映射到的键名不在 SCHEMA 里（拼错即静默失效）。
+
+    返回 dict：documented / consumed / forward / dead / forward_missing /
+    bad_targets / uncovered。纯函数，便于端到端单测（不依赖 dpkg/板端）。
+    """
+    documented = {m.group(1) for m in re.finditer(
+        r"^\s*#?\s*(RKLLM_[A-Z0-9_]+)=", conffile_text, re.M)}
+    unit_vars = set(re.findall(r"\$\$?(RKLLM_[A-Z0-9_]+)", unit_text))
+
+    legacy_pairs = {}
+    # 必须从 `LEGACY_ENV_MAP: dict[...] = {` 这个赋值处切起：模块 docstring 里
+    # 也提到了这个名字，直接 split("LEGACY_ENV_MAP") 会把 SCHEMA 之后的第一个
+    # `{}`（_BY_SECTION）当成字典结尾，结果一个旧名都解析不到。
+    map_match = re.search(
+        r"LEGACY_ENV_MAP\s*:\s*dict\[[^\]]*\]\s*=\s*\{", config_text)
+    if map_match:
+        block = config_text[map_match.end():].split("\n}", 1)[0]
+        legacy_pairs = dict(re.findall(
+            r'"(RKLLM_[A-Z0-9_]+)"\s*:\s*"([a-z_0-9.]+)"', block))
+    legacy = set(legacy_pairs)
+    schema_keys = {"%s.%s" % (section, name) for section, name in re.findall(
+        r'_k\("([a-z]+)", "([a-z_0-9]+)",', config_text)}
+    schema_env = {("RKLLM_%s_%s" % (section, name)).upper()
+                  for section, name in re.findall(
+                      r'_k\("([a-z]+)", "([a-z_0-9]+)",', config_text)}
+    bad_targets = sorted("%s -> %s" % (legacy_name, target)
+                         for legacy_name, target in legacy_pairs.items()
+                         if target not in schema_keys)
+
+    env_names, os_env = set(), set()
+    for text in cli_texts:
+        env_names |= {"RKLLM_" + name for name in re.findall(
+            r'(?:_env_default|_env_flag|(?<![\w.])default)\("([A-Z0-9_]+)"', text)}
+        os_env |= set(re.findall(
+            r'os\.environ\.get\("(RKLLM_[A-Z0-9_]+)"', text))
+
+    consumed = unit_vars | legacy | env_names | os_env | schema_env
+    forward = unit_vars | legacy | env_names
+    return {
+        "documented": documented,
+        "consumed": consumed,
+        "forward": forward,
+        "dead": sorted(documented - consumed),
+        "forward_missing": sorted(forward - documented),
+        "bad_targets": bad_targets,
+        "uncovered": sorted(v for v in forward if f"#{v}=" not in conffile_text),
+    }
+
+
 # ---------------------------------------------------------------- checks
 def check_container(deb: Path) -> None:
     blob = deb.read_bytes()
@@ -155,10 +221,12 @@ def check_control(members: dict[str, bytes]) -> dict:
                           "apt-get", "pip install", "curl ", "wget "):
                 if risky in lowered:
                     fail(f"{script} residue risk", f"contains {risky!r}")
-            # systemctl is acceptable only for refreshing caches and for bouncing
-            # a service the operator already started. Enabling or starting a unit
-            # would create state dpkg cannot remove later, so those stay banned.
-            allowed_verbs = ("daemon-reload", "daemon-reexec", "is-active", "restart")
+            # systemctl is acceptable only for refreshing caches, for stopping a
+            # service before the package goes away, and for bouncing a service
+            # the operator already started. Enabling or starting a unit would
+            # create state dpkg cannot remove later, so those stay banned.
+            allowed_verbs = ("daemon-reload", "daemon-reexec", "is-active",
+                             "restart", "stop")
             seen_verbs = []
             for match in re.finditer(
                     r"systemctl\s+(?:--no-reload\s+|--quiet\s+|--no-pager\s+)?([a-z-]+)", code):
@@ -537,22 +605,43 @@ def check_data(members: dict[str, bytes], control_info: dict) -> None:
                 elif "$(" in stripped or "`" in stripped:
                     issues.append(f"shell syntax in a value: {stripped[:40]!r}")
             # every parameter the service accepts has to be documented here, with
-            # a commented example - that is the whole point of the file
+            # a commented example - that is the whole point of the file.
+            # 2026-10-27 audit P1-3/P2-7: the old check only scraped 5 variable
+            # names out of the unit text (`option_default(` no longer exists in
+            # the CLI), so dead conffile keys were invisible while the report
+            # still claimed "all parameters documented". Now read the packaged
+            # rkllm/config.py + cli sources from the deb and cross-check every
+            # documented RKLLM_* against a real read site, and vice versa.
             unit_text = tf.extractfile(regulars[unit_rel]).read().decode("utf-8", "replace") \
                 if unit_rel in regulars else ""
-            cli_text = tf.extractfile(regulars[cli_rel]).read().decode("utf-8", "replace") \
-                if cli_rel in regulars else ""
-            wanted = set(re.findall(r"\$\$?(RKLLM_[A-Z0-9_]+)", unit_text))
-            wanted |= set(re.findall(r'os\.environ\.get\("(RKLLM_[A-Z0-9_]+)"', cli_text))
-            wanted |= {"RKLLM_" + name for name in
-                       re.findall(r'option_(?:default|flag)\("([A-Z0-9_]+)"', cli_text)}
-            wanted.add("RKLLM_EXTRA_ARGS")
-            missing = sorted(v for v in wanted if v not in body)
-            if missing:
-                issues.append(f"undocumented parameter(s): {missing}")
-            uncovered = sorted(v for v in wanted if f"#{v}=" not in body)
-            if uncovered:
-                issues.append(f"no commented example (optional form) for: {uncovered}")
+            config_src_rel = "usr/lib/rkllm/current/rkllm/config.py"
+            config_text = (tf.extractfile(regulars[config_src_rel])
+                           .read().decode("utf-8", "replace")
+                           if config_src_rel in regulars else "")
+            cli_texts = []
+            for rel_name, member in regulars.items():
+                if (rel_name.startswith("usr/lib/rkllm/current/rkllm/")
+                        and rel_name.endswith(".py")
+                        and rel_name != config_src_rel):
+                    cli_texts.append(
+                        tf.extractfile(member).read().decode("utf-8", "replace"))
+            coverage = conffile_env_coverage(body, unit_text, config_text, cli_texts)
+            wanted = coverage["forward"]
+            if not config_text:
+                issues.append("packaged rkllm/config.py missing: per-key conffile "
+                              "check impossible")
+            if coverage["dead"]:
+                issues.append("conffile documents variable(s) the code never reads "
+                              "(dead keys): %s" % coverage["dead"][:8])
+            if coverage["forward_missing"]:
+                issues.append("undocumented parameter(s): %s"
+                              % coverage["forward_missing"][:8])
+            if coverage["bad_targets"]:
+                issues.append("LEGACY_ENV_MAP target(s) not in SCHEMA: %s"
+                              % coverage["bad_targets"][:5])
+            if coverage["uncovered"]:
+                issues.append("no commented example (optional form) for: %s"
+                              % coverage["uncovered"][:8])
             cjk = [line for line in body.splitlines() if re.search(r"[\u4e00-\u9fff]", line)]
             if len(cjk) < 10 or not re.search(r"English|\bEN\b", body):
                 issues.append(f"not bilingual: {len(cjk)} Chinese line(s)")
@@ -560,8 +649,10 @@ def check_data(members: dict[str, bytes], control_info: dict) -> None:
                 fail("conffile content", "; ".join(issues[:4]))
             else:
                 ok("conffile content", "%d lines, bilingual, version-independent, "
-                                       "documents all %d parameters"
-                   % (len(body.splitlines()), len(wanted)))
+                                       "%d documented / %d consumed RKLLM_* variables "
+                                       "cross-checked key by key"
+                   % (len(body.splitlines()), len(coverage["documented"]),
+                      len(coverage["consumed"])))
 
         # --- manual pages ----------------------------------------------------
         for rel, label, need_cjk in (

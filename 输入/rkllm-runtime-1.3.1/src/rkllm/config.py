@@ -258,6 +258,17 @@ LEGACY_ENV_MAP: dict[str, str] = {
     "RKLLM_CORS_ORIGIN": "server.cors_origins",
     # 1.3.1-15 的 json_object 提示语变量：新键 openai.json_hint（进表后仍认旧名）
     "RKLLM_JSON_HINT": "openai.json_hint",
+    # 2026-10-27 审核 P1-3：下面 6 个旧名此前只在 conffile 里"有文档、无读取点"。
+    # serve 的 argparse 参数全部 defer=None（cli.py `_add_engine_args(defer=True)`），
+    # 不会走 _env_default，因此必须在这里映射，否则运维按 conffile 改
+    # context / 生成长度 / 安静模式 / 内存预算全部静默无效。目标键以 schema 为准
+    # （model.max_tokens、logging.level、engine.memory_check 等）。
+    "RKLLM_CONTEXT": "model.context",
+    "RKLLM_MAX_NEW_TOKENS": "model.max_tokens",
+    "RKLLM_QUIET": "logging.level",
+    "RKLLM_MEMORY_CHECK": "engine.memory_check",
+    "RKLLM_MEMORY_RESERVE_MB": "engine.memory_reserve_mb",
+    "RKLLM_MIN_CONTEXT": "model.min_context",
 }
 
 
@@ -267,6 +278,22 @@ _NEGATED_LEGACY: frozenset[str] = frozenset({
 })
 
 _TRUE_WORDS = ("1", "true", "yes", "on")
+
+
+def _quiet_to_level(raw: str) -> str:
+    """`RKLLM_QUIET=1`（1.3.1-15 的开关）→ `logging.level` 枚举值。
+
+    旧变量是布尔开关，新键是 debug/info/warning/error 四选一：直接把 "1"
+    复制过去会被 _coerce 判成非法枚举并回退默认值（=仍然无效）。语义对齐
+    `_legacy_cli_overrides` 的 --quiet：开=warning，关=info。
+    """
+    return "warning" if raw.strip().lower() in _TRUE_WORDS else "info"
+
+
+# 值转换表：旧变量 → 新键时连取值也要转换的项（普通项直接复制字符串）。
+_LEGACY_VALUE_TRANSFORM = {
+    "RKLLM_QUIET": _quiet_to_level,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +434,9 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
                 # NO_HISTORY=1 → keep_history=false；NO_FREQ_LOCK=1 → freq_lock=false
                 env[new_env] = ("false" if raw.strip().lower() in _TRUE_WORDS
                                 else "true")
+            elif legacy in _LEGACY_VALUE_TRANSFORM:
+                # 旧变量取值域与新键不同（如 QUIET=1 → logging.level=warning）
+                env[new_env] = _LEGACY_VALUE_TRANSFORM[legacy](raw)
             else:
                 env[new_env] = raw
 

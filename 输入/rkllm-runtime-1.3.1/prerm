@@ -2,16 +2,33 @@
 # prerm for @PACKAGE@
 #
 # The package ships @SERVER_UNIT@ but never enables it. If an operator enabled
-# it by hand, `systemctl enable` created a symlink in /etc/systemd/system/ that
-# dpkg does not know about, so it has to be taken down here - otherwise removing
-# the package would leave a dangling symlink behind. deb-systemd-helper is the
-# standard tool for that and ships in init-system-helpers (essential).
+# it by hand, it may still be running when the package is removed: dpkg deletes
+# the files, but a running process keeps the old librkllmrt.so mapped and keeps
+# holding the NPU until the board is rebooted. So removal has to stop it first.
+#
+# 2026-10-27 audit P1-4: this script used to call `deb-systemd-helper stop`,
+# which is not a valid deb-systemd-helper action (the tool only manages enable
+# state). The call failed silently behind `|| true`, so the unit was never
+# stopped. Stopping a unit is `deb-systemd-invoke stop` (policy- and
+# DPKG_ROOT-aware, provided by the essential init-system-helpers package) or
+# plain `systemctl stop`. Both are best-effort: a failure here must never block
+# the removal.
 set -e
 
 case "$1" in
     remove|deconfigure)
+        if [ -d /run/systemd/system ]; then
+            if command -v deb-systemd-invoke >/dev/null 2>&1; then
+                deb-systemd-invoke stop @SERVER_UNIT@ >/dev/null 2>&1 || true
+            elif command -v systemctl >/dev/null 2>&1; then
+                systemctl stop @SERVER_UNIT@ >/dev/null 2>&1 || true
+            fi
+        fi
+        # Enable/state bookkeeping is still deb-systemd-helper's job; disabling
+        # here keeps the "stop + disable" order deterministic for operators who
+        # enabled the unit. `purge` in postrm removes the state file later.
         if command -v deb-systemd-helper >/dev/null 2>&1; then
-            deb-systemd-helper stop @SERVER_UNIT@ >/dev/null || true
+            deb-systemd-helper disable @SERVER_UNIT@ >/dev/null 2>&1 || true
         fi
         ;;
     upgrade|failed-upgrade)

@@ -37,7 +37,7 @@ def default_config_path() -> str:
 
 
 def default_cfg(endpoint: str, api_key: str) -> dict:
-    """配置缺省（80 键表的 mcp 组在客户端侧的子集；TOML 加载后合并）。"""
+    """配置缺省（85 键表的 mcp 组在客户端侧的子集；TOML 加载后合并）。"""
     return {
         # -- 模式选择 ------------------------------------------------------
         "enabled": True,                 # mcp.enabled：连接器总开关
@@ -55,6 +55,12 @@ def default_cfg(endpoint: str, api_key: str) -> dict:
         "batch_max_segments": 20,
         "task_mode": "auto",
         "task_threshold_s": 45,
+        # job 判定用的"预期生成 token"上限：未显式传 max_tokens 时按它估算，
+        # 让默认短任务走同步（旧实现按 max_tokens=512 估算 → 全部恒转 job）。
+        "estimate_tokens_cap": 128,
+        # 输入预算：context_len 优先从 /health 刷新；不可达时退回 context_window。
+        "context_window": 4096,
+        "context_margin_tokens": 32,
         "job_ttl_s": 600,
         "job_max": 8,
         "job_poll_hint_s": 2,
@@ -64,7 +70,10 @@ def default_cfg(endpoint: str, api_key: str) -> dict:
         "session_max_count": 256,        # 保留的会话数上限
         "session_ttl_s": 1800,           # 会话空闲过期（秒）；0=不过期
         # -- 目标 ----------------------------------------------------------
+        # 同步调用的单次 HTTP 读超时；job 的读超时按估算自动放宽，见下。
         "target_timeout_s": 120,
+        "job_timeout_factor": 1.5,       # job 读超时 = 估算×factor + 30 s
+        "job_timeout_max_s": 1800,       # job 读超时上限（慢模型长答）
         "target_endpoint": endpoint,
         "target_api_key": api_key,
         # 内部字段（与 target_* 同值；键表用 target_* 命名）
@@ -74,7 +83,7 @@ def default_cfg(endpoint: str, api_key: str) -> dict:
 
 
 def load_cfg() -> dict:
-    """安装目录 mcp.toml + RKLLM_* 环境变量覆盖（env 优先，与板端 80 键一致）。"""
+    """安装目录 mcp.toml + RKLLM_* 环境变量覆盖（env 优先，与板端 85 键一致）。"""
     endpoint = os.environ.get("RKLLM_ENDPOINT", "http://127.0.0.1:8080/v1")
     api_key = os.environ.get("RKLLM_API_KEY", "")
     cfg = default_cfg(endpoint, api_key)

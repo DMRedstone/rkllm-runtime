@@ -37,7 +37,11 @@ RKLLM_INFER_GENERATE = 0
 
 CPU_MASK_LOW = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3)
 CPU_MASK_HIGH = (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7)
-BIG_CORE_PLATFORMS = frozenset({"rk3588"})
+# 大核位于第 4-7 号 CPU 的 SoC。RK3576 是 4×A72(4-7)+4×A53(0-3)，官方 demo
+# （examples/rkllm_server_demo/rkllm_server/flask_server.py）对 rk3576/rk3588
+# 都用高掩码；此前只列 rk3588 会让 RK3576 落到 A53 小核，prefill/解码慢 3-4 倍
+# （2026-10-27 审核 P1-2）。rk3562 是 4×A53、rv1126b 是 4×A7，保持低掩码。
+BIG_CORE_PLATFORMS = frozenset({"rk3588", "rk3576"})
 
 
 class RKLLMError(Exception):

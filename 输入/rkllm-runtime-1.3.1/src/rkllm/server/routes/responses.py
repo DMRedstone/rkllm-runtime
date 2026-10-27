@@ -15,16 +15,17 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ...agent import responses as tr
 from ...agent.pipeline import Pipeline
+from ..errors import http_error as _http_error
 from ..pipeline_runner import (BUSY_MESSAGE, SchemaError as _SchemaError,
                                StreamTimer,
                                build_pipeline as _pipeline,
-                               http_error as _http_error,
                                run_blocking_checked as _run_blocking_checked,
                                service_of as _svc)
 from ..queue import QueueBusy, QueueTimeout
@@ -49,14 +50,86 @@ def _headers(ignored: list[str]) -> dict:
     return headers
 
 
-def _error(status: int, message: str, code: str, **extra) -> JSONResponse:
-    return _http_error(status, "server_error", message, code=code, **extra)
+def _error(status: int, message: str, code: str, *,
+           err_type: str = "server_error",
+           headers: dict[str, str] | None = None, **extra) -> JSONResponse:
+    return _http_error(status, err_type, message, code=code,
+                       headers=headers, **extra)
+
+
+_RESP_FLOAT_LIMITS = {"temperature": (0.0, 2.0), "top_p": (0.0, 1.0)}
+
+
+def _bad(message: str, param: str | None,
+         code: str = "invalid_value") -> JSONResponse:
+    return _http_error(400, "invalid_request_error", message,
+                       param=param, code=code)
+
+
+def _validate_body(body: dict) -> JSONResponse | None:
+    """Responses 入口校验：非法请求一律 OpenAI 400，绝不 500/回显内部异常。
+
+    为什么在路由层做而不是 pydantic 模型：Responses 的字段集大于本项目实现面，
+    用 `extra="forbid"` 的模型会把大量“可忽略字段”打成 422；这里只校验会进入
+    runtime 或会破坏响应形状的字段（input / max_output_tokens / 采样参数 /
+    tools / stream / tool_choice）。
+    """
+    if not isinstance(body, dict):
+        return _bad("request body must be a JSON object", None,
+                    code="invalid_request_error")
+    raw_input = body.get("input")
+    if raw_input is not None and not isinstance(raw_input, (str, list)):
+        return _bad("`input` must be a string or an array of input items",
+                    "input", code="invalid_input")
+    if isinstance(raw_input, list) and any(
+            not isinstance(item, dict) for item in raw_input):
+        return _bad("`input` array items must be objects", "input",
+                    code="invalid_input")
+
+    mot = body.get("max_output_tokens")
+    if mot is not None and (isinstance(mot, bool)
+                            or not isinstance(mot, int) or mot < 1):
+        return _bad("`max_output_tokens` must be a positive integer",
+                    "max_output_tokens")
+
+    for name, (low, high) in _RESP_FLOAT_LIMITS.items():
+        value = body.get(name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return _bad("`%s` must be a number" % name, name)
+        v = float(value)
+        if not math.isfinite(v) or v < low or v > high or (
+                name == "top_p" and v == low):
+            return _bad("`%s` must be a finite number in [%s, %s]"
+                        % (name, low, high), name)
+
+    if body.get("tools") is not None and not isinstance(body.get("tools"), list):
+        return _bad("`tools` must be an array", "tools")
+    if body.get("stream") is not None and not isinstance(body.get("stream"),
+                                                         bool):
+        return _bad("`stream` must be a boolean", "stream")
+
+    tc = body.get("tool_choice")
+    if tc is not None and not (isinstance(tc, str) and tc in ("auto", "none")):
+        return _http_error(
+            400, "invalid_request_error",
+            "tool_choice: prompt-injected tools only support 'auto'/'none'; "
+            "required/named tool choice is not implemented",
+            param="tool_choice", code="unsupported_parameter")
+    return None
 
 
 @router.post("/responses")
 def create_response(request: Request, body: dict):
     svc = _svc(request)
+    invalid = _validate_body(body)
+    if invalid is not None:
+        return invalid
     chat_body, ignored = tr.to_chat_request(body)
+    if chat_body.get("tool_choice") == "none":
+        # 与 chat 路径一致：tool_choice=none 表示禁止调用工具，故不注入工具。
+        chat_body.pop("tools", None)
     streaming = bool(body.get("stream"))
     raw_input = body.get("input")
     blank = (raw_input is None or raw_input == [] or
@@ -73,7 +146,8 @@ def create_response(request: Request, body: dict):
     if reject:
         return _http_error(400, "invalid_request_error",
                            "unsupported parameter(s): %s" % ", ".join(reject),
-                           code="unsupported_parameter")
+                           code="unsupported_parameter",
+                           param=reject[0])
     headers = _headers(ignored + warn)
 
     resp_id = tr.response_id()
@@ -105,31 +179,51 @@ def create_response(request: Request, body: dict):
     try:
         result, pipe = _run_blocking_checked(svc, chat_body, max_tokens, schema)
     except ValueError as exc:
-        return _error(400, str(exc), "invalid_request")
+        return _error(400, str(exc), "invalid_request",
+                      err_type="invalid_request_error")
     except _SchemaError as exc:
         return _http_error(422, "invalid_request_error",
                            "response did not match response_format.json_schema "
                            "after retries: %s" % exc, code="schema_mismatch")
     except QueueBusy as exc:
         return _error(503, BUSY_MESSAGE, "queue_full",
-                      retry_after_s=exc.retry_after_s)
+                      headers={"Retry-After": str(exc.retry_after_s)})
     except QueueTimeout:
-        return _error(503, "queue timeout", "queue_timeout")
+        return _error(503, "queue timeout", "queue_timeout",
+                      headers={"Retry-After":
+                               str(svc.queue.busy_retry_after_s)})
     except WorkerDown as exc:
-        return _error(503, str(exc)[:300], "worker_down")
+        return _error(503, str(exc)[:300], "worker_down",
+                      headers={"Retry-After":
+                               str(svc.queue.busy_retry_after_s)})
 
     if pipe.max_tokens_clamped:
         headers["X-RKLLM-Max-Tokens-Clamped"] = str(pipe.max_tokens)
+    # max_output_tokens 截断：与 chat 的 finish_reason 同口径，映射到 Responses
+    # 的 incomplete 状态（此前固定写 completed，客户端无法感知截断）。
+    finish_reason = pipe.finish_reason(result)
+    status = "incomplete" if finish_reason == "length" else "completed"
+    incomplete_details = ({"reason": "max_output_tokens"}
+                          if status == "incomplete" else None)
+    content = result.get("text", "")
+    if "json" in result:
+        # json_schema 校验通过后回填解析结果，保证响应文本本身是合法 JSON。
+        content = json.dumps(result["json"], ensure_ascii=False)
     chat_payload = {"choices": [{"message": {
         "role": "assistant",
-        "content": result.get("text", ""),
+        "content": content,
         "tool_calls": result.get("tool_calls") or [],
-    }, "finish_reason": ("tool_calls" if result.get("tool_calls") else "stop")}]}
+    }, "finish_reason": finish_reason}]}
     output, _ = tr.chat_to_output(chat_payload)
+    if status == "incomplete":
+        for item in output:
+            if item.get("type") == "message":
+                item["status"] = "incomplete"
     payload = tr.response_object(
         resp_id=resp_id, model=body.get("model", svc.model_name),
-        created_at=created, status="completed", output=output,
-        usage=tr.usage_of(pipe.usage(result)), request_body=body)
+        created_at=created, status=status, output=output,
+        usage=tr.usage_of(pipe.usage(result)), request_body=body,
+        incomplete_details=incomplete_details)
     return JSONResponse(payload, headers=headers)
 
 
@@ -215,6 +309,10 @@ def _stream(request: Request, svc, pipe: Pipeline, body: dict,
             return
 
         # 文本消息收尾
+        # max_output_tokens 触顶（runtime 的 generate_tokens 到达上限）与背压
+        # 截断同属“服务端没送完”：统一映射 status=incomplete / reason。
+        if pipe.finish_reason() == "length":
+            truncated = True
         item_status = "incomplete" if truncated else "completed"
         yield ev("response.output_text.done", {
             "item_id": message_id, "output_index": 0,

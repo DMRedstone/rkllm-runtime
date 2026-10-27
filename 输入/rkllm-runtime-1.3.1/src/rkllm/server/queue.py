@@ -65,10 +65,18 @@ class InferenceQueue:
         return self._waiting
 
     def run(self, submit: Callable[[], Iterator[str]], *,
-            cancelled: Callable[[], bool] | None = None) -> Iterator[str]:
+            cancelled: Callable[[], bool] | None = None,
+            on_acquire: Callable[[], None] | None = None,
+            on_release: Callable[[], None] | None = None) -> Iterator[str]:
         """排队 → 拿槽 → 执行；submit() 返回 token 迭代器（由 worker 客户端给）。
 
         max_wait<=0 表示「不排队」：仅在槽立即空闲时放行，否则立即 503（P1-2）。
+
+        `on_acquire` / `on_release`：执行槽的持/放回调（F-2，2026-10-27 审核）。
+        `streaming.CancelToken` 靠它们判断「本请求是否真的持有 NPU 槽」：只有
+        持槽期间才允许 `supervisor.abort()`，排队期断连不得打断别人的在飞请求。
+        两个回调在同一 try/finally 里成对调用；拿到槽后立刻再查一次 `cancelled`，
+        已取消就不进入 `submit()`（不写 run 帧、不启动推理，也就不需要 abort）。
         """
         acquired = False
         waiting_counted = False
@@ -106,8 +114,19 @@ class InferenceQueue:
                 waited = time.monotonic() - enqueued_at
                 self.metrics["queue_wait_seconds_sum"] += waited
                 observe(self.metrics, "queue_wait", QUEUE_WAIT_BUCKETS, waited)
+            # -- 已持有执行槽：以下任何路径都必须成对 on_release + release ----
             infer_start = time.monotonic()
+            acquire_notified = False
             try:
+                # 拿到槽后立刻再查一次取消：排队期断连的请求到此为止，
+                # 不 submit()（不写 run 帧、不启动 NPU），也不需要 abort。
+                if cancelled and cancelled():
+                    raise QueueTimeout("cancelled after acquiring slot")
+                # on_acquire 放在取消检查之后、submit() 之前：回调一旦触发
+                # 就表示"本请求即将/已经开始推理"，此时才允许 abort worker。
+                if on_acquire is not None:
+                    on_acquire()
+                acquire_notified = True
                 for token in submit():
                     if cancelled and cancelled():
                         break
@@ -116,7 +135,13 @@ class InferenceQueue:
                 self.metrics["infer_seconds_sum"] += (time.monotonic()
                                                      - infer_start)
             finally:
-                self._slot.release()
+                # 回调严格配对：on_acquire 没触发过就不调 on_release；
+                # 即使 on_release 抛异常也必须先归还槽位（否则整条队列死锁）。
+                try:
+                    if acquire_notified and on_release is not None:
+                        on_release()
+                finally:
+                    self._slot.release()
         except (QueueBusy, QueueTimeout):
             raise                      # 已计 rejected，不重复计 errors
         except Exception:

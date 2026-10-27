@@ -90,6 +90,9 @@ NOTES: dict[str, str] = {
                    "returns 400 (cannot correct frames already sent)",
     "tools": "prompt-injected; accuracy depends on model; handle-level "
              "rkllm_set_function_tools avoided by design",
+    "tool_choice": "auto/none are honored (none suppresses tool injection); "
+                   "required/named choices are not implemented and return 400 "
+                   "unsupported_parameter instead of being ignored",
     "seed": "RKLLM runtime exposes no RNG seed interface",
     "logprobs": "per-token logit copy too costly on 27B; not implemented",
 }

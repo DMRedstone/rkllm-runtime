@@ -13,6 +13,10 @@ import tarfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+# 2026-10-27 audit P2-6：默认用法（不带参数）会走 `ROOT / "dist"` 自动发现
+# deb，而 ROOT 从未定义 → NameError。ROOT 与 make_deb.py 同口径：工具目录
+# （dist/、build/ 都在它下面）。
+ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 from verify_deb import parse_ar, read_tar_xz  # noqa: E402
 # 上游 release tarball 位置（软编码）：优先环境变量 RKLLM_RELEASE_TARBALL，未设置时使用仓库内随附的精简上游库。
