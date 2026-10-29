@@ -274,11 +274,6 @@ def main():
 
     mon = threading.Thread(target=soak.monitor, args=(interval,), daemon=True)
     mon.start()
-    workers = [threading.Thread(target=soak.worker, daemon=True) for _ in range(1)]
-    w = threading.Thread(target=soak.worker, kwargs={"rounds_max": 0}, daemon=True)
-    workers.append(w)
-    for t in set(workers):
-        pass
     wrk = threading.Thread(target=soak.worker, daemon=True)
     t_end = time.time() + hours * 3600
     wrk.start()

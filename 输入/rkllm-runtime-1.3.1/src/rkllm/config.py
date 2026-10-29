@@ -5,8 +5,8 @@
 - 优先级：内置默认 < 配置文件 < 环境变量（RKLLM_*）< 命令行。
 - 启动校验：类型、范围、互斥项；错误一次性列出并拒绝启动（不再静默回退）。
 - 纯 stdlib（tomllib 为 3.13 内置）：客户端 wheel 零第三方依赖的前提。
-- 键计数由 tests/test_config.py 守住：server 13 + model 11 + engine 8 + queue 5
-  + openai 8 + cache 4 + mcp 24 + logging 5 + metrics 2 = 80。
+- 键计数由 tests/test_config.py 守住：server 13 + model 12 + engine 10 + queue 5
+  + openai 9 + cache 5 + mcp 24 + logging 5 + metrics 2 = 85。
 
 环境变量映射规则：RKLLM_<SECTION>_<NAME>（大写，如 RKLLM_SERVER_PORT）。
 旧 conffile（/etc/default/rkllm-server）经 LEGACY_ENV_MAP 迁移。

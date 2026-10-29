@@ -84,7 +84,6 @@ DEFAULT_MAINTAINER = "RedStone <DMRedStone@users.noreply.github.com>"
 # multiarch triplet -> upstream directory naming inside the release tarball
 ARCHITECTURES = {
     "arm64": {"triplet": "aarch64-linux-gnu", "upstream": "aarch64", "opencv": "opencv-linux-aarch64"},
-    "armhf": {"triplet": "arm-linux-gnueabihf", "upstream": "armhf", "opencv": "opencv-linux-armhf"},
 }
 
 # Dependencies derived from DT_NEEDED of librkllmrt.so:
