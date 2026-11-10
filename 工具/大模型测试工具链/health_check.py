@@ -35,7 +35,7 @@ import os
 import sys
 import time
 
-from board_api import answer_of, build_base, request   # 共享 HTTP 层（同目录 board_api.py）
+from board_api import answer_of, build_base, default_host, default_key, request  # 共享 HTTP 层
 
 # 强制 UTF-8 输出（Windows 控制台默认 GBK，会打不出中文）
 try:
@@ -235,10 +235,10 @@ def check_full(base, key, timeout):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--host", default=os.environ.get("RKLLM_HOST", "192.0.2.10:8080"),
-                        help="host:port（可用 RKLLM_HOST 覆盖）")
-    parser.add_argument("--key", default=os.environ.get("RKLLM_KEY") or os.environ.get("RKLLM_API_KEY", ""),
-                        help="API key（可用 RKLLM_KEY 覆盖）")
+    parser.add_argument("--host", default=default_host(),
+                        help="host:port（环境变量 > 连接器 mcp.toml）")
+    parser.add_argument("--key", default=default_key(),
+                        help="API key（环境变量 > 连接器 mcp.toml）")
     parser.add_argument("--prompt", default="你好，请用一句话自我介绍",
                         help="端到端对话检查使用的提示词")
     parser.add_argument("--full", action="store_true",

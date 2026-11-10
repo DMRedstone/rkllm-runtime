@@ -1,5 +1,23 @@
 rkllm-runtime (@VERSION@) unstable; urgency=medium
 
+  [ 1.3.1-18 synced remote main and repackaged ]
+  * MCP connector: extract job start and polling preserve structuredContent;
+    failed jobs preserve isError, fixing MCP -32600.
+  * Streaming tools read nested function name/arguments; slot-aware abort
+    keeps queued disconnects from killing in-flight requests; abort on
+    backpressure truncation and RequestAborted end frames.
+  * OpenAI contract: non-streaming reasoning_content, Retry-After on 503,
+    OpenAI-shaped 400 validation errors, Responses max_output_tokens
+    incomplete, NaN input validation, json_schema de-fencing.
+  * Runtime/deb: legacy conffile keys take effect, rk3576 big cores,
+    progress-based heartbeat, prerm stops the service, make_deb armhf
+    support removed (arm64 only).
+  * MCP gateway: sync cancel maps to cancelled, default estimates avoid
+    permanent job mode, job timeout scales with worst-case generation,
+    context budget, _inflight cleanup, -32602 on invalid args.
+  * Packaging hygiene: drop dead code in soak_test.py, correct the
+    config docstring group counts (85 keys).
+
   [ 1.3.1-17 audit remediation, reliability and observability ]
   * OpenAI compatibility: finish_reason=length with exact usage from the
     runtime end frame; streaming /v1/completions (text_completion envelope,

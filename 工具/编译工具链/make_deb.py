@@ -67,7 +67,7 @@ def _source_version() -> tuple[str, str]:
     version = match.group(1)
     if "-" not in version:
         raise SystemExit(
-            f"DEFAULT_VERSION={version!r} must look like 1.3.1-17")
+            f"DEFAULT_VERSION={version!r} must look like <upstream>-<revision>")
     upstream, revision = version.split("-", 1)
     return upstream, revision
 
@@ -437,9 +437,9 @@ def stage(ctx: BuildContext, source_tarball: Path) -> tuple[list[Shipped], dict]
         "generated", "ldconfig 私有库路径;随包删除,由 postinst/postrm 刷新缓存")
 
     # --- rkllm: local chat + OpenAI-compatible API ---------------------------
-    # /usr/bin/rkllm：唯一命令入口。1.3.1-16 起它把 serve/run/chat/list/info/
+    # /usr/bin/rkllm：唯一命令入口。后续版本起它把 serve/run/chat/list/info/
     # selftest/config 全部委派给新栈（/usr/lib/rkllm/current），而 systemd 单元
-    # 与 conffile 保持 1.3.1-15 的名字与内容不变。
+    # 与 conffile 保持历史版本的名字与内容不变。
     add("/usr/bin/rkllm",
         ctx.apply(read_packaging("launcher/rkllm")).encode("utf-8"), EXEC_MODE,
         "packaging/launcher/rkllm",

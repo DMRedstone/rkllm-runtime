@@ -108,9 +108,13 @@ def main() -> int:
                 "/usr/include/rkllm.h",
                 "/etc/ld.so.conf.d/rkllm-runtime.conf",
                 f"/usr/lib/{info['triplet']}/pkgconfig/rkllm.pc",
-                "/usr/bin/rkllm-fix-freq-rk3588",
                 "/usr/share/doc/rkllm-runtime/copyright",
             ]
+            # 频率辅助脚本的文件名带硬件后缀，按前缀从包内清单动态发现，
+            # 不在校验脚本里写死具体型号（换板后仍可校验）。
+            interesting += [p for p in payload
+                            if p.startswith("/usr/bin/rkllm-fix-freq-")]
+            interesting.sort()
             print("  -- 权限与类型 --")
             for path in interesting:
                 m = payload.get(path)

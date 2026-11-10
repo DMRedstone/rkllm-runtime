@@ -23,7 +23,7 @@ VALID_SECTIONS = {"libs", "devel", "utils", "misc", "doc", "python", "science"}
 REQUIRED_FIELDS = ["Package", "Version", "Architecture", "Maintainer",
                    "Homepage", "Description"]
 # 本包由本仓库维护，Homepage 必须指向它而非上游 airockchip/rknn-llm——
-# 1.3.1-16 之前漏改，`apt show` 直接暴露给了运维。
+# 早期版本漏改，`apt show` 直接暴露给了运维。
 EXPECTED_HOMEPAGE = "https://github.com/DMRedstone/rkllm-runtime"
 KNOWN_MANDATORY_TREE = ["usr", "usr/share", "usr/share/doc", "usr/bin", "etc"]
 

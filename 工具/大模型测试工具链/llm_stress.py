@@ -4,7 +4,7 @@
 
 用途
 ----
-对以 OpenAI 兼容协议暴露的板端推理服务（rkllm serve / RK3588 NPU）执行
+对以 OpenAI 兼容协议暴露的板端推理服务（rkllm serve / NPU 加速）执行
 分层的压力测试，覆盖：单请求延迟基线、并发-吞吐曲线、持续耐力、过载背压、
 以及边界与畸形输入。全程每个子段结束后做一次存活探测，以便把「服务崩溃」
 精确定位到引发它那一次请求，而不是笼统地归因于「压测把服务压垮了」。
@@ -51,7 +51,7 @@ import time
 import urllib.error
 import urllib.request
 
-from board_api import Board, build_base, pct   # 共享 HTTP 层与百分位口径
+from board_api import Board, build_base, default_host, default_key, fetch_server_meta, pct  # 共享 HTTP 层与百分位口径
 from quality import (check_attribution, collect_sample,   # 内容形态分析（不判语义）
                      finish_reason_stats, overrun_stats, shape_metrics, stream_parity)
 
@@ -207,14 +207,14 @@ def streaming_vs_blocking(board, quick):
 def completions_and_length(board, quick):
     """A4：/v1/completions 流式信封 + finish_reason=length 契约实测。
 
-    这两项是 1.3.1-17 才修好的对外契约，之前压测只覆盖 chat 流式，导致
+    这两项是后期版本修复的对外契约，之前压测只覆盖 chat 流式，导致
     “服务端不遵守 max_tokens”的旧结论在报告里多活了一轮。
     """
     header("A4. completions streaming + finish_reason=length")
 
     # 1) max_tokens 触顶必须报 length，而不是 stop/静默超发
     status, body, elapsed, usage = board.call(
-        payload={"messages": [{"role": "user", "content": "写一段介绍 RK3588 的文字"}],
+        payload={"messages": [{"role": "user", "content": "写一段介绍本地推理的文字"}],
                  "max_tokens": 4}, timeout=180)
     finish = None
     if status == 200:
@@ -532,7 +532,7 @@ def limits(board, context_len, quick):
     每个用例后做存活探测；一旦服务不可用，立即返回并指明肇事用例。
     """
     header("E. limit conditions (least -> most hostile)")
-    budget = (context_len or 4096) * 3   # 服务端守卫按 3 字节/token 估算
+    budget = (context_len or 0) * 3   # 服务端守卫按 3 字节/token 估算
                                          # （cli/rkllm.py: estimated_tokens = (bytes+2)//3；8 是已废弃的旧版值）
     note("E", "advertised guard", "context %s tokens, %s byte budget" % (context_len, budget))
 
@@ -637,10 +637,10 @@ def main():
     """命令行入口：解析参数、按段执行、落盘 JSON。"""
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--host", default=os.environ.get("RKLLM_HOST", "192.0.2.10:8080"),
-                        help="host:port（可用环境变量 RKLLM_HOST 覆盖）")
-    parser.add_argument("--key", default=os.environ.get("RKLLM_KEY") or os.environ.get("RKLLM_API_KEY", ""),
-                        help="API key（环境变量 RKLLM_KEY 或 RKLLM_API_KEY）")
+    parser.add_argument("--host", default=default_host(),
+                        help="host:port（环境变量 > 连接器 mcp.toml）")
+    parser.add_argument("--key", default=default_key(),
+                        help="API key（环境变量 > 连接器 mcp.toml）")
     parser.add_argument("--quick", action="store_true", help="快速模式：减少请求轮数")
     parser.add_argument("--skip-limits", action="store_true",
                         help="跳过 E 段（该段可能把服务压垮）")
@@ -650,8 +650,9 @@ def main():
                         help="并发段每个档位的请求总数")
     parser.add_argument("--concurrency-tokens", type=int, default=32,
                         help="并发段单请求 max_tokens")
-    parser.add_argument("--context-len", type=int, default=4096,
-                        help="服务声明的上下文窗口（token），用于超长 prompt 守卫探测")
+    parser.add_argument("--context-len", type=int, default=None,
+                        help="上下文窗口（token）；默认从板端 /health 自动读取，"
+                             "读不到才需显式指定")
     parser.add_argument("--outdir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                          "results"),
                         help="结果 JSON 输出目录")
@@ -667,6 +668,13 @@ def main():
         print("cannot use http://%s : %s"
               % (args.host, board.last_health_problem or "no response from /health"))
         return 1
+    # 上下文窗口由板端自报；不写死任何型号的默认值。
+    if args.context_len is None:
+        args.context_len = info.get("context_len")
+        if not args.context_len:
+            print("板端未声明 context_len，请用 --context-len 显式指定")
+            return 1
+        print("context_len from /health : %s" % args.context_len)
 
     print("target   : http://%s" % args.host)
     print("model    : %s" % info.get("model"))
@@ -700,6 +708,7 @@ def main():
     summary = {
         "target": build_base(args.host),
         "model": info.get("model"),
+        "meta": fetch_server_meta(build_base(args.host), args.key),
         "mode": "quick" if args.quick else "full",
         "started_at": started_at,
         "elapsed_s": round(elapsed, 1),

@@ -31,7 +31,7 @@ import os
 import subprocess
 import sys
 import time
-from board_api import build_base, wait_ready   # 共享 HTTP 层
+from board_api import build_base, default_host, default_key, wait_ready  # 共享 HTTP 层
 
 # 强制 UTF-8 输出
 try:
@@ -69,8 +69,8 @@ def run_step(title, script, extra_args=None, timeout=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--host", default=os.environ.get("RKLLM_HOST"))
-    parser.add_argument("--key", default=os.environ.get("RKLLM_KEY") or os.environ.get("RKLLM_API_KEY", ""))
+    parser.add_argument("--host", default=default_host())
+    parser.add_argument("--key", default=default_key())
     parser.add_argument("--quick", action="store_true", help="快速模式（传给压测/仿真）")
     parser.add_argument("--skip-stress", action="store_true", help="跳过压力测试")
     parser.add_argument("--skip-simulate", action="store_true", help="跳过仿真测试")

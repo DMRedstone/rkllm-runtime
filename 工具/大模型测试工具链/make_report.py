@@ -19,6 +19,30 @@ import argparse
 import glob
 
 from board_api import newest   # 与 export_csv 共用同一实现
+
+
+def redact(value):
+    """内网地址 -> RFC5737 文档段（报告产物不泄露真实拓扑）。"""
+    s = str(value or "-")
+
+    def _repl(m):
+        octets = [int(x) for x in m.group(0).split(".")]
+        a, b = octets[0], octets[1]
+        if a == 10 or (a == 172 and 16 <= b <= 31) or (a == 192 and b == 168):
+            return "192.0.2.10"
+        return m.group(0)
+
+    return re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", _repl, s)
+
+
+def result_meta(*sources):
+    """从结果 JSON 里取采集时记录的板端元信息，不联网、不写死。"""
+    merged = {}
+    for src in sources:
+        m = (src or {}).get("meta") if isinstance(src, dict) else None
+        if isinstance(m, dict):
+            merged.update({k: v for k, v in m.items() if v not in (None, "")})
+    return merged
 import html
 import json
 import os
@@ -269,7 +293,7 @@ def derive(stress, sim, extra, crash):
     """把结果 JSON 算成结论；报告里不再出现写死的判断。
 
     这里曾经直接写死摘要与建议（"无背压""max_tokens 不被遵守""发生过一次崩溃"）。
-    1.3.1-14 把前两条修掉之后，同一个生成器产出的报告仍然在说那三句话——结论与
+    后续版本把前两条修掉之后，同一个生成器产出的报告仍然在说那三句话——结论与
     数据对不上，比没有报告更糟。现在每一句结论都必须能从 results/*.json 算出来，
     算不出来的一律不写。
     """
@@ -414,12 +438,17 @@ def derive(stress, sim, extra, crash):
     if top.get("res"):
         findings.append(("低", "常驻内存 %s / 8G（%s%%）" % (top.get("res"), top.get("mem_pct")),
                          "内存余量有限", "监控内存，避免同机部署其他大内存服务"))
-    findings.append(("中", "上下文窗口仅 4096 tokens",
-                     "多轮长对话很快触顶被拒",
-                     "权衡量化档位；或缩短历史/摘要压缩"))
-    findings.append(("中", "参数不校验（max_tokens=0/-1、temperature=-1、top_p=2.0 均返回 200）",
-                     "非法参数被静默接受，行为不确定",
-                     "服务端加参数范围校验，非法值返回 400"))
+    # 上下文窗口与参数校验结论必须由实测数据推导；没有对应结果就不写。
+    ctx = result_meta(stress, sim, crash).get("context_len")
+    if ctx and out["paste_fail"]:
+        findings.append(("中", "上下文窗口 %s tokens，长文档粘贴被拒" % ctx,
+                         "超长输入会返回 400",
+                         "客户端控制输入长度或分块处理"))
+    invalid = (extra or {}).get("invalid_params")
+    if invalid:
+        findings.append(("中", "参数校验：%s" % invalid,
+                         "非法参数的处理方式见实测记录",
+                         "客户端在上送前自行校验取值范围"))
 
     out["summary"] = summary
     out["findings"] = findings
@@ -438,7 +467,7 @@ def build_html(stress, sim, extra, generated, crash=None):
     parts = []
     parts.append("<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>")
     parts.append("<meta name='viewport' content='width=device-width,initial-scale=1'>")
-    parts.append("<title>Qwen3.5-4B 板端服务性能测试报告</title>")
+    parts.append("<title>板端推理服务 · 性能与稳定性测试数据</title>")
     # 内联样式：浅色主题，卡片 / 表格 / 提示框统一风格
     parts.append("""<style>
 :root{--ink:#0f172a;--muted:#64748b;--line:#e2e8f0;--bg:#f8fafc;--card:#fff;--blue:#2563eb;--green:#16a34a;--red:#dc2626;--amber:#d97706}
@@ -467,14 +496,14 @@ ul{padding-left:22px}li{margin:4px 0}
 .chart{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin:14px 0}
 footer{color:var(--muted);font-size:12.5px;margin-top:40px;border-top:1px solid var(--line);padding-top:14px}
 </style></head><body><div class='wrap'>""")
-    parts.append("<h1>Qwen3.5-4B 板端推理服务 · 性能与稳定性测试报告</h1>")
+    parts.append("<h1>板端推理服务 · 性能与稳定性测试数据</h1>")
+    meta = result_meta(stress, sim, crash, extra)
     target = (stress or sim or {}).get("target", "-")
-    model = (stress or {}).get("model") or (sim or {}).get("model") or "-"
-    parts.append("<p class='sub'>目标 <code>%s</code> · 模型 <code>%s</code> · 生成时间 %s</p>"
-                 % (esc(target), esc(model), esc(generated)))
-    if derived["release"]:
-        parts.append("<p class='sub'>被测版本 <code>rkllm-runtime %s</code></p>"
-                     % esc(derived["release"]))
+    model = meta.get("model") or (stress or {}).get("model") or (sim or {}).get("model") or "-"
+    version = meta.get("version") or derived["release"] or "-"
+    ctx = meta.get("context_len") or "-"
+    parts.append("<p class='sub'>目标 <code>%s</code> · 模型 <code>%s</code> · 版本 <code>%s</code> · 上下文 <code>%s</code> · 生成时间 %s</p>"
+                 % (esc(redact(target)), esc(model), esc(version), esc(ctx), esc(generated)))
 
     # 顶部关键指标卡片
     b_points = []
@@ -596,7 +625,7 @@ footer{color:var(--muted);font-size:12.5px;margin-top:40px;border-top:1px solid 
     # 内容形态（A2 一致性 / A3 归属 / A5 输出形态）
     parts += shape_html(stress)
 
-    # max_tokens 行为（曾经是缺陷，1.3.1-14 起按上限截断）
+    # max_tokens 行为（曾经是缺陷，后续版本起按上限截断）
     if derived["mt_rows"]:
         mt = derived["mt_rows"]
         if derived["mt_ok"]:
@@ -649,15 +678,15 @@ footer{color:var(--muted);font-size:12.5px;margin-top:40px;border-top:1px solid 
 def build_markdown(stress, sim, extra, generated, crash=None):
     """构建 Markdown 版说明报告。"""
     derived = derive(stress, sim, extra, crash)
-    lines = ["# Qwen3.5-4B 板端推理服务 · 性能与稳定性测试报告", ""]
+    lines = ["# 板端推理服务 · 性能与稳定性测试数据", ""]
+    meta = result_meta(stress, sim, crash, extra)
     target = (stress or sim or {}).get("target", "-")
-    model = (stress or {}).get("model") or (sim or {}).get("model") or "-"
-    dev = (extra or {}).get("device", {})
-    lines += ["- 目标：`%s`" % target, "- 模型：`%s`" % model,
-              "- 开发板：%s（%s / %sGB）" % (dev.get("board", "-"), dev.get("soc", "-"),
-                                            dev.get("ram_gb", "-"))]
-    if derived["release"]:
-        lines.append("- 被测版本：`rkllm-runtime %s`" % derived["release"])
+    model = meta.get("model") or (stress or {}).get("model") or (sim or {}).get("model") or "-"
+    version = meta.get("version") or derived["release"] or "-"
+    lines += ["- 目标：`%s`" % redact(target), "- 模型：`%s`" % model,
+              "- 版本：`%s`" % version,
+              "- 上下文窗口：`%s`" % (meta.get("context_len") or "-"),
+              "- NPU：`%s`" % (meta.get("npu") or "-")]
     lines += ["- 生成时间：%s" % generated, ""]
 
     lines += ["## 执行摘要", ""]

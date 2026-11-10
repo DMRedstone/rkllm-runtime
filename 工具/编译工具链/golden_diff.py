@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """golden_diff.py — 新栈 golden 基线（S6「golden 全绿」工具）。
 
-背景：1.3.1-16 起旧单文件 `cli/rkllm.py` 已从仓库删除，golden 不再做
+背景：后续版本起旧单文件 `cli/rkllm.py` 已从仓库删除，golden 不再做
 “旧栈 vs 新栈”对照，改为“新栈 vs 已录基线”的回归检测：
 
     python golden_diff.py --save tests/golden_baseline.json   # 录基线
@@ -76,7 +76,7 @@ def wait_up(port: int, deadline_s: float = 60) -> None:
 
 
 def start_new(port: int) -> subprocess.Popen:
-    # 1.3.1-16 的假引擎开关沿用旧名 --fake-engine；`--engine fake` 是早期草案。
+    # 假引擎开关沿用旧名 --fake-engine；`--engine fake` 是早期草案。
     return subprocess.Popen(
         [sys.executable, "-m", "rkllm.cli", "serve", "fake", "--fake-engine",
          "--host", "127.0.0.1", "--port", str(port)],

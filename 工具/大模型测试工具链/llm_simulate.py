@@ -42,7 +42,7 @@ import time
 import urllib.error
 import urllib.request
 
-from board_api import auth_headers, build_base, join_url   # 共享 HTTP 层
+from board_api import auth_headers, build_base, default_host, default_key, fetch_server_meta, join_url  # 共享 HTTP 层
 
 # 强制 UTF-8 输出，避免 Windows 控制台中文乱码
 try:
@@ -324,8 +324,8 @@ def long_paste(client, sizes):
     """
     step("4", "用户粘贴长文档（真实客户端最容易出事的场景）")
     paragraph = ("在嵌入式设备上部署大语言模型需要考虑内存占用、NPU 算力、量化精度"
-                 "以及散热等多方面因素。本设备为 OrangePi 5 Plus，采用 RK3588 芯片，"
-                 "配备 8GB 内存与三核 NPU。 ")
+                 "以及散热等多方面因素。本设备为一块嵌入式开发板，配备 NPU 加速单元"
+                 "与有限内存，部署时需权衡功耗与散热。 ")
     rejected = []
     for size in sizes:
         document = (paragraph * (size // len(paragraph) + 1))[:size]
@@ -494,10 +494,10 @@ def main():
     """命令行入口：按顺序跑各场景，记录时间线并落盘。"""
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--host", default=os.environ.get("RKLLM_HOST", "192.0.2.10:8080"),
-                        help="host:port（可用 RKLLM_HOST 覆盖）")
-    parser.add_argument("--key", default=os.environ.get("RKLLM_KEY") or os.environ.get("RKLLM_API_KEY", ""),
-                        help="API key（可用 RKLLM_KEY 覆盖）")
+    parser.add_argument("--host", default=default_host(),
+                        help="host:port（环境变量 > 连接器 mcp.toml）")
+    parser.add_argument("--key", default=default_key(),
+                        help="API key（环境变量 > 连接器 mcp.toml）")
     parser.add_argument("--paste-sizes", default="800,3000,8000,16000",
                         help="长文档场景的字符数，逗号分隔")
     parser.add_argument("--vu", type=int, default=3, help="混合负载的虚拟用户数")
@@ -566,6 +566,7 @@ def main():
     final = {
         "target": build_base(args.host),
         "model": info["model"] if info else None,
+        "meta": fetch_server_meta(build_base(args.host), args.key),
         "alive_at_end": STATE["alive"],
         "died_at": STATE["died_at"],
         "elapsed_s": round(time.time() - started_at, 1),

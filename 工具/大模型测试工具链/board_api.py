@@ -24,7 +24,7 @@
   这么回），只有连不上或非 2xx 才算不可用；
 * `ask()` 在正文为空且没有任何 token 计数时报错，而不是静默返回空串；
 * `model` 只在调用方显式给出时才写进请求体（rkllm 忽略它，vLLM 用它路由，
-  硬编码一个 RK3588 的模型名会让 vLLM 直接 404）。
+  硬编码某个具体型号会让 vLLM 直接 404）。
 """
 
 from __future__ import annotations
@@ -42,6 +42,83 @@ HEALTH_TIMEOUT = 10.0
 
 # 只读 GET 时带上的头；POST 另外加 Content-Type
 _BASE_HEADERS = {"Accept": "application/json"}
+
+
+# ---------------------------------------------------------------------------
+# 连接器配置复用：测试工具链可直接读 rkllm-mcp 安装目录的 mcp.toml
+# ---------------------------------------------------------------------------
+
+def connector_config_path():
+    """配置文件位置：RKLLM_MCP_CONFIG 优先，其次连接器安装目录默认路径。"""
+    explicit = os.environ.get("RKLLM_MCP_CONFIG")
+    if explicit:
+        return explicit
+    return os.path.join(os.path.expanduser("~"), ".workbuddy", "mcp-servers",
+                        "rkllm-mcp", "mcp.toml")
+
+
+def load_connector_config():
+    """读取 [mcp] 段。缺文件/解析失败时返回空 dict，由调用方回退显式参数。
+
+    key 只在进程内存里使用，不打印、不写日志、不入库。
+    """
+    try:
+        import tomllib
+        with open(connector_config_path(), "rb") as fh:
+            return dict(tomllib.load(fh).get("mcp") or {})
+    except (OSError, ValueError):
+        return {}
+
+
+def default_host():
+    """板端地址：RKLLM_HOST > 连接器 mcp.toml 的 target_endpoint > 空。
+
+    工具链用 host:port（或带 scheme 的完整 base），故去掉 /v1 之类的路径后缀；
+    scheme 必须保留，内网穿透只通 HTTPS 时丢掉会退化成明文。
+    """
+    env = os.environ.get("RKLLM_HOST")
+    if env:
+        return env
+    raw = str(load_connector_config().get("target_endpoint") or "").strip().rstrip("/")
+    if raw.lower().endswith("/v1"):
+        raw = raw[:-3].rstrip("/")
+    return raw
+
+
+def default_key():
+    """API key：RKLLM_KEY / RKLLM_API_KEY > 连接器 mcp.toml 的 target_api_key > 空。"""
+    env = os.environ.get("RKLLM_KEY") or os.environ.get("RKLLM_API_KEY")
+    if env:
+        return env
+    return str(load_connector_config().get("target_api_key") or "")
+
+
+def fetch_server_meta(base=None, key=None, timeout=8):
+    """从板端 /health 读取权威元信息（只读，失败返回空 dict）。
+
+    返回 model / version / context_len / model_class / npu 等；这些值由板端
+    运行时自报，客户端不写死任何型号、硬件或版本号。报告与结果 JSON 都从
+    这里取值，保证换模型 / 换板 / 升级后自动跟随。
+    """
+    base = build_base(base or default_host())
+    key = default_key() if key is None else key
+    status, body, _dt, _err = request(base, key, "/health", None, "GET", timeout)
+    if status != 200 or not body:
+        return {}
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    npu = data.get("npu") if isinstance(data.get("npu"), dict) else {}
+    return {
+        "model": data.get("model") or "",
+        "version": data.get("version") or "",
+        "context_len": data.get("context_len"),
+        "model_class": data.get("model_class") or "",
+        "npu": npu.get("detail") or "",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +254,7 @@ class Board(object):
         """单轮对话 → (status, text, elapsed, usage)。
 
         与旧 `Board.ask` 同签名。`model` 只在显式给出时写进请求体；不传就
-        让服务端用自己的默认——把某个 RK3588 量化模型名硬编码进去，接 vLLM
+        让服务端用自己的默认——把某个具体量化模型名硬编码进去，接 vLLM
         时会 404。
         """
         payload = {"messages": [{"role": "user", "content": content}],

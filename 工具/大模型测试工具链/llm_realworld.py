@@ -9,7 +9,7 @@ llm_realworld.py —— 真实公文场景测试（基于用户提供的 10 份�
 本脚本改用**真实公文**作为负载，回答三个更贴近落地的问题：
 
   1. 可行性：模型能否完成真实的公文任务（润色 / 摘要 / 扩写 / 审校 / 条目化改写）？
-  2. 边界：真实文档 1000~2100 字，而服务上下文仅 4096 token —— 整篇处理会不会溢出？
+  2. 边界：真实文档 1000~2100 字，整篇处理会不会溢出板端上下文窗口？
   3. 真实吞吐：按真实文档规模，处理一份要多久；并发时是否稳定。
 
 测试分组
@@ -37,7 +37,7 @@ import re
 import sys
 import threading
 import time
-from board_api import build_base, health_ok, post_chat, wait_ready   # 共享 HTTP 层
+from board_api import build_base, default_host, default_key, fetch_server_meta, health_ok, post_chat, wait_ready  # 共享 HTTP 层
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS_PATH = os.path.join(HERE, "corpus", "corpus.json")
@@ -344,8 +344,8 @@ def group_e(base, key, corpus, out_dir):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--host", default=os.environ.get("RKLLM_HOST", "192.0.2.10:8080"))
-    ap.add_argument("--key", default=os.environ.get("RKLLM_KEY") or os.environ.get("RKLLM_API_KEY", ""))
+    ap.add_argument("--host", default=default_host())
+    ap.add_argument("--key", default=default_key())
     ap.add_argument("--only", default="a,b,c,d,e", help="只跑指定组，逗号分隔")
     ap.add_argument("--concurrency", type=int, default=3, help="D 组并发数")
     args = ap.parse_args()
@@ -362,7 +362,8 @@ def main():
     corpus = load_corpus()
     groups = set(x.strip().lower() for x in args.only.split(","))
     result = {"target": base, "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
-              "corpus_size": len(corpus)}
+              "corpus_size": len(corpus),
+              "meta": fetch_server_meta(base, args.key)}
 
     if "a" in groups:
         print("\n########## A 组：串行真实任务 ##########", flush=True)

@@ -25,7 +25,7 @@ MCP 连接器是**客户端独立源码包**，在仓库根 `本地模型连接�
 #   的连字符形式 1.3.1-17 转成 PEP 440 点分形式 1.3.1.17）。
 import os
 
-DEFAULT_VERSION = "1.3.1-17"
+DEFAULT_VERSION = "1.3.1-18"
 
 VERSION = os.environ.get("RKLLM_RUNTIME_VERSION", DEFAULT_VERSION)
 __version__ = VERSION.replace("-", ".", 1)

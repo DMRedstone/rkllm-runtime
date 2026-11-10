@@ -28,7 +28,7 @@ import os
 import sys
 import threading
 import time
-from board_api import build_base, health_ok, req, wait_ready   # 共享 HTTP 层
+from board_api import build_base, default_host, default_key, fetch_server_meta, health_ok, req, wait_ready  # 共享 HTTP 层
 
 # 强制 UTF-8 输出
 try:
@@ -45,9 +45,9 @@ TITLE_SYSTEM = (
 # 一段多轮会话历史，用于构造「带历史的对话请求」
 HISTORY = [
     {"role": "user", "content": "你好，请简单介绍一下你自己。"},
-    {"role": "assistant", "content": "你好！我是 Qwen3.5，一个本地部署的语言模型。"},
-    {"role": "user", "content": "刚才你说的是什么模型？"},
-    {"role": "assistant", "content": "我是 Qwen3.5-4B，运行在 RK3588 NPU 上。"},
+    {"role": "assistant", "content": "你好！我是一个本地部署的语言模型助手。"},
+    {"role": "user", "content": "刚才你说的是什么？"},
+    {"role": "assistant", "content": "我是一个本地部署的语言模型助手。"},
     {"role": "user", "content": "帮我把「今天天气不错」翻译成英文。"},
     {"role": "assistant", "content": "The weather is nice today."},
     {"role": "user", "content": "再把它翻译成日文。"},
@@ -114,10 +114,10 @@ def main():
     """命令行入口：逐个场景做并发崩溃复现实验。"""
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--host", default=os.environ.get("RKLLM_HOST", "192.0.2.10:8080"),
-                        help="host:port（可用 RKLLM_HOST 覆盖）")
-    parser.add_argument("--key", default=os.environ.get("RKLLM_KEY") or os.environ.get("RKLLM_API_KEY", ""),
-                        help="API key（可用 RKLLM_KEY 覆盖）")
+    parser.add_argument("--host", default=default_host(),
+                        help="host:port（环境变量 > 连接器 mcp.toml）")
+    parser.add_argument("--key", default=default_key(),
+                        help="API key（环境变量 > 连接器 mcp.toml）")
     parser.add_argument("--repeat", type=int, default=3, help="每个场景的重复次数")
     parser.add_argument("--outdir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                          "results"),
@@ -163,7 +163,9 @@ def main():
 
     out = os.path.join(args.outdir, "crashprobe_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
     with open(out, "w", encoding="utf-8") as fh:
-        json.dump({"target": base, "repeat": rep, "scenarios": RESULTS}, fh,
+        json.dump({"target": base, "repeat": rep,
+                   "meta": fetch_server_meta(base, args.key),
+                   "scenarios": RESULTS}, fh,
                   ensure_ascii=False, indent=2)
     print("\n结果写入 %s" % out)
     crashed = ["%s(%d/%d)" % (r["scenario"], r["crashes"], r["repeat"])
