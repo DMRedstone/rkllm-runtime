@@ -1,5 +1,9 @@
 rkllm-runtime (@VERSION@) unstable; urgency=medium
 
+  [ 1.3.1-19 待办遗留代码修复 ]
+  * 服务端/连接器/工具链按待办修复：C-H1（/reset、/capabilities 根别名，取消兜底不再 404 静默）、C-H2（job 超时上限 1800→4200）、M-1..M-12（错误语义、Retry-After、method 校验、取消 isError、completed 非 dict、心跳留痕、backend/tools 接线、OpenAI 形状 404、NaN 文案、unwired_reason 守卫）与低危清理。
+  * 未知路径返回 OpenAI 形状 404；extract 空 text 校验；空 meta 不再计缓存命中。
+
   [ 1.3.1-18 synced remote main and repackaged ]
   * MCP connector: extract job start and polling preserve structuredContent;
     failed jobs preserve isError, fixing MCP -32600.

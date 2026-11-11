@@ -136,8 +136,12 @@ class Dispatcher:
             return self._error(None, INVALID_REQUEST, "request must be an object")
         method = msg.get("method")
         msg_id = msg.get("id")
-        if not method:
+        if method is None or method == "":
             return None                        # 对我们响应的回复：忽略
+        if not isinstance(method, str):
+            # M-3：非字符串 method 属无效请求（-32600），不能让它 startswith 抛
+            # AttributeError 逃逸成 -32603，也不能被当普通回复静默忽略。
+            return self._error(msg_id, INVALID_REQUEST, "method must be a string")
         if method.startswith("notifications/"):
             handler = self._handlers.get(method)
             if handler:

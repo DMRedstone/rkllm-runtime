@@ -292,6 +292,20 @@ def test_unknown_root_path_still_404(client):
     assert client.get("/models/extra/deep").status_code == 404
 
 
+def test_reset_alias_without_v1_prefix(client):
+    """C-H1：取消兜底打 /reset（无 /v1）也必须可达，不得落框架 404。"""
+    r = client.post("/reset", json={})
+    assert r.status_code == 200
+    assert r.json().get("reset") is True
+
+
+def test_capabilities_alias_without_v1_prefix(client):
+    """C-H1：/capabilities（无 /v1）等价 /v1/capabilities。"""
+    r = client.get("/capabilities")
+    assert r.status_code == 200
+    assert "endpoints" in r.json()
+
+
 def test_root_alias_does_not_break_auth_exemption():
     """/ready 豁免鉴权，根路径别名不得把它也改写。"""
     cfg = load_config(env={"RKLLM_API_KEY": "secret"})

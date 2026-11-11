@@ -150,7 +150,9 @@ class PromptCache:
         prefix = common_prefix_len(prompt, meta)
         if meta_bytes:
             self.last_similarity = prefix / meta_bytes
-        if prefix >= meta_bytes:
+        # 空 meta 不算命中：meta_bytes=0 时 prefix(0)>=0 恒成立，会把「首次
+        # 写入/缓存被清空」误计为 hit，污染命中率统计。
+        if meta_bytes and prefix >= meta_bytes:
             self.hits += 1
             self._write_stats()
             return self.cache_path, 0

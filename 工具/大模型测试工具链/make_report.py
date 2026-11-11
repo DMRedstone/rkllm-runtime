@@ -402,10 +402,10 @@ def derive(stress, sim, extra, crash):
     findings = []
     if out["backpressure"]:
         findings.append(("中",
-                         "过载时快速拒绝：%d/%d 请求收到 503（Retry-After=5）" %
+                         "过载时快速拒绝：%d/%d 请求收到 503（带 Retry-After）" %
                          (out["shed"], out["shed"] + out["accepted"]),
                          "被拒请求不排队，客户端需自行重试",
-                         "客户端实现退避重试；网关按 QPS≈1 限流"))
+                         "客户端实现退避重试；网关按实测 QPS 限流"))
     elif out["accepted"]:
         findings.append(("高", "无背压限流：并发请求全部排队",
                          "高峰时客户端长时间挂起直至超时",
@@ -436,7 +436,7 @@ def derive(stress, sim, extra, crash):
                          "按 QPS≈%.1f 规划容量；多设备横向扩展" % (out["qps_max"] or 0)))
     top = (extra or {}).get("board_top") or {}
     if top.get("res"):
-        findings.append(("低", "常驻内存 %s / 8G（%s%%）" % (top.get("res"), top.get("mem_pct")),
+        findings.append(("低", "常驻内存 %s（占 %s%%）" % (top.get("res"), top.get("mem_pct")),
                          "内存余量有限", "监控内存，避免同机部署其他大内存服务"))
     # 上下文窗口与参数校验结论必须由实测数据推导；没有对应结果就不写。
     ctx = result_meta(stress, sim, crash).get("context_len")
@@ -656,8 +656,10 @@ footer{color:var(--muted);font-size:12.5px;margin-top:40px;border-top:1px solid 
             ["是否复现", ("已复现" if ce.get("reproduced") else "未复现") + "（%s 次并发组合实验）" % ce.get("attempts")],
             ["备注", ce.get("note")],
         ]))
-        parts.append("<div class='note'>该崩溃在后续 15 次针对性并发实验中<b>未能复现</b>，"
-                     "判定为<b>低概率偶发</b>。鉴于板端有守护进程可自动拉起（&lt;30s 恢复），"
+        _attempts = ce.get("attempts")
+        _att = ("%s 次针对性并发实验" % _attempts) if _attempts else "针对性并发实验"
+        parts.append("<div class='note'>该崩溃在后续" + _att + "<b>未能复现</b>，"
+                     "判定为<b>低概率偶发</b>。鉴于板端有守护进程可自动拉起，"
                      "风险可控，但生产环境应加监控与请求重试。</div>")
 
     # 发现与建议（由 derive() 按数据条件生成，不再写死）

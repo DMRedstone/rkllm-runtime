@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import socket
 import threading
 import urllib.error
@@ -18,6 +19,8 @@ import urllib.request
 from typing import Callable
 
 __all__ = ["HttpBackend", "BackendError"]
+
+_log = logging.getLogger("rkllm.mcp.backend")
 
 # 取消轮询粒度：长 prefill 期间板端不产出 chunk，主循环的检查点进不来，
 # 由看门狗线程按这个间隔检查（P2：取消原先只在收到 chunk 后生效）。
@@ -130,9 +133,15 @@ class HttpBackend:
             self._drop_connection()   # 错误响应后连接状态不确定，不复用
             if resp.status == 503:
                 retry = resp.getheader("Retry-After")
+                retry_s = None
+                if retry:
+                    try:
+                        retry_s = int(retry)
+                    except (TypeError, ValueError):
+                        # M-2：HTTP-date 或非法值不应把「忙可重试」变成 -32603
+                        retry_s = None
                 raise BackendError("模型忙：" + detail[:200],
-                                   retry_after_s=int(retry) if retry else None,
-                                   kind="busy")
+                                   retry_after_s=retry_s, kind="busy")
             raise BackendError("板端 HTTP %d：%s"
                                % (resp.status, detail[:200]))
 
@@ -264,8 +273,11 @@ class HttpBackend:
                         if self.api_key else {})})
         try:
             urllib.request.urlopen(req_abort, timeout=5)
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            # C-H1：abort 兜底的 /reset 失败不得静默——否则取消后板端继续空跑
+            # NPU 而无任何迹证。保留原语义（不重试、不向主流程抛出），但留痕。
+            _log.warning("abort /reset failed (endpoint=%s, path=/reset): %r",
+                         self.endpoint, exc)
 
     def status(self) -> dict:
         """板端健康摘要（local_llm_status 用）。
@@ -282,5 +294,36 @@ class HttpBackend:
                     urllib.request.Request(url, headers=headers),
                     timeout=10) as resp:
                 return json.loads(resp.read().decode("utf-8"))
-        except (OSError, ValueError):
-            return {"state": "unreachable"}
+        except urllib.error.HTTPError as exc:
+            # M-1：区分 HTTP 层失败，别把 401/404/503 折叠成 unreachable
+            return {"state": "unreachable", "error_kind": "http",
+                    "http_status": exc.code, "detail": str(exc.reason)[:200]}
+        except urllib.error.URLError as exc:
+            return {"state": "unreachable", "error_kind": "connect",
+                    "detail": str(exc.reason)[:200]}
+        except ValueError as exc:          # 非 JSON / 解析失败
+            return {"state": "unreachable", "error_kind": "bad_json",
+                    "detail": str(exc)[:200]}
+        except OSError as exc:
+            return {"state": "unreachable", "error_kind": "os",
+                    "detail": str(exc)[:200]}
+
+
+class LocalBackend:
+    """板端进程内后端（backend=local）。
+
+    连接器以客户端源码交付，没有板端 worker 可进程内直调；本类仅用于
+    「按配置选择后端」——选 local 时给出一致、可诊断的错误，而不是静默
+    退回 http，也不假装成功。
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def _unavailable(self, *args, **kwargs):
+        raise BackendError(
+            "backend=local 仅板端进程可用；客户端连接器请用 backend=http/auto",
+            kind="config")
+
+    chat = _unavailable
+    status = _unavailable

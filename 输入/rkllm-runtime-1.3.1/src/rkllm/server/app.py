@@ -98,6 +98,7 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
         _ROOT_ALIASES = frozenset({
             "/models", "/chat/completions", "/completions",
             "/responses", "/embeddings", "/moderations",
+            "/reset", "/capabilities",
         })
 
         async def root_alias(request: Request, call_next):
@@ -180,6 +181,19 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
             def _metrics(request: Request):
                 return PlainTextResponse(_render_metrics(request),
                                          media_type="text/plain; version=0.0.4")
+
+    from starlette.exceptions import HTTPException as _StarletteHTTPException
+
+    @app.exception_handler(_StarletteHTTPException)
+    async def http_error(request: Request, exc: _StarletteHTTPException):
+        # M-9：未知路径/HTTP 错误不再落框架 {"detail": ...}，统一成 OpenAI 形状。
+        # 仅 404 改为 error 对象（其余状态码保持 {"detail": ...} 以免影响既有契约）。
+        if exc.status_code == 404:
+            return JSONResponse({"error": {"type": "invalid_request_error",
+                                           "message": "未知端点：%s" % request.url.path}},
+                                status_code=404)
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code,
+                            headers=getattr(exc, "headers", None))
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception):

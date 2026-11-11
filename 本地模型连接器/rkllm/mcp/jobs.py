@@ -21,7 +21,7 @@ __all__ = ["JobTable", "estimate_seconds", "sync_token_cap", "job_timeout_s",
 MIN_SYNC_TOKENS = 8
 
 # 解码速度（tok/s）：设计 §5.3 给的是 8 / 5 / 2，2026-10-21 真机校准后下调——
-# OrangePi 5 Plus / qwen3.5-4b W8A8 实测 45 token / 9.3 s ≈ 4.8 tok/s（单发），
+# 真机实测（4B W8A8 档）45 token / 9.3 s ≈ 4.8 tok/s（单发，型号以板端为准），
 # 长文批量时更低。按 8 tok/s 估算会把 300 token 的请求算成 38.7 s（< 45 阈值）
 # 而同步执行，实际却要 80 s，直接撞上客户端 60 s 硬超时——这是把长任务判错的
 # 方向性错误，因此以实测值下压，宁可多转 job 也不让客户端超时。
@@ -31,7 +31,7 @@ PREFILL_TOK_S = 50
 
 def estimate_seconds(model_class: str, prefill_tokens: int,
                      max_tokens: int) -> float:
-    decode = DECODE_TOK_S.get(model_class, 5)
+    decode = DECODE_TOK_S.get(model_class, 3.5)   # 未知档位按保守值估，宁多转 job
     return prefill_tokens / PREFILL_TOK_S + max_tokens / decode
 
 
@@ -44,7 +44,7 @@ def sync_token_cap(model_class: str, prefill_tokens: int,
     很大"而把短任务误判成 job，也不会让同步调用真的跑过客户端 60 s 硬超时。
     被夹断时后端会返回 finish_reason=length，工具层会给出明确提示。
     """
-    decode = DECODE_TOK_S.get(model_class, 5)
+    decode = DECODE_TOK_S.get(model_class, 3.5)   # 未知档位按保守值估，宁多转 job
     room_s = float(threshold_s) - prefill_tokens / PREFILL_TOK_S - 1.0
     return max(MIN_SYNC_TOKENS, int(room_s * decode))
 

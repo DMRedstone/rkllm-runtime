@@ -353,8 +353,12 @@ class Supervisor:
                                 pass
                         if self._client is not None:
                             self._client.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # M-6：心跳循环内的次级失败不能静默——留日志并计数，
+                    # 让「NPU 卡死但杀进程失败」与「一切正常」可区分。
+                    log.warning("health loop error: %r", exc)
+                    self.metrics["health_loop_errors_total"] = \
+                        self.metrics.get("health_loop_errors_total", 0) + 1
 
         self._health_thread = threading.Thread(
             target=_loop, daemon=True, name="rkllm-health")

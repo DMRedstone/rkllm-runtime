@@ -54,9 +54,17 @@ def _has_reader(key, whole: str, scoped: str) -> bool:
                    + r"[^)]*[\"']" + re.escape(key.name) + r"[\"']")
     if re.search(getattr_pat, whole):
         return True
-    # 扁平读取（连接器）：只在所属目录范围内算
+    # 连接器侧读取：只认真正的取值/条目形态，避免被模块名（backend / tools
+    # 等）的普通字符串命中而误判为“有读取点”（M-12 假阳性）。
     if key.section == "mcp":
-        return bool(re.search(r"[\"']" + re.escape(key.name) + r"[\"']", scoped))
+        n = re.escape(key.name)
+        patterns = (
+            r"cfg\[\s*[\"']" + n + r"[\"']\s*\]",          # cfg["x"]
+            r"cfg\.get\(\s*[\"']" + n + r"[\"']",          # cfg.get("x")
+            r"[\w.]+\.get\(\s*[\"']" + n + r"[\"']",      # section.get("x")
+            r"[\"']" + n + r"[\"']\s*:",                    # default_cfg 条目 "x": ...
+        )
+        return any(re.search(p, scoped) for p in patterns)
     return False
 
 
@@ -73,8 +81,11 @@ def test_no_key_is_marked_implemented_while_unwired():
     queue.max_concurrent 是唯一例外：单 NPU 恒夹紧为 1，配置值不生效，
     故诚实标注未接线（10-25 审计启用该机制）。新增其他未接线键必须改这里。
     """
-    unwired = [k.full for k in SCHEMA if not k.implemented]
-    assert unwired == ["queue.max_concurrent"]
+    unwired = [k for k in SCHEMA if not k.implemented]
+    bad = [k.full for k in unwired if not k.unwired_reason.strip()]
+    assert bad == [], (
+        "implemented=False 的键必须带非空 unwired_reason（写明为何不接线）：%s"
+        % bad)
 
 
 def test_key_count_is_frozen():

@@ -40,6 +40,7 @@ class Key:
     choices: tuple = ()         # 枚举取值
     desc: str = ""
     implemented: bool = True    # False = schema 存在但运行时尚未接线（G5 诚实）
+    unwired_reason: str = ""     # implemented=False 时必填：为何不接线
 
     @property
     def full(self) -> str:
@@ -52,10 +53,11 @@ class Key:
 
 def _k(section: str, name: str, type_: type, default: Any, *,
        min_v: Any = None, max_v: Any = None, choices: tuple = (),
-       desc: str = "", implemented: bool = True) -> Key:
+       desc: str = "", implemented: bool = True,
+       unwired_reason: str = "") -> Key:
     return Key(section, name, type_, default,
                min_v=min_v, max_v=max_v, choices=choices, desc=desc,
-               implemented=implemented)
+               implemented=implemented, unwired_reason=unwired_reason)
 
 
 # 85 键全量 schema。分组顺序与《MCP 接入与配置设计》§7.2 一致。
@@ -128,7 +130,8 @@ SCHEMA: tuple[Key, ...] = (
     # 为 1——单 NPU 单引擎串行，>1 只会有害无益。值与行为无关，故诚实标注
     # 「未接线」，config show/docs 会带 [未接线] 标记。
     _k("queue", "max_concurrent", int, 1, min_v=1, max_v=1,
-       desc="并发上限；单 NPU 恒为 1（配置值不生效）", implemented=False),
+       desc="并发上限；单 NPU 恒为 1（配置值不生效）", implemented=False,
+       unwired_reason="单 NPU 单引擎恒夹紧为 1，配置值不生效；保留旧配置落点"),
     # -- openai（9）---------------------------------------------------------
     _k("openai", "param_policy", str, "warn", choices=("warn", "reject"),
        desc="不支持参数的处理策略（语义关键项恒为 reject）"),

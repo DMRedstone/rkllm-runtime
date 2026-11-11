@@ -126,7 +126,7 @@ def run_blocking_checked(svc, raw: dict, max_tokens: int,
              "上一次输出不符合 JSON Schema：%s\n请只输出符合该 Schema 的 JSON，"
              "不要包含解释或代码块标记。" % "；".join(last_errors[:5])},
         ]
-    raise SchemaError("；".join(last_errors[:5]) or "unknown")
+    raise SchemaError("；".join(last_errors[:5]) or "JSON Schema 校验未通过（无具体错误）")
 
 
 class StreamTimer:

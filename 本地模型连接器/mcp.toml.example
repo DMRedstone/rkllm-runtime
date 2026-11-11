@@ -28,7 +28,7 @@ task_threshold_s = 45
 # 慢模型（如板端 27B / large 档 1.5 tok/s）的 512 token 估算约 341 s，
 # 旧的固定 120 s 会必失败；job 现在自动放宽到约 541 s。
 job_timeout_factor = 1.5
-job_timeout_max_s = 1800
+job_timeout_max_s = 4200
 
 # --- 估算 / 输入预算 -------------------------------------------------------
 # job 判定用的"预期生成 token"上限：未显式传 max_tokens 时按它估算，

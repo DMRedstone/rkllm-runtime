@@ -471,6 +471,8 @@ def build_handlers(backend, cfg: dict, jobs, *,
         if not isinstance(params, dict):
             _invalid("arguments 必须是对象")
         text = str(params.get("text") or "")
+        if not text.strip():
+            _invalid("text 不能为空")
         schema = params.get("schema")
         if not isinstance(schema, dict):
             _invalid("schema 必须是 JSON Schema 对象")

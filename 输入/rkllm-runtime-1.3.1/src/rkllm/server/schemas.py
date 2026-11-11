@@ -38,6 +38,19 @@ class _OpenAICompat:
     logprobs: bool | None = None
 
 
+def _reject_non_finite(v):
+    """float 入参：显式拒绝 NaN/Inf（M-10，避免只报模糊的边界错误）。"""
+    if v is None:
+        return v
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return v
+    if f != f or f in (float("inf"), float("-inf")):
+        raise ValueError("需为有限数值（不接受 NaN/Inf）")
+    return v
+
+
 class ChatCompletionRequest(_OpenAICompat, BaseModel):
     model: str = "rkllm"
     messages: list[dict]
@@ -70,6 +83,11 @@ class ChatCompletionRequest(_OpenAICompat, BaseModel):
                 raise ValueError("messages 元素必须含 role")
         return v
 
+    @field_validator("temperature", mode="before")
+    @classmethod
+    def _temperature_finite(cls, v):
+        return _reject_non_finite(v)
+
 
 class CompletionRequest(_OpenAICompat, BaseModel):
     model: str = "rkllm"
@@ -77,6 +95,11 @@ class CompletionRequest(_OpenAICompat, BaseModel):
     stream: bool = False
     max_tokens: int | None = Field(default=None, ge=1)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+
+    @field_validator("temperature", mode="before")
+    @classmethod
+    def _temperature_finite(cls, v):
+        return _reject_non_finite(v)
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
     stop: str | list[str] | None = None
 

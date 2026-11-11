@@ -20,7 +20,7 @@ import os
 import sys
 from pathlib import Path
 
-from .backend import BackendError, HttpBackend
+from .backend import BackendError, HttpBackend, LocalBackend
 from .stdio import StdioServer
 
 DEFAULT_PROTOCOL_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18",
@@ -43,6 +43,8 @@ def default_cfg(endpoint: str, api_key: str) -> dict:
         "enabled": True,                 # mcp.enabled：连接器总开关
         "transport": "stdio",            # mcp.transport：一期只支持 stdio
         "http_path": "/mcp",             # mcp.http_path：二期
+        "backend": "auto",               # auto/http=HTTP 后端；local=板端进程内
+        "tools": (),                     # 启用的工具（短名）；空=全部
         "allow_remote_origin": [],       # mcp.allow_remote_origin：二期
         "protocol_versions": list(DEFAULT_PROTOCOL_VERSIONS),
         "max_concurrent": 1,             # mcp.max_concurrent：在飞工具调用数
@@ -73,7 +75,7 @@ def default_cfg(endpoint: str, api_key: str) -> dict:
         # 同步调用的单次 HTTP 读超时；job 的读超时按估算自动放宽，见下。
         "target_timeout_s": 120,
         "job_timeout_factor": 1.5,       # job 读超时 = 估算×factor + 30 s
-        "job_timeout_max_s": 1800,       # job 读超时上限（慢模型长答）
+        "job_timeout_max_s": 4200,       # job 读超时上限（慢模型长答）
         "target_endpoint": endpoint,
         "target_api_key": api_key,
         # 内部字段（与 target_* 同值；键表用 target_* 命名）
@@ -149,8 +151,14 @@ def _coerce_cfg_types(cfg: dict) -> None:
 
 def build_server(cfg: dict | None = None) -> StdioServer:
     cfg = cfg or load_cfg()
-    backend = HttpBackend(cfg["endpoint"], cfg.get("api_key", ""),
-                          timeout_s=int(cfg.get("target_timeout_s", 120)))
+    kind = str(cfg.get("backend") or "auto").lower()
+    if kind == "local":
+        # 连接器作为客户端交付时没有板端 worker，local 后端无法直调；
+        # 按配置选择后端（而不是静默忽略），local 会给出可诊断错误。
+        backend = LocalBackend()
+    else:
+        backend = HttpBackend(cfg["endpoint"], cfg.get("api_key", ""),
+                              timeout_s=int(cfg.get("target_timeout_s", 120)))
     return StdioServer(backend, cfg,
                        model_class=os.environ.get("RKLLM_MODEL_CLASS", "small"))
 

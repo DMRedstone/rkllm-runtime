@@ -123,6 +123,13 @@ class StdioServer:
             note["params"]["total"] = total
         self._send(note)
 
+    def _tool_enabled(self, short: str) -> bool:
+        """mcp.tools：启用的工具（短名）；空=全部；status/job 控制工具恒可用。"""
+        enabled = self.cfg.get("tools") or ()
+        if not enabled:
+            return True
+        return short in ("status", "job") or short in set(enabled)
+
     # -- 方法注册 ------------------------------------------------------------
 
     def _build_dispatcher(self) -> Dispatcher:
@@ -137,7 +144,11 @@ class StdioServer:
                     "serverInfo": SERVER_INFO}
 
         def tools_list(params: dict) -> dict:
-            result = {"tools": tools_mod.tool_definitions(prefix)}
+            defs = [d for d in tools_mod.tool_definitions(prefix)
+                    if self._tool_enabled(
+                        d["name"][len(prefix):]
+                        if prefix and d["name"].startswith(prefix) else d["name"])]
+            result = {"tools": defs}
             if version == PROTOCOL_2026:
                 # 2026 列表结果必须带缓存元数据（设计 §1.1；工具表是静态的）。
                 # 元数据常量集中在 protocol.py，传输层不再写版本分支。
@@ -150,8 +161,11 @@ class StdioServer:
                     "protocolVersion": version,
                     "supportedVersions": list(disp.supported),
                     "capabilities": {"tools": {}},
-                    "tools": [t["name"] for t in
-                              tools_mod.tool_definitions(prefix)]}
+                    "tools": [t["name"] for t in tools_mod.tool_definitions(prefix)
+                              if self._tool_enabled(
+                                  t["name"][len(prefix):]
+                                  if prefix and t["name"].startswith(prefix)
+                                  else t["name"])]}
 
         def ping(params: dict) -> dict:
             return {}
@@ -192,6 +206,8 @@ class StdioServer:
             arguments = {}
         if not isinstance(arguments, dict):
             raise JsonRpcError(INVALID_PARAMS, "arguments 必须是对象")
+        if not self._tool_enabled(short):
+            raise JsonRpcError(INVALID_PARAMS, "tool 已禁用: %s" % name)
 
         if short == "job":
             return self._job_tool(arguments)
@@ -480,13 +496,22 @@ class StdioServer:
         # content[0].text 里塞一段 JSON，客户端会判定「有 output schema 却没有
         # structuredContent」并抛 -32600。同步路径本来就直通 handler 结果，
         # 这里只修 job 轮询这条旁路。
-        if job.state == "completed" and isinstance(job.result, dict):
-            payload = dict(job.result)
-            payload.setdefault("content", [{
-                "type": "text",
-                "text": json.dumps({**job.summary(), "result": job.result},
-                                   ensure_ascii=False)}])
-            return payload
+        if job.state == "completed":
+            if isinstance(job.result, dict):
+                payload = dict(job.result)
+                payload.setdefault("content", [{
+                    "type": "text",
+                    "text": json.dumps({**job.summary(), "result": job.result},
+                                       ensure_ascii=False)}])
+                return payload
+            # M-5：非 dict 结果也要能返回；extract 声明了 outputSchema，
+            # 必须带 structuredContent，否则客户端校验会报 -32600。
+            text = (job.result if isinstance(job.result, str)
+                    else json.dumps(job.result, ensure_ascii=False))
+            reply = {"content": [{"type": "text", "text": text}]}
+            if job.short == "extract":
+                reply["structuredContent"] = {"result": job.result}
+            return reply
         if job.state == "failed":
             reply = {"content": [{"type": "text",
                                   "text": job.error or "job failed"}],
@@ -504,6 +529,10 @@ class StdioServer:
                    "error": job.error if job.state == "failed" else None}
         reply = {"content": [{"type": "text",
                               "text": json.dumps(summary, ensure_ascii=False)}]}
+        if job.state == "cancelled":
+            # M-4：取消终帧要带 isError，与同步取消路径一致，避免客户端把
+            # 「已取消」当正常完成。
+            reply["isError"] = True
         if job.short == "extract":
             # working / cancelled 的轮询也返回宽松 object 形状
             reply["structuredContent"] = dict(summary)
