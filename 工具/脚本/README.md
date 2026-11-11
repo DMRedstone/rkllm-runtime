@@ -8,7 +8,7 @@
 | --- | --- |
 | `README.md` | 本说明：目录总览与说明书索引 |
 | `rsync-backup.sh` | rsync 硬链接快照备份主脚本（其余备份相关脚本均为其测试基建） |
-| `harness.sh` | rsync-backup 函数级隔离测试（T1–T11，53 项断言） |
+| `harness.sh` | rsync-backup 函数级隔离测试（T1–T11，54 项断言） |
 | `e2e.sh` | rsync-backup 端到端场景测试（E1–E11，101 项断言） |
 | `mock-rsync.sh` | 测试用 rsync 模拟器（覆盖被测脚本全部实际参数，语义对齐真实 rsync） |
 | `mock-flock.sh` | 测试用 flock 桩（MOCK_FLOCK_BUSY=1 模拟锁占用） |

@@ -546,7 +546,7 @@ def config_init(target: str = "board") -> str:
     if target == "client":
         return """# <连接器安装目录>/mcp.toml - rkllm-mcp 客户端配置
 # 优先级：内置默认 < 本文件 < RKLLM_* 环境变量
-# 完整键表：见板端 `rkllm-serve config docs` 的 [mcp] 组
+# 完整键表：见板端 `rkllm config docs` 的 [mcp] 组
 
 [mcp]
 # 板端 OpenAI 兼容端点（也可用 RKLLM_ENDPOINT 环境变量）
@@ -561,10 +561,10 @@ task_threshold_s = 45
 max_result_chars = 20000
 max_input_chars = 12000
 """
-    return """# /etc/rkllm/rkllm.toml - 板端 FastAPI 栈配置（`rkllm-serve serve`）
+    return """# /etc/rkllm/rkllm.toml - 板端 FastAPI 栈配置（`rkllm serve`）
 # 优先级：内置默认 < 本文件 < RKLLM_* 环境变量 < 命令行
-# 全部 85 键与默认值：  rkllm-serve config docs
-# 生效值与来源：        rkllm-serve config show
+# 全部 85 键与默认值：  rkllm config docs
+# 生效值与来源：        rkllm config show
 # 只填需要改的项即可。
 
 [server]

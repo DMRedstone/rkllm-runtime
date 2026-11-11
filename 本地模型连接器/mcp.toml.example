@@ -1,7 +1,14 @@
 # <连接器安装目录>/mcp.toml - rkllm-mcp 客户端配置
 # 复制本文件为安装目录下的 mcp.toml；连接器默认读取它，密钥不进注册文件。
 # 优先级：内置默认 < 本文件 < RKLLM_* 环境变量
-# 完整键表：见板端 `rkllm config docs` 的 [mcp] 组
+# 键表分两类：
+#   - 与板端共享的键（target_endpoint/target_api_key/target_timeout_s/task_threshold_s/
+#     max_input_chars/max_result_chars 等）见板端 `rkllm config docs` 的 [mcp] 组；
+#   - **连接器专有键**（estimate_tokens_cap / context_window / context_margin_tokens /
+#     job_timeout_factor / job_timeout_max_s / session_* 共 8 个）板端配置表不含，
+#     以本文件为准。
+# 注意：只有 target_endpoint / target_api_key 带 target_ 前缀，其余均为扁平键名，
+#   写成 target_task_threshold_s 之类不会生效。
 
 [mcp]
 # 板端 OpenAI 兼容端点（也可用 RKLLM_ENDPOINT 环境变量）
@@ -37,3 +44,12 @@ context_margin_tokens = 32
 # --- 工具结果与输入硬上限（字符） ------------------------------------------
 max_result_chars = 20000
 max_input_chars = 12000
+
+# --- 会话（连接器专有；板端配置表不含） ------------------------------------
+# `chat` 工具带 session 时的历史裁剪与留存策略。
+# 单会话最大消息数；0 = 不限制
+session_max_messages = 0
+# 同时保留的会话数上限（LRU 淘汰）
+session_max_count = 256
+# 会话空闲过期（秒）；0 = 不过期
+session_ttl_s = 1800
