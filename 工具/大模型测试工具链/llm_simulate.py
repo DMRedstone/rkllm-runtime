@@ -478,7 +478,7 @@ def mixed_workload(client, vu, seconds):
     print("      分类: %s" % json.dumps(by_kind, ensure_ascii=False))
     if lat:
         print("      延迟 p50 %.2fs  p90 %.2fs  max %.2fs"
-              % (statistics.median(lat), sorted(lat)[int(len(lat) * 0.9) - 1] if len(lat) > 1 else lat[0],
+              % (statistics.median(lat), sorted(lat)[max(0, min(len(lat) - 1, round(0.9 * (len(lat) - 1))))],
                  max(lat)))
     record("mixed", "vu=%d" % vu, len(ok_rows) == len(rows),
            "n=%d ok=%d wall=%.1fs" % (len(rows), len(ok_rows), wall), wall)

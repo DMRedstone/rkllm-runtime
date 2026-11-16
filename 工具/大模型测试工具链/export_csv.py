@@ -35,8 +35,11 @@ def load(path):
     """读取 JSON；path 为空返回 None。"""
     if not path:
         return None
-    with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
 
 
 def write_csv(path, headers, rows):

@@ -1,6 +1,6 @@
 """长任务 job 状态机（MCP 设计 §5.3 / §5.4）。
 
-- 判定：估算耗时 = prefill/50 + max_tokens/decode（档位预设，2026-10-21 真机
+- 判定：估算耗时 = prefill/44 + max_tokens/decode（档位预设，2026-10-21 真机
   校准：4B 4.5 / 7B 3.5 / 27B 1.5 tok/s），超过 task_threshold_s（默认 45）→
   建任务返回 job_id；
 - 状态：working → completed | failed | cancelled；
@@ -26,7 +26,7 @@ MIN_SYNC_TOKENS = 8
 # 而同步执行，实际却要 80 s，直接撞上客户端 60 s 硬超时——这是把长任务判错的
 # 方向性错误，因此以实测值下压，宁可多转 job 也不让客户端超时。
 DECODE_TOK_S = {"small": 4.5, "medium": 3.5, "large": 1.5}
-PREFILL_TOK_S = 50
+PREFILL_TOK_S = 44
 
 
 def estimate_seconds(model_class: str, prefill_tokens: int,

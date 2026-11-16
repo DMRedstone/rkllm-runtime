@@ -314,12 +314,15 @@ def _import_tool(name: str):
 def test_conffile_env_coverage_finds_no_dead_or_undocumented_key():
     verify_deb = _import_tool("verify_deb")
     conffile = (PKG / "default" / "rkllm-server").read_text(encoding="utf-8")
+    dropin = (PKG / "default" / "rkllm-server.d" / "10-model.conf").read_text(encoding="utf-8")
+    example = (PKG / "default" / "rkllm-server-example").read_text(encoding="utf-8")
+    combined = conffile + "\n" + dropin + "\n" + example
     unit = (PKG / "systemd" / "rkllm-server.service").read_text(encoding="utf-8")
     config_text = (SRC / "rkllm" / "config.py").read_text(encoding="utf-8")
     cli_texts = [path.read_text(encoding="utf-8")
                  for path in (SRC / "rkllm").rglob("*.py")
                  if path.name != "config.py"]
-    coverage = verify_deb.conffile_env_coverage(conffile, unit, config_text,
+    coverage = verify_deb.conffile_env_coverage(combined, unit, config_text,
                                                 cli_texts)
     assert coverage["dead"] == [], "conffile 里仍有代码不读的死键：%s" % (
         coverage["dead"][:8],)

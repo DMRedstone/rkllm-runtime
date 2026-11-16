@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import queue
 import socket
@@ -169,8 +170,9 @@ class Worker:
                     self._abort_requested.set()
                     try:
                         self.engine.abort()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning(
+                            "engine.abort failed (cancel): %r", exc)
                 elif op == OP_PING:
                     self._send(wfile, {"op": OP_STATE, "state": "ready"})
                 elif op == OP_SHUTDOWN:

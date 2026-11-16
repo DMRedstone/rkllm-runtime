@@ -1,6 +1,6 @@
 """JSON Schema 子集校验（设计 §4.3 / F6「JSON 提取 → schema 校验 → 失败重试」）。
 
-零第三方依赖：客户端 wheel 要求纯 stdlib，板端 PEP 668 禁 pip，所以不引
+零第三方依赖：客户端连接器（源码交付）要求纯 stdlib，板端 PEP 668 禁 pip，所以不引
 `jsonschema`。支持的子集覆盖辅助任务的实际用法：
 
     type / properties / required / additionalProperties(bool) / items /

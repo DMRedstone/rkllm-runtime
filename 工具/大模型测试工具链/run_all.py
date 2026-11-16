@@ -43,11 +43,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def run_step(title, script, extra_args=None, timeout=None):
-    timeout = timeout or 1800   # 默认单步上限 30 分钟：子脚本死锁时不至于挂死编排器
     """运行同目录下的一个子脚本，实时把输出透传到当前终端。
 
     返回子进程退出码（负数表示异常/超时）。
     """
+    timeout = timeout or 1800   # 默认单步上限 30 分钟：子脚本死锁时不至于挂死编排器
     print("\n" + "=" * 70)
     print(">>> %s  (%s)" % (title, script))
     print("=" * 70)
@@ -104,7 +104,7 @@ def main():
         if not args.limits:
             stress_args.append("--skip-limits")   # 默认不跑会压垮服务的 E 段
         codes.append(("压力测试", run_step("压力测试", "llm_stress.py", stress_args)))
-        wait_ready(args.host, args.key, args.ready_timeout)
+        wait_ready(build_base(args.host), args.key, args.ready_timeout)
 
     # 3) 仿真测试
     if not args.skip_simulate:
@@ -112,12 +112,12 @@ def main():
         if args.quick:
             sim_args += ["--vu-seconds", "20"]
         codes.append(("仿真测试", run_step("仿真测试", "llm_simulate.py", sim_args)))
-        wait_ready(args.host, args.key, args.ready_timeout)
+        wait_ready(build_base(args.host), args.key, args.ready_timeout)
 
     # 4) 崩溃隔离实验
     if not args.skip_crash:
         codes.append(("崩溃复现", run_step("崩溃复现", "crash_probe.py", common)))
-        wait_ready(args.host, args.key, args.ready_timeout)
+        wait_ready(build_base(args.host), args.key, args.ready_timeout)
 
     # 5) 汇总报告
     run_step("生成报告", "make_report.py", [])

@@ -283,7 +283,7 @@ class HttpBackend:
         """板端健康摘要（local_llm_status 用）。
 
         鉴权：/health 与其他端点同受 Bearer 保护（实测 401 被旧代码的
-        except 吞成 unreachable——wheel 冒烟抓出的缺陷）。
+        except 吞成 unreachable——冒烟测试抓出的缺陷）。
         """
         headers = {"Authorization": "Bearer " + self.api_key} \
             if self.api_key else {}

@@ -4,7 +4,7 @@
 - 所有影响行为的参数必须进表；代码中不得出现魔法数（协议常量与安全下限除外）。
 - 优先级：内置默认 < 配置文件 < 环境变量（RKLLM_*）< 命令行。
 - 启动校验：类型、范围、互斥项；错误一次性列出并拒绝启动（不再静默回退）。
-- 纯 stdlib（tomllib 为 3.13 内置）：客户端 wheel 零第三方依赖的前提。
+- 纯 stdlib（tomllib 为 3.13 内置）：客户端连接器零第三方依赖的前提。
 - 键计数由 tests/test_config.py 守住：server 13 + model 12 + engine 10 + queue 5
   + openai 9 + cache 5 + mcp 24 + logging 5 + metrics 2 = 85。
 
@@ -229,6 +229,7 @@ assert len(SCHEMA) == len(set(k.full for k in SCHEMA)), "配置键名重复（N1
 # 提供模板，运维根本看不见这张表；现在 load_config 会自动读它（不存在则静默
 # 跳过，默认行为零变化），模板由 `rkllm config init --board` 生成。
 DEFAULT_TOML_PATH = "/etc/rkllm/rkllm.toml"
+DEFAULT_DROPIN_DIR = "/etc/default/rkllm-server.d"
 
 _BY_SECTION: dict[str, list[Key]] = {}
 for _key in SCHEMA:
@@ -414,12 +415,63 @@ def _coerce(key: Key, raw: Any, origin: str, errors: list[str]) -> Any:
         return None
 
 
+def _load_dropins(directory: str) -> dict[str, str]:
+    """读取 `/etc/default/rkllm-server.d/*.conf`（KEY=value，与 conffile 同格式）。
+
+    按文件名排序，后文件覆盖先文件；目录不存在返回空 dict（旧部署零变化）。
+    只增加一层文件来源，不改变原有环境变量 / TOML 的读取与校验语义。
+    """
+    out: dict[str, str] = {}
+    try:
+        names = sorted(n for n in os.listdir(directory) if n.endswith(".conf"))
+    except OSError:
+        return out
+    for name in names:
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith("export "):
+                        line = line[7:].lstrip()
+                    if "=" not in line:
+                        continue
+                    key, val = line.split("=", 1)
+                    key, val = key.strip(), val.strip()
+                    if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                        val = val[1:-1]
+                    if key:
+                        out[key] = val
+        except OSError:
+            continue
+    return out
+
+
+def _normalize_legacy(values: dict[str, str]) -> dict[str, str]:
+    """把旧 conffile 的 `RKLLM_*` 名映射到新键（新键名优先，旧名兜底）。"""
+    env = dict(values)
+    for legacy, target in LEGACY_ENV_MAP.items():
+        section, name = target.split(".", 1)
+        new_env = f"RKLLM_{section}_{name}".upper()
+        if legacy in env and new_env not in env and env[legacy].strip():
+            raw = env[legacy]
+            if legacy in _NEGATED_LEGACY:
+                env[new_env] = ("false" if raw.strip().lower() in _TRUE_WORDS
+                                else "true")
+            elif legacy in _LEGACY_VALUE_TRANSFORM:
+                env[new_env] = _LEGACY_VALUE_TRANSFORM[legacy](raw)
+            else:
+                env[new_env] = raw
+    return env
+
+
 def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
                 env: dict[str, str] | None = None,
                 require_model_path: bool = False) -> Config:
-    """按 优先级 default < file < env < cli 装配配置并整体校验。
+    """按 优先级 default < file(TOML) < .d < env < cli 装配配置并整体校验。
 
-    require_model_path：serve 子命令置 True；config 命令与客户端 wheel 置 False
+    require_model_path：serve 子命令置 True；config 命令与客户端连接器置 False
     （model.path 仅板端推理需要）。
     """
     env = dict(os.environ if env is None else env)
@@ -427,21 +479,8 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
     values: dict[str, Any] = {}
     sources: dict[str, str] = {}
 
-    # 旧 conffile 的 RKLLM_* 名先映射到新键（新键名优先，迁移期为旧名兜底）
-    for legacy, target in LEGACY_ENV_MAP.items():
-        section, name = target.split(".", 1)
-        new_env = f"RKLLM_{section}_{name}".upper()
-        if legacy in env and new_env not in env and env[legacy].strip():
-            raw = env[legacy]
-            if legacy in _NEGATED_LEGACY:
-                # NO_HISTORY=1 → keep_history=false；NO_FREQ_LOCK=1 → freq_lock=false
-                env[new_env] = ("false" if raw.strip().lower() in _TRUE_WORDS
-                                else "true")
-            elif legacy in _LEGACY_VALUE_TRANSFORM:
-                # 旧变量取值域与新键不同（如 QUIET=1 → logging.level=warning）
-                env[new_env] = _LEGACY_VALUE_TRANSFORM[legacy](raw)
-            else:
-                env[new_env] = raw
+    env = _normalize_legacy(env)
+    dropin = _normalize_legacy(_load_dropins(DEFAULT_DROPIN_DIR))
 
     file_data: dict[str, Any] = {}
     # 未显式指定时，板端的默认 TOML 存在就用它（85 键的落点；此前只有
@@ -463,6 +502,9 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
         raw = file_data.get(key.section, {})
         if key.name in raw:
             value, source = _coerce(key, raw[key.name], "file", errors), "file"
+        drop_val = dropin.get(key.env)
+        if drop_val is not None and drop_val != "":
+            value, source = _coerce(key, drop_val, ".d", errors), ".d"
         env_val = env.get(key.env)
         if env_val is not None and env_val != "":
             value, source = _coerce(key, env_val, "env", errors), "env"

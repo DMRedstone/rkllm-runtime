@@ -491,9 +491,9 @@ def overload(board, quick, burst_size):
         with lock:
             all_rows.append((status, elapsed))
 
-    for index, burst_size in enumerate(ladder):
-        note("D", "burst", "flooding with %d concurrent short requests" % burst_size)
-        threads = [threading.Thread(target=flooder) for _ in range(burst_size)]
+    for index, burst in enumerate(ladder):
+        note("D", "burst", "flooding with %d concurrent short requests" % burst)
+        threads = [threading.Thread(target=flooder) for _ in range(burst)]
         started = time.time()
         for th in threads:
             th.start()
@@ -501,9 +501,9 @@ def overload(board, quick, burst_size):
             th.join()
         wall = time.time() - started
         statuses = {}
-        for status, _ in all_rows[-burst_size:]:
+        for status, _ in all_rows[-burst:]:
             statuses[status] = statuses.get(status, 0) + 1
-        note("D", "burst %d: %d simultaneous" % (index + 1, burst_size),
+        note("D", "burst %d: %d simultaneous" % (index + 1, burst),
              "wall %.1fs  statuses %s" % (wall, statuses))
     statuses = {}
     for status, _ in all_rows:

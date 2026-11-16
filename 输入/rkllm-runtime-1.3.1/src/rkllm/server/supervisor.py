@@ -498,8 +498,8 @@ class LocalSupervisor:
                 # 从定时器线程打断：等价于 subprocess 模式的读超时
                 try:
                     self.engine.abort()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.warning("engine.abort failed (timeout timer): %r", exc)
             timer = threading.Timer(request_timeout_s, _expire)
             timer.daemon = True
             timer.start()
@@ -527,8 +527,8 @@ class LocalSupervisor:
     def abort(self) -> None:
         try:
             self.engine.abort()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("engine.abort failed (cancel): %r", exc)
 
     def shutdown(self) -> None:
         self._health_stop.set()

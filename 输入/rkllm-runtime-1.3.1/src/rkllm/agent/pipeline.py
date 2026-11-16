@@ -9,6 +9,7 @@ json_object/json_schema 仿真由 apply_response_format 在 prompt 侧注入，
 from __future__ import annotations
 
 import json
+import logging
 from typing import Iterator
 
 from .conversation import build_prompt
@@ -169,8 +170,9 @@ class Pipeline:
                 # stop 命中即终止生成并释放 NPU（不是丢弃后续 token 继续转）
                 try:
                     self.svc.supervisor.abort()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(
+                        "supervisor.abort failed on cancel: %r", exc)
                 break
         yield from self.drain()
 

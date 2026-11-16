@@ -25,7 +25,6 @@ from ...agent.pipeline import Pipeline
 from ..errors import http_error as _http_error
 from ..pipeline_runner import (BUSY_MESSAGE,
                                SchemaError as _SchemaError,
-                               StreamTimer,
                                build_pipeline as _pipeline,
                                run_blocking as _run_blocking,
                                run_blocking_checked as _run_blocking_checked,
@@ -33,10 +32,9 @@ from ..pipeline_runner import (BUSY_MESSAGE,
 from ..schemas import ChatCompletionRequest, CompletionRequest
 from ..sse import SseSession, sse_response_headers
 from ..queue import QueueBusy, QueueTimeout
-from ..streaming import (DISCONNECT, DONE, HEARTBEAT, TokenStream,
-                         iterate_stream)
 from ..supervisor import WorkerDown
 from ... import caps
+from .sse_stream import stream_events
 
 router = APIRouter(prefix="/v1")
 
@@ -134,60 +132,11 @@ def chat_completions(body: ChatCompletionRequest, request: Request):
 
 
 def _stream_chat(request: Request, svc, pipe: Pipeline, raw: dict):
-    """SSE 生成器（异步）：首帧 role → 增量（含心跳）→ finish_reason → usage → [DONE]。
-
-    为什么必须是 async 生成器：客户端断开时同步生成器**收不到**任何信号——
-    uvicorn 不会因为写失败而中断它（实测：800 token 的长任务在客户端断开后
-    仍跑满 99 s，NPU 白转）。
-
-    F-1：泵线程、心跳计时、断连取消统一由 `server.streaming` 提供（此前与
-    `responses.py` 各有一份，取消路径互相漂移，见 O-2）。
-    """
+    """chat.completion.chunk 信封的 SSE 生成器（帧序列见 routes/sse_stream）。"""
     session = SseSession(model=svc.model_name,
                          reasoning_field=svc.reasoning_field)
-    stream = TokenStream(svc, pipe, name="sse-pump")
-    heartbeat_s = max(1, int(svc.stream_heartbeat_s))
-
-    async def generate():
-        timer = StreamTimer()
-        yield session.first_frame()
-        truncated = False
-        async for kind, item in iterate_stream(request, stream, heartbeat_s):
-            if kind == HEARTBEAT:
-                yield session.heartbeat()       # D9：无 token 期间续命
-                continue
-            if kind == DISCONNECT:
-                timer.finish(svc, pipe)         # 断连也计入（NPU 已归还）
-                return
-            if kind == DONE:
-                break
-            if isinstance(item, BaseException):
-                if isinstance(item, (QueueBusy, QueueTimeout, WorkerDown)):
-                    yield session.error_frame(str(item)[:300])
-                else:
-                    yield session.error_frame("internal error")
-                yield session.done()
-                stream.mark_settled()           # 已发终帧：收尾不再 abort
-                return
-            if isinstance(item, dict):
-                if item.get("truncated"):
-                    truncated = True
-                continue                        # 管线元数据（tool_calls 等）
-            timer.first_token()
-            yield session.delta_frame(content=item)
-
-        for frame in pipe.trailing_frames(session):
-            yield frame
-        yield session.finish_frame("length" if truncated
-                                   else pipe.finish_reason())
-        want_usage = svc.include_usage_default or bool(
-            (raw.get("stream_options") or {}).get("include_usage"))
-        if want_usage:
-            yield session.usage_frame(pipe.usage())
-        timer.finish(svc, pipe)
-        yield session.done()
-
-    return generate()
+    return stream_events(request, svc, pipe, session, raw,
+                         first_role="assistant", trailing=True)
 
 
 def _completion_payload(svc, pipe: Pipeline, result: dict,
@@ -287,51 +236,9 @@ def completions(body: CompletionRequest, request: Request):
 
 
 def _stream_completions(request: Request, svc, pipe: Pipeline, raw: dict):
-    """completions 的 SSE 生成器：text_completion 信封（delta.text，无 role）。
-
-    复用与 chat 完全相同的两段式取消 / 心跳 / 错误帧机制（F-1），只换信封。
-    """
+    """text_completion 信封的 SSE 生成器（无 role、无 trailing_frames）。"""
     session = SseSession(model=svc.model_name,
                          object_name="text_completion",
                          delta_field="text")
-    stream = TokenStream(svc, pipe, name="sse-pump")
-    heartbeat_s = max(1, int(svc.stream_heartbeat_s))
-
-    async def generate():
-        timer = StreamTimer()
-        yield session.first_frame(role=None)
-        truncated = False
-        async for kind, item in iterate_stream(request, stream, heartbeat_s):
-            if kind == HEARTBEAT:
-                yield session.heartbeat()
-                continue
-            if kind == DISCONNECT:
-                timer.finish(svc, pipe)
-                return
-            if kind == DONE:
-                break
-            if isinstance(item, BaseException):
-                if isinstance(item, (QueueBusy, QueueTimeout, WorkerDown)):
-                    yield session.error_frame(str(item)[:300])
-                else:
-                    yield session.error_frame("internal error")
-                yield session.done()
-                stream.mark_settled()
-                return
-            if isinstance(item, dict):
-                if item.get("truncated"):
-                    truncated = True
-                continue
-            timer.first_token()
-            yield session.delta_frame(content=item)
-
-        yield session.finish_frame("length" if truncated
-                                   else pipe.finish_reason())
-        want_usage = svc.include_usage_default or bool(
-            (raw.get("stream_options") or {}).get("include_usage"))
-        if want_usage:
-            yield session.usage_frame(pipe.usage())
-        timer.finish(svc, pipe)
-        yield session.done()
-
-    return generate()
+    return stream_events(request, svc, pipe, session, raw,
+                         first_role=None, trailing=False)

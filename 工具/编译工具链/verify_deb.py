@@ -31,6 +31,10 @@ KNOWN_MANDATORY_TREE = ["usr", "usr/share", "usr/share/doc", "usr/bin", "etc"]
 # upgrade, and only deletes it on purge - which is why postrm has to unlink it
 # explicitly for `remove` as well.
 SERVER_DEFAULTS = "/etc/default/rkllm-server"
+SERVER_DROPIN_DIR = "/etc/default/rkllm-server.d"
+SERVER_DROPIN = SERVER_DROPIN_DIR + "/10-model.conf"
+SERVER_EXAMPLE = "/etc/default/rkllm-server-example"
+CONFFILE_PATHS = (SERVER_DEFAULTS, SERVER_DROPIN)
 
 results: list[tuple[str, str, str]] = []   # (level, check, message)
 
@@ -245,14 +249,17 @@ def check_control(members: dict[str, bytes]) -> dict:
                 # dpkg keeps conffiles when a package is merely removed and only
                 # deletes them on purge. This package promises that removing it
                 # leaves nothing behind, so the file has to go on `remove` too.
-                if re.search(r"^\s*rm\s+-f\s+" + re.escape(SERVER_DEFAULTS) + r"\s*$",
-                             code, re.M):
-                    ok("postrm deletes the conffile",
-                       f"{SERVER_DEFAULTS} is gone after remove, not only after purge")
+                missing_rm = [p for p in CONFFILE_PATHS
+                              if not re.search(r"^\s*rm\s+-f\s+" + re.escape(p) + r"\s*$",
+                                               code, re.M)]
+                if not missing_rm:
+                    ok("postrm deletes the conffiles",
+                       "%s are gone after remove, not only after purge"
+                       % ", ".join(CONFFILE_PATHS))
                 else:
-                    fail("postrm deletes the conffile",
-                         f"dpkg keeps conffiles on a plain remove and nothing deletes "
-                         f"{SERVER_DEFAULTS}")
+                    fail("postrm deletes the conffiles",
+                         "dpkg keeps conffiles on a plain remove and nothing deletes %s"
+                         % missing_rm)
 
         control_member = control_files.get("./control")
         fields: dict[str, str] = {}
@@ -366,10 +373,11 @@ def check_control(members: dict[str, bytes]) -> dict:
                 fail("conffiles duplicate", str(conffiles))
             elif conffiles != sorted(conffiles):
                 warn("conffiles order", "entries are not sorted")
-            (fail if SERVER_DEFAULTS not in conffiles else ok)(
+            missing_cf = [p for p in CONFFILE_PATHS if p not in conffiles]
+            (fail if missing_cf else ok)(
                 "conffiles declare the service config",
-                f"{SERVER_DEFAULTS} is a conffile" if SERVER_DEFAULTS in conffiles
-                else f"{SERVER_DEFAULTS} missing from {conffiles}")
+                ("%s are conffiles" % ", ".join(CONFFILE_PATHS)) if not missing_cf
+                else "%s missing from %s" % (missing_cf, conffiles))
         return {"fields": fields, "md5sums": md5_map, "names": names,
                 "conffiles": conffiles}
 
@@ -578,12 +586,23 @@ def check_data(members: dict[str, bytes], control_info: dict) -> None:
 
         # --- service configuration: a conffile, documented in both languages --
         defaults_rel = SERVER_DEFAULTS.lstrip("/")
+        dropin_rel = SERVER_DROPIN.lstrip("/")
+        example_rel = SERVER_EXAMPLE.lstrip("/")
         if defaults_rel not in regulars:
             fail("conffile shipped", f"{SERVER_DEFAULTS} missing from the payload")
-        else:
+        if dropin_rel not in regulars:
+            fail("drop-in conffile shipped", f"{SERVER_DROPIN} missing from the payload")
+        if example_rel not in regulars:
+            fail("config example shipped", f"{SERVER_EXAMPLE} missing from the payload")
+        if defaults_rel in regulars:
             body = tf.extractfile(regulars[defaults_rel]).read().decode("utf-8", "replace")
+            dropin_body = (tf.extractfile(regulars[dropin_rel]).read().decode("utf-8", "replace")
+                           if dropin_rel in regulars else "")
+            example_body = (tf.extractfile(regulars[example_rel]).read().decode("utf-8", "replace")
+                            if example_rel in regulars else "")
+            combined = body + "\n" + dropin_body + "\n" + example_body
             issues = []
-            if "RKLLM_MODEL=" not in body:
+            if "RKLLM_MODEL=" not in combined:
                 issues.append("RKLLM_MODEL is not settable")
             # A conffile whose text depends on the package version gets rewritten
             # by every upgrade, which discards the operator's edits and any
@@ -625,7 +644,7 @@ def check_data(members: dict[str, bytes], control_info: dict) -> None:
                         and rel_name != config_src_rel):
                     cli_texts.append(
                         tf.extractfile(member).read().decode("utf-8", "replace"))
-            coverage = conffile_env_coverage(body, unit_text, config_text, cli_texts)
+            coverage = conffile_env_coverage(combined, unit_text, config_text, cli_texts)
             wanted = coverage["forward"]
             if not config_text:
                 issues.append("packaged rkllm/config.py missing: per-key conffile "
@@ -642,9 +661,11 @@ def check_data(members: dict[str, bytes], control_info: dict) -> None:
             if coverage["uncovered"]:
                 issues.append("no commented example (optional form) for: %s"
                               % coverage["uncovered"][:8])
-            cjk = [line for line in body.splitlines() if re.search(r"[\u4e00-\u9fff]", line)]
-            if len(cjk) < 10 or not re.search(r"English|\bEN\b", body):
-                issues.append(f"not bilingual: {len(cjk)} Chinese line(s)")
+            # 双语说明现由 rkllm-server-example 承载（conffile 已按要求去注释）
+            cjk = [line for line in example_body.splitlines()
+                   if re.search(r"[\u4e00-\u9fff]", line)]
+            if len(cjk) < 10 or not re.search(r"English|\bEN\b", example_body):
+                issues.append(f"example not bilingual: {len(cjk)} Chinese line(s)")
             if issues:
                 fail("conffile content", "; ".join(issues[:4]))
             else:
@@ -794,7 +815,7 @@ def simulate_removal(members: dict[str, bytes]) -> None:
                ", ".join(private))
     record("INFO", "removal: files tracked by dpkg", f"{len(owned_files)} entries, " +
            "nothing is ever written outside this list (postinst/postrm only run ldconfig "
-           "and unlink " + SERVER_DEFAULTS + ", the one conffile, on remove as well as purge)")
+           "and unlink the service conffiles (main + .d) on remove as well as purge)")
 
 
 def main() -> int:

@@ -95,6 +95,8 @@ NOTES: dict[str, str] = {
                    "unsupported_parameter instead of being ignored",
     "seed": "RKLLM runtime exposes no RNG seed interface",
     "logprobs": "per-token logit copy too costly on 27B; not implemented",
+    "balance": "no billing concept in a local shell; /user/balance is N/A",
+    "fim": "FIM/prefix completion not supported by rkllm; a suffix request is rejected (400)",
 }
 
 CAPS: dict[str, Any] = {

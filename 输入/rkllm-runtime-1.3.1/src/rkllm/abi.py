@@ -6,7 +6,7 @@
 - 保留 ctypes 保活纪律：_keep / _run_keep 两级缓冲列表；
 - 签名缺失时显式失败（沿用旧版 fail-loudly 语义）。
 
-仅限板端使用；客户端 wheel 不导入本模块。
+仅限板端使用；客户端连接器（源码交付）不导入本模块。
 """
 
 from __future__ import annotations

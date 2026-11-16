@@ -112,6 +112,10 @@ SRC_TREE = ROOT.parent / "输入" / "rkllm-runtime-1.3.1" / "src" / "rkllm"
 # rewritten file would also lose a `chmod 600` an operator applied for the API
 # key. Removal is handled by postrm, see packaging/postrm.
 SERVER_DEFAULTS = "/etc/default/rkllm-server"
+SERVER_DROPIN_DIR = "/etc/default/rkllm-server.d"
+SERVER_DROPIN = SERVER_DROPIN_DIR + "/10-model.conf"
+SERVER_EXAMPLE = "/etc/default/rkllm-server-example"
+CONFFILE_PATHS = (SERVER_DEFAULTS, SERVER_DROPIN)
 
 FILE_MODE = 0o644
 EXEC_MODE = 0o755
@@ -180,6 +184,9 @@ class BuildContext:
             "@DOCDIR_ABS@": self.docdir,
             "@SERVER_UNIT@": SERVER_UNIT,
             "@SERVER_DEFAULTS@": SERVER_DEFAULTS,
+            "@SERVER_DROPIN@": SERVER_DROPIN,
+            "@SERVER_DROPIN_DIR@": SERVER_DROPIN_DIR,
+            "@SERVER_EXAMPLE@": SERVER_EXAMPLE,
             "@PREFIX@": "/usr",
             "@DATE@": time.strftime("%a, %d %b %Y %H:%M:%S +0000", time.gmtime(self.epoch)),
             "@DATE_ISO@": time.strftime("%Y-%m-%d", time.gmtime(self.epoch)),
@@ -456,6 +463,13 @@ def stage(ctx: BuildContext, source_tarball: Path) -> tuple[list[Shipped], dict]
         FILE_MODE, "packaging/default/rkllm-server",
         "systemd 单元的环境配置(conffile:升级保留本地修改,postrm 在 remove/purge 时删除)")
 
+    add(SERVER_DROPIN, ctx.apply(read_packaging("default/rkllm-server.d/10-model.conf")).encode("utf-8"),
+        FILE_MODE, "packaging/default/rkllm-server.d/10-model.conf",
+        "模型/运行参数默认配置(conffile:升级保留本地修改)")
+    add(SERVER_EXAMPLE, ctx.apply(read_packaging("default/rkllm-server-example")).encode("utf-8"),
+        FILE_MODE, "packaging/default/rkllm-server-example",
+        "配置说明示例(带注释;仅参考,不生效)")
+
     # --- manual pages --------------------------------------------------------
     # Policy requires man pages to be compressed; the mtime is pinned so the
     # archive stays reproducible. The translated copy goes under zh_CN, which is
@@ -581,7 +595,7 @@ def build_deb(items, ctx: BuildContext, out_dir: Path, tmp_dir: Path) -> Path:
     file_paths = [f.dest for f in items]
     # A conffile that is not part of the payload is a packaging error dpkg only
     # reports at install time, so refuse to build one.
-    conffile_paths = [SERVER_DEFAULTS]
+    conffile_paths = list(CONFFILE_PATHS)
     for cf in conffile_paths:
         if cf not in file_paths:
             raise SystemExit(f"conffile {cf} is not in the payload")
@@ -663,7 +677,7 @@ def emit_tree(items, ctx: BuildContext, tree_dir: Path) -> None:
             os.chmod(target, item.mode)
     for name in ("conffiles", "control", "postinst", "prerm", "postrm"):
         if name == "conffiles":
-            body = SERVER_DEFAULTS + "\n"
+            body = "\n".join(CONFFILE_PATHS) + "\n"
         else:
             body = ctx.apply(read_packaging(name if name != "control" else "control.in"))
         target = debian_dir / name

@@ -40,7 +40,7 @@ export RKLLM_PACKAGING_DIR=$PWD/输入/rkllm-runtime-1.3.1
 python 工具/编译工具链/make_deb.py --arch arm64        # 产物落 工具/dist/
 
 # 静态自检（88 项）
-python 工具/编译工具链/verify_deb.py 工具/dist/rkllm-runtime_1.3.1-19_arm64.deb
+python 工具/编译工具链/verify_deb.py 工具/dist/rkllm-runtime_1.3.1-20_arm64.deb
 
 # 板端测试全流程
 cd 工具/大模型测试工具链 && python run_all.py --host <板端地址> --key <令牌>
@@ -50,7 +50,7 @@ rkllm chat qwen2.5-1.5b
 
 # OpenAI 兼容 API
 rkllm serve qwen2.5-1.5b
-# 或 systemctl enable --now rkllm-server（配置在 /etc/default/rkllm-server）
+# 或 systemctl enable --now rkllm-server（配置在 /etc/default/rkllm-server 与 /etc/default/rkllm-server.d/）
 ```
 
 ## 关于上游源料

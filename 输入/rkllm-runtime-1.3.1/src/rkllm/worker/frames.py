@@ -28,7 +28,7 @@ MAX_FRAME_BYTES = 8 * 1024 * 1024   # 与 MCP 消息上限同源
 # 原先 "run"/"token"/"end"/"error"/"ready" 等字面量散落在 worker 与 server
 # 两侧，改一个 op 要 grep 两个文件、拼错只会在运行期变成"未知帧"。收敛到
 # 这里，并在 ready 帧带 `v` 供 supervisor 校验版本错配（部署时 worker 与
-# server 来自同一 wheel，但灰度/回滚时会出现版本不一致）。
+# server 同源发布，但灰度/回滚时会出现版本不一致）。
 PROTOCOL_VERSION = 2
 
 OP_RUN = "run"            # client → worker

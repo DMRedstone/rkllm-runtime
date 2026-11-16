@@ -349,6 +349,13 @@ def test_backpressure_truncation_aborts_worker(monkeypatch):
             if not stream._thread.is_alive():
                 break
             await asyncio.sleep(0.01)
+        # P1-2：线程退出后，泵经 loop.call_soon_threadsafe 投递的
+        # TRUNCATED/STREAM_DONE 回调可能尚未被事件循环执行；先让循环跑几拍
+        # 直到终帧入队，再 drain，消除 thread→loop 交接竞态。
+        for _ in range(200):
+            await asyncio.sleep(0)
+            if dqueue.qsize() >= 2:
+                break
         assert not stream._thread.is_alive()
         items = _drain(dqueue)
         assert TRUNCATED in items

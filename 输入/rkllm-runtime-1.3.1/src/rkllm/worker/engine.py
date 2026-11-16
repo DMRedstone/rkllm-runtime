@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import codecs
 import ctypes
+import logging
 import queue
 import sys
 import threading
@@ -288,6 +289,9 @@ class RealEngine:
             finally:
                 sink.put(_END)
 
+        # P2-4（设计决定，非缺陷）：单 NPU 单槽串行，同一时刻只有一个推理线程，
+        # 每次推理新建线程的开销可忽略（生命周期 <= 单次请求）；不引入线程池，
+        # 以免引入跨请求的线程状态与关闭语义，收益不抵复杂度。
         thread = threading.Thread(target=runner, name="rkllm-infer", daemon=True)
         thread.start()
         try:
@@ -334,7 +338,8 @@ class RealEngine:
     def abort(self):
         try:
             return self.lib.rkllm_abort(self._handle)
-        except Exception:
+        except Exception as exc:
+            logging.getLogger(__name__).warning("abort failed: %r", exc)
             return None
 
     def destroy(self):
