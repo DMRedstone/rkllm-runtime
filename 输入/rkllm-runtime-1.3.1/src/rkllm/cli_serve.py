@@ -37,8 +37,8 @@ def _cmd_serve(args) -> int:
                        max_tokens_for, max_tokens_limit_for)
     cfg.values["model.path"] = _resolve_model_path(cfg.model.path,
                                                   cfg.model.search_dirs)
-    # 档位默认只覆盖 4B(small)/7B(medium)；仅当用户未显式配置（source=default）
-    # 时套用，显式配置永远优先。更大档位不内置，打印告警要求手动配置。
+    # 档位默认只覆盖 4b/7b；仅当用户未显式配置（source=default）时套用，
+    # 显式配置永远优先。更大档位（14b/27b/未知）不内置，打印告警要求手动配置。
     model_class = derive_class(cfg.model.path,
                                getattr(cfg.model, "class", "auto"))
     if cfg.sources.get("model.max_tokens") == "default":
@@ -47,7 +47,7 @@ def _cmd_serve(args) -> int:
         cfg.values["model.max_tokens_limit"] = max_tokens_limit_for(model_class)
     if cfg.sources.get("cache.max_mb") == "default":
         cfg.values["cache.max_mb"] = cache_max_mb_for(model_class)
-    if model_class not in ("small", "medium"):
+    if model_class not in ("4b", "7b"):
         sys.stderr.write(
             "[rkllm] 档位 %s 无内置默认（内置仅 4B/7B）；请手动配置 "
             "model.max_tokens / max_tokens_limit / cache.max_mb\n" % model_class)

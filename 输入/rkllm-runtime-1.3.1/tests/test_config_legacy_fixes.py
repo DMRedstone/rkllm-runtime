@@ -120,25 +120,25 @@ def test_rk3576_uses_big_core_mask_like_official_demo():
 
 
 @pytest.mark.parametrize("name,want", [
-    ("qwen3-27b", "large"),
-    ("27b.rkllm", "large"),
-    ("Qwen3-27B-RKLLM-v1.rkllm", "large"),
-    ("model-20b", "large"),
-    ("qwen3-12b", "large"),
-    ("qwen3-30b", "large"),
-    ("qwen3-235b", "large"),
-    ("qwen3-7b", "medium"),
-    ("qwen3.5-4b", "small"),
-    ("qwen2.5-0.5b", "small"),
+    ("qwen3-27b", "27b"),
+    ("27b.rkllm", "27b"),
+    ("Qwen3-27B-RKLLM-v1.rkllm", "27b"),
+    ("model-20b", "20b"),
+    ("qwen3-12b", "12b"),
+    ("qwen3-30b", "30b"),
+    ("qwen3-235b", "235b"),
+    ("qwen3-7b", "7b"),
+    ("qwen3.5-4b", "4b"),
+    ("qwen2.5-0.5b", "0.5b"),
 ])
 def test_model_class_from_name(name, want):
     assert _class_from_name(name) == want
 
 
 def test_derive_class_27b_by_name_not_size():
-    """名称优先于体积：文件名带 27b 时即使体积未知也必须判 large。"""
-    assert derive_class("/nonexistent/qwen3-27b.rkllm") == "large"
-    assert derive_class("/nonexistent/qwen3-27b.rkllm", configured="auto") == "large"
+    """名称优先于体积：文件名带 27b 时即使体积未知也必须判 27b。"""
+    assert derive_class("/nonexistent/qwen3-27b.rkllm") == "27b"
+    assert derive_class("/nonexistent/qwen3-27b.rkllm", configured="auto") == "27b"
 
 
 # ---------------------------------------------------------------------------

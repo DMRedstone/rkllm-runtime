@@ -95,32 +95,32 @@ def test_body_limit_413():
 
 
 def test_derive_class_from_name():
-    assert derive_class("/m/qwen3.5-4b.rkllm") == "small"
-    assert derive_class("/m/qwen2.5-7b.rkllm") == "medium"
-    assert derive_class("/m/qwen3-32b.rkllm") == "large"
-    assert derive_class("/m/model.rkllm", configured="large") == "large"
+    assert derive_class("/m/qwen3.5-4b.rkllm") == "4b"
+    assert derive_class("/m/qwen2.5-7b.rkllm") == "7b"
+    assert derive_class("/m/qwen3-32b.rkllm") == "32b"
+    assert derive_class("/m/model.rkllm", configured="27b") == "27b"
 
 
 def test_derive_class_from_size(tmp_path):
     f = tmp_path / "model.rkllm"
     f.write_bytes(b"\0" * (7 * 1024 * 1024))        # 7 MiB → small
     assert derive_class(str(f)) == derive_class(str(f))  # 稳定
-    assert max_tokens_for("small") == 512        # 4B 实测值
-    assert max_tokens_for("medium") == 384       # 7B 保守估计
-    assert max_tokens_for("large") == 0          # 不内置，需手动配置
-    assert max_tokens_limit_for("small") == 2048
-    assert cache_max_mb_for("medium") == 1024
+    assert max_tokens_for("4b") == 512           # 4B 实测值
+    assert max_tokens_for("7b") == 384           # 7B 保守估计
+    assert max_tokens_for("27b") == 0            # 不内置，需手动配置
+    assert max_tokens_limit_for("4b") == 2048
+    assert cache_max_mb_for("7b") == 1024
 
 
 def test_kv_scales_with_context():
-    assert kv_mb("small", 4096) > kv_mb("small", 2048)
-    assert kv_mb("large", 4096) > kv_mb("small", 4096)
+    assert kv_mb("4b", 4096) > kv_mb("4b", 2048)
+    assert kv_mb("27b", 4096) > kv_mb("4b", 4096)
 
 
 def test_budget_passes_when_enough(tmp_path):
     model = tmp_path / "m.rkllm"
     model.write_bytes(b"\0" * 1024)
-    p = plan("small", 4096, model_path=str(model), reserve_mb=1024,
+    p = plan("4b", 4096, model_path=str(model), reserve_mb=1024,
              available=64000)
     assert p.context == 4096 and not p.downgraded
 
@@ -129,8 +129,8 @@ def test_budget_downgrades_context(tmp_path):
     model = tmp_path / "m-7b.rkllm"
     model.write_bytes(b"\0" * (7 * 1024 * 1024))     # 7 GiB 量级按 MiB 计
     # 可用只够 2048：模型 7 MiB + KV + 预留 1024
-    avail = 7 + kv_mb("medium", 2048) + 1024
-    p = plan("medium", 4096, model_path=str(model), reserve_mb=1024,
+    avail = 7 + kv_mb("7b", 2048) + 1024
+    p = plan("7b", 4096, model_path=str(model), reserve_mb=1024,
              min_context=1024, available=avail)
     assert p.context == 2048 and p.downgraded
 
@@ -139,7 +139,7 @@ def test_budget_rejects_when_hopeless(tmp_path):
     model = tmp_path / "m-27b.rkllm"
     model.write_bytes(b"\0" * (15 * 1024 * 1024))
     with pytest.raises(MemoryBudgetError) as exc:
-        plan("large", 4096, model_path=str(model), reserve_mb=1024,
+        plan("27b", 4096, model_path=str(model), reserve_mb=1024,
              min_context=1024, available=100)     # 降到 min_context 也不够
     assert exc.value.required_mb > exc.value.available_mb
 
@@ -147,7 +147,7 @@ def test_budget_rejects_when_hopeless(tmp_path):
 def test_health_reports_model_class():
     c = _client(RKLLM_MODEL_PATH="/m/qwen3.5-4b.rkllm")
     body = c.get("/health").json()
-    assert body["model_class"] == "small"
+    assert body["model_class"] == "4b"
 
 
 # ---------------------------------------------------------------------------

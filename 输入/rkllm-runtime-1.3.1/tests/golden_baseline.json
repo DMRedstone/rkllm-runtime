@@ -7,7 +7,7 @@
     "object": "model",
     "owned_by": "rkllm-runtime",
     "context_len": 4096,
-    "model_class": "small"
+    "model_class": "4b"
    }
   ]
  },

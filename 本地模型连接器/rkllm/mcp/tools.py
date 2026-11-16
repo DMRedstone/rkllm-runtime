@@ -614,7 +614,7 @@ def build_handlers(backend, cfg: dict, jobs, *,
                 # /health 是板端上下文的事实源；工具层预算随后按它收窄
                 cfg["context_len"] = context_len
             model_class = info.get("model_class")
-            if model_class in ("small", "medium", "large"):
+            if model_class and model_class.endswith("b"):
                 cfg["model_class"] = model_class
         lines = ["模型状态：" + json.dumps(info, ensure_ascii=False)]
         return {"content": [{"type": "text", "text": "\n".join(lines)}]}

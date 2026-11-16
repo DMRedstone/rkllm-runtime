@@ -160,7 +160,7 @@ def build_server(cfg: dict | None = None) -> StdioServer:
         backend = HttpBackend(cfg["endpoint"], cfg.get("api_key", ""),
                               timeout_s=int(cfg.get("target_timeout_s", 120)))
     return StdioServer(backend, cfg,
-                       model_class=os.environ.get("RKLLM_MODEL_CLASS", "small"))
+                       model_class=os.environ.get("RKLLM_MODEL_CLASS", "4b"))
 
 
 def cli_ask(prompt: str) -> int:

@@ -155,7 +155,7 @@ def _run_stdio(lines: list[dict], cfg_extra: dict | None = None,
     old_in, old_out = sys.stdin, sys.stdout
     sys.stdin, sys.stdout = stdin, stdout
     try:
-        server = StdioServer(_FakeBackend(), cfg, model_class="small",
+        server = StdioServer(_FakeBackend(), cfg, model_class="4b",
                              protocol_version="2025-11-25")
         server._refresh_model_class = lambda: None     # 不打网络
         server.serve_forever()

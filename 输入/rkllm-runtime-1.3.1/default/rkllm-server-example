@@ -376,9 +376,22 @@ RKLLM_EXTRA_ARGS=
 #RKLLM_MEMORY_CHECK=true
 #RKLLM_MEMORY_RESERVE_MB=1024
 #RKLLM_MIN_CONTEXT=1024
-# EN: Model class auto/small/medium/large; auto derives from file name + size.
-# 中文: 模型档位；auto 按文件名与体积推导。
+# EN: Model class in parameter-count terms: auto/4b/7b/14b/27b; auto derives
+#     from file name + size. Only 4b and 7b carry built-in defaults for
+#     max_tokens / max_tokens_limit / cache.max_mb; larger tiers warn at
+#     startup and must be configured by hand.
+# 中文: 模型档位按参数量命名（auto/4b/7b/14b/27b）；auto 按文件名与体积推导。
+#     只有 4b、7b 内置 max_tokens / max_tokens_limit / cache.max_mb 默认值，
+#     更大档位启动时告警，需手动配置这三项。
 #RKLLM_MODEL_CLASS=auto
+# EN: Generation defaults below are tier-managed: leave them commented out and
+#     they follow the tier (4b = 512/2048/512, 7b = 384/1536/1024). Set them
+#     explicitly to override; an explicit value always wins over the tier.
+# 中文: 下面三项由档位托管——保持注释即按档位取值（4b=512/2048/512，
+#     7b=384/1536/1024）；显式设置则覆盖档位，显式值永远优先。
+#RKLLM_MODEL_MAX_TOKENS=512
+#RKLLM_MODEL_MAX_TOKENS_LIMIT=2048
+#RKLLM_CACHE_MAX_MB=512
 
 # -- 服务端加固 / server hardening ---------------------------------
 #RKLLM_SERVER_MAX_BODY_BYTES=8388608

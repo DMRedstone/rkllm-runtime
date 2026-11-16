@@ -318,9 +318,9 @@ def test_batch_estimate_multiplies_segments():
 
 
 def test_job_timeout_covers_slow_model_estimate():
-    """task-8：27B/large 512 token 估算 341 s，job 超时必须放宽（旧 120 s 必失败）。"""
+    """task-8：27b 档 512 token 估算 341 s，job 超时必须放宽（旧 120 s 必失败）。"""
     server = _new_server(default_max_tokens=512)
-    server.model_class = "large"
+    server.model_class = "27b"
     try:
         explicit = server._job_worst_estimate({"max_tokens": 512}, "ask")
         assert explicit > 120
@@ -328,7 +328,7 @@ def test_job_timeout_covers_slow_model_estimate():
         assert timeout > explicit, "job 读超时必须覆盖估算"
         assert timeout >= explicit * 1.5
         assert timeout <= 1800
-        # 默认 ask 判 job（large 档预期 85 s）后实际仍可能生成 512 token：
+        # 默认 ask 判 job（27b 档预期 85 s）后实际仍可能生成 512 token：
         # 读超时必须按最坏值算，不能只看判定用的预期值。
         worst_default = server._job_worst_estimate({}, "ask")
         assert worst_default > 300

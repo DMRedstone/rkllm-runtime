@@ -60,9 +60,9 @@ def test_max_jobs_drops_oldest():
 
 
 def test_estimate_seconds():
-    # 2026-10-21 真机校准后的系数：small 4.5 / medium 3.5 / large 1.5 tok/s
-    assert estimate_seconds("small", 0, 512) == pytest.approx(113.78, abs=0.1)
-    assert estimate_seconds("large", 0, 512) == pytest.approx(341.33, abs=0.1)
-    assert estimate_seconds("small", 44, 0) == 1.0       # prefill 44/44（PREFILL 校准 50→44）
+    # 2026-10-21 真机校准 + 2026-11-16 qwen 实测：4b 5.0 / 7b 3.5 tok/s
+    assert estimate_seconds("4b", 0, 512) == pytest.approx(102.4, abs=0.1)
+    assert estimate_seconds("27b", 0, 512) == pytest.approx(341.33, abs=0.1)
+    assert estimate_seconds("4b", 44, 0) == 1.0       # prefill 44/44（PREFILL 校准 50→44）
     # 校准的实际意义：4B 上 300 token 必须超过 45 s 阈值而转 job
-    assert estimate_seconds("small", 60, 300) > 45
+    assert estimate_seconds("4b", 60, 300) > 45

@@ -51,7 +51,7 @@ class CancelFlag:
 
 
 class StdioServer:
-    def __init__(self, backend, cfg: dict, model_class: str = "small",
+    def __init__(self, backend, cfg: dict, model_class: str = "4b",
                  protocol_version: str | None = None,
                  job_estimate: Callable[[dict], float] | None = None):
         self.backend = backend
@@ -93,7 +93,7 @@ class StdioServer:
             info = self.backend.status()
             if isinstance(info, dict):
                 found = info.get("model_class")
-                if found in ("small", "medium", "large"):
+                if found and found.endswith("b"):
                     self.model_class = found
                     self.cfg["model_class"] = found
                 context_len = info.get("context_len")
@@ -232,7 +232,7 @@ class StdioServer:
         force_job = task_mode == "always"
         if task_mode != "never" and (force_job or estimate > threshold):
             # job 的读超时必须覆盖"真的生成满 max_tokens"的最坏情况，而不是
-            # 只覆盖判定用的预期值（否则 large 默认 ask 判 job 后仍会被超时掐断）。
+            # 只覆盖判定用的预期值（否则默认 ask 判 job 后仍会被超时掐断）。
             worst = self._job_worst_estimate(arguments, short)
             return self._run_as_job(short, handler, arguments, progress_token,
                                     request_id, estimate=estimate,
@@ -342,7 +342,7 @@ class StdioServer:
 
         判定 job 用"预期生成"（_estimate_decode_tokens，含 cap），但 job 路径
         实际会按 default_max_tokens 生成：读超时必须按最坏值放宽，否则
-        large 默认 ask（预期 85 s 判 job、实际可能 341 s）仍会被 120 s 掐断。
+        默认 ask（预期 85 s 判 job、实际可能 341 s）仍会被 120 s 掐断。
         """
         try:
             default = int(self.cfg.get("default_max_tokens", 512) or 512)
@@ -375,7 +375,7 @@ class StdioServer:
     def _job_timeout(self, estimate: float) -> float:
         """job 读超时 = max(target_timeout, 估算×factor+30)，上限可配。
 
-        旧实现 job 与同步共用 120 s：27B/large 512 token（估算 341 s）必被掐断。
+        旧实现 job 与同步共用 120 s：27B 档 512 token（估算 341 s）必被掐断。
         """
         try:
             base = float(self.cfg.get("target_timeout_s", 120) or 120)

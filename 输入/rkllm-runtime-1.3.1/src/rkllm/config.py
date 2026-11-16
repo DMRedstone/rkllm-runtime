@@ -84,16 +84,17 @@ SCHEMA: tuple[Key, ...] = (
     _k("model", "search_dirs", list, (), desc="裸模型名的搜索目录"),
     _k("model", "freq_helper", str, "auto",
        desc="锁频脚本路径；auto=用内建 sysfs 方案，给了路径则交给脚本"),
-    _k("model", "class", str, "auto", choices=("auto", "small", "medium", "large"),
-       desc="模型档位；auto 按文件名与大小推导"),
+    _k("model", "class", str, "auto", choices=("auto", "4b", "7b", "14b", "27b"),
+       desc="模型档位（参数量 4b/7b/14b/27b）；auto 按文件名与大小推导"),
     _k("model", "context", int, 4096, min_v=512, max_v=32768,
        desc="上下文长度；与内存预算联动校验"),
     _k("model", "min_context", int, 1024, min_v=256, max_v=8192,
        desc="内存不足时最低降到此值，再低则拒绝启动"),
     _k("model", "max_tokens", int, 0, min_v=0, max_v=1_000_000,
-       desc="默认生成长度；0=按档位（small 2048 / medium 1024 / large 512）"),
+       desc="默认生成长度；0=按档位（4b 512 / 7b 384；更大需手动配置）"),
     _k("model", "max_tokens_limit", int, 0, min_v=0, max_v=1_000_000,
-       desc="请求 max_tokens 上限；0=不额外限制（仅受 context 预算约束）"),
+       desc="请求 max_tokens 上限；0=按档位（4b 2048 / 7b 1536），"
+            "更大档位不额外限制（仅受 context 预算约束）"),
     _k("model", "threads", int, 4, min_v=1, max_v=8, desc="CPU 线程数"),
     _k("model", "platform", str, "auto",
        choices=("auto", "rk3588", "rk3576", "rk3562", "rv1126b"), desc="SoC 平台"),
@@ -164,7 +165,7 @@ SCHEMA: tuple[Key, ...] = (
     _k("cache", "dir", str, "/dev/shm/rkllm/prefix",
        desc="缓存目录；默认 tmpfs（内存），不可写时自动回退 /tmp/rkllm/prefix"),
     _k("cache", "max_mb", int, 512, min_v=0, max_v=8192,
-       desc="缓存目录容量上限；超出按最旧淘汰；0=不限"),
+       desc="缓存目录容量上限；按档位（4b 512 / 7b 1024）；超出按最旧淘汰；0=不限"),
     _k("cache", "ttl_s", int, 604800, min_v=0, max_v=2592000,
        desc="缓存文件 TTL；0=不过期"),
     # 是否接管单槽的判据：低于阈值视为「另一个会话」，不加载也不覆盖缓存
@@ -626,7 +627,7 @@ path = "/var/lib/rkllm/models/your-model.rkllm"
 #class = "auto"            # auto 按文件名与体积推导
 #context = 4096            # 内存不足时按 2048 / 1024 逐级降，不低于 min_context
 #min_context = 1024
-#max_tokens = 0            # 0 = 按档位（small 2048 / medium 1024 / large 512）
+#max_tokens = 0            # 0 = 按档位（4b 512 / 7b 384；更大需手动配置）
 #max_tokens_limit = 0      # 请求 max_tokens 上限；0=仅受 context 预算约束
 
 [engine]

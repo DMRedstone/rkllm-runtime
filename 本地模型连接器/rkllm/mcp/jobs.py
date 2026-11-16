@@ -25,13 +25,13 @@ MIN_SYNC_TOKENS = 8
 # 长文批量时更低。按 8 tok/s 估算会把 300 token 的请求算成 38.7 s（< 45 阈值）
 # 而同步执行，实际却要 80 s，直接撞上客户端 60 s 硬超时——这是把长任务判错的
 # 方向性错误，因此以实测值下压，宁可多转 job 也不让客户端超时。
-DECODE_TOK_S = {"small": 4.5, "medium": 3.5, "large": 1.5}
+DECODE_TOK_S = {"4b": 5.0, "7b": 3.5}
 PREFILL_TOK_S = 44
 
 
 def estimate_seconds(model_class: str, prefill_tokens: int,
                      max_tokens: int) -> float:
-    decode = DECODE_TOK_S.get(model_class, 3.5)   # 未知档位按保守值估，宁多转 job
+    decode = DECODE_TOK_S.get(model_class, 1.5)   # 无内置档位（14b/27b）按保守值估，宁多转 job
     return prefill_tokens / PREFILL_TOK_S + max_tokens / decode
 
 
@@ -44,7 +44,7 @@ def sync_token_cap(model_class: str, prefill_tokens: int,
     很大"而把短任务误判成 job，也不会让同步调用真的跑过客户端 60 s 硬超时。
     被夹断时后端会返回 finish_reason=length，工具层会给出明确提示。
     """
-    decode = DECODE_TOK_S.get(model_class, 3.5)   # 未知档位按保守值估，宁多转 job
+    decode = DECODE_TOK_S.get(model_class, 1.5)   # 无内置档位（14b/27b）按保守值估，宁多转 job
     room_s = float(threshold_s) - prefill_tokens / PREFILL_TOK_S - 1.0
     return max(MIN_SYNC_TOKENS, int(room_s * decode))
 
@@ -53,7 +53,7 @@ def job_timeout_s(estimate_s: float, base_s: float = 120.0,
                   factor: float = 1.5, max_s: float = 1800.0) -> float:
     """job 的读超时：估算的 factor 倍 + 30 s 余量，但不小于 base。
 
-    旧实现 job 与同步共用 target_timeout_s=120：27B/large 512 token 的估算
+    旧实现 job 与同步共用 target_timeout_s=120：27B 档 512 token 的估算
     约 341 s，必然被 120 s 总超时掐断。job 是后台任务，读超时应按估算放宽。
     """
     return min(float(max_s),

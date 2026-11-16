@@ -22,7 +22,7 @@ __all__ = ["MemoryBudgetError", "Plan", "available_mb", "model_size_mb",
            "kv_mb", "plan", "check_budget", "CONTEXT_STEPS"]
 
 # 每 token KV 占用（MiB）。经验值，见模块 docstring 的说明。
-KV_MB_PER_TOKEN = {"small": 0.125, "medium": 0.156, "large": 0.281}
+KV_MB_PER_TOKEN = {"4b": 0.125, "7b": 0.156, "14b": 0.281, "27b": 0.281}
 
 # 降级步进（设计 §7.1 的三个档）
 CONTEXT_STEPS = (4096, 2048, 1024)
@@ -71,8 +71,26 @@ def model_size_mb(path: str) -> float:
         return 0.0
 
 
+def _kv_per_token(model_class: str) -> float:
+    """按参数量档位取 KV 系数；未知档位按参数量近似（保守偏低）。"""
+    if model_class in KV_MB_PER_TOKEN:
+        return KV_MB_PER_TOKEN[model_class]
+    value = str(model_class).strip().lower()
+    if value.endswith("b"):
+        try:
+            params = float(value[:-1])
+        except ValueError:
+            params = 4.0
+        if params <= 4:
+            return 0.125
+        if params <= 7:
+            return 0.156
+        return 0.281
+    return 0.125
+
+
 def kv_mb(model_class: str, context: int) -> float:
-    per_token = KV_MB_PER_TOKEN.get(model_class, KV_MB_PER_TOKEN["small"])
+    per_token = _kv_per_token(model_class)
     return per_token * max(1, int(context))
 
 
