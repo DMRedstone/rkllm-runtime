@@ -19,7 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from rkllm.config import config_docs, config_init, config_show, load_config
 from rkllm.mcp import tools as tools_mod
 from rkllm.platform import (MemoryBudgetError, derive_class, kv_mb,
-                            max_tokens_for, plan)
+                            cache_max_mb_for, max_tokens_for,
+                            max_tokens_limit_for, plan)
 from rkllm.server.app import create_app
 
 
@@ -104,8 +105,11 @@ def test_derive_class_from_size(tmp_path):
     f = tmp_path / "model.rkllm"
     f.write_bytes(b"\0" * (7 * 1024 * 1024))        # 7 MiB → small
     assert derive_class(str(f)) == derive_class(str(f))  # 稳定
-    assert max_tokens_for("small") == 2048
-    assert max_tokens_for("large") == 512
+    assert max_tokens_for("small") == 512        # 4B 实测值
+    assert max_tokens_for("medium") == 384       # 7B 保守估计
+    assert max_tokens_for("large") == 0          # 不内置，需手动配置
+    assert max_tokens_limit_for("small") == 2048
+    assert cache_max_mb_for("medium") == 1024
 
 
 def test_kv_scales_with_context():
