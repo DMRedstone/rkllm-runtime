@@ -19,6 +19,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from ..agent.json_schema import validate as validate_schema
+from ..agent import tokens as token_counter
 from ..agent.pipeline import Pipeline
 
 
@@ -90,6 +91,21 @@ def json_payload(text: str):
     raise ValueError("no JSON object found in model output")
 
 
+def _calibrate_tokens(pipe, perf: dict) -> None:
+    """用 runtime 的 prefill_tokens（真值）校准 bytes/token 估算。
+
+    只在估算档生效（装了精确 tokenizer 时 `calibrate()` 自己会跳过）。样本异常
+    由 `tokens.calibrate()` 丢弃，这里不做二次判断。
+    """
+    try:
+        actual = int((perf or {}).get("prefill_tokens") or 0)
+        prompt_bytes = int(getattr(pipe, "prompt_bytes", 0) or 0)
+        if actual > 0 and prompt_bytes > 0:
+            token_counter.calibrate(prompt_bytes, actual)
+    except Exception:                       # noqa: BLE001 - 校准失败不影响主流程
+        pass
+
+
 def run_blocking(svc, pipe: Pipeline) -> dict:
     """排队 + 收齐整段（非流式路径；队列在 worker 线程里同步执行）。"""
     parts: list[str] = []
@@ -110,6 +126,7 @@ def run_blocking(svc, pipe: Pipeline) -> dict:
     metrics["last_ttft_s"] = ((first_token_at - started)
                               if first_token_at else 0.0)
     perf = meta.get("perf") or {}
+    _calibrate_tokens(pipe, perf)
     gen_tokens = int(perf.get("generate_tokens") or 0)
     ttft = (first_token_at - started) if first_token_at else None
     decode = (elapsed - ttft) if ttft is not None else None
@@ -181,6 +198,10 @@ class StreamTimer:
         metrics["duration_sum"] = (metrics.get("duration_sum", 0.0)
                                    + (time.monotonic() - self.started))
         perf = pipe.last_perf() if hasattr(pipe, "last_perf") else None
+        if isinstance(perf, dict):
+            _calibrate_tokens(pipe, perf)
+        elif perf:
+            _calibrate_tokens(pipe, {"prefill_tokens": perf[0]})
         # last_perf 可能是 (prefill, generate) 元组，也可能是 dict（fake 路径）
         if isinstance(perf, dict):
             gen_tokens = int(perf.get("generate_tokens") or 0)

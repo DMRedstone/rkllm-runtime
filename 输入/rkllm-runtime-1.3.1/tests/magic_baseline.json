@@ -1,6 +1,6 @@
 {
   "note": "N11 魔法数基线：这里的每个数值都等于'不打算做配置键'的声明。新增项必须在提交说明里写理由。",
-  "count": 169,
+  "count": 171,
   "registered": [
     "abi.py:28:4096",
     "abi.py:29:2048",
@@ -9,6 +9,8 @@
     "abi.py:64:104",
     "agent/responses.py:33:24",
     "agent/responses.py:37:24",
+    "agent/tokens.py:36:0.8",
+    "agent/tokens.py:39:0.3",
     "caps.py:78:4096",
     "caps.py:79:2048",
     "caps.py:82:900",
@@ -106,8 +108,8 @@
     "server/routes/openai.py:226:200",
     "server/routes/openai.py:226:503",
     "server/routes/openai.py:74:400",
-    "server/routes/ops.py:74:503",
-    "server/routes/ops.py:98:200",
+    "server/routes/ops.py:101:200",
+    "server/routes/ops.py:77:503",
     "server/routes/responses.py:103:400",
     "server/routes/responses.py:126:400",
     "server/routes/responses.py:129:422",

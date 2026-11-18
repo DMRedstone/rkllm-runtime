@@ -15,16 +15,16 @@ from typing import Iterator
 from .conversation import build_prompt
 from .gateway import InferenceGateway
 from .reasoning import ReasoningSplitter
-from .tokens import BYTES_PER_TOKEN, estimate_tokens
+from .tokens import count_tokens
 from .tools import ToolCallParser, build_tools_prefix, detect_parser
 
 
 _SAMPLING_KEYS = ("top_k", "top_p", "temperature", "repeat_penalty",
                   "presence_penalty", "frequency_penalty")
 
-# 预算估算：按 UTF-8 字节 / 3 保守折算 token（中文 ≈1 token/字，英文高估 33%）。
+# 预算估算：`tokens.count_tokens()` —— 有词表用精确 tokenizer，否则按
+# runtime 的 prefill_tokens 自校准过的 bytes/token 折算。
 # 宁可少生成，也不把 prompt+max_tokens 送过 context 让 rkllm_run 返回 -1。
-PROMPT_BYTES_PER_TOKEN = BYTES_PER_TOKEN
 CONTEXT_MARGIN_TOKENS = 32
 MIN_NEW_TOKENS = 8
 
@@ -121,7 +121,9 @@ class Pipeline:
             raise ValueError(
                 "max_tokens=%d exceeds model.max_tokens_limit=%d; lower "
                 "max_tokens or raise model.max_tokens_limit" % (requested, limit))
-        self.prompt_tokens = estimate_tokens(self._prompt)
+        self.prompt_tokens = count_tokens(self._prompt)
+        # 校准用：本请求提交的 prompt 字节数（pipeline_runner 与 perf 对账）
+        self.prompt_bytes = len(self._prompt.encode("utf-8"))
         self.max_tokens_clamped = False
         context = int(getattr(self.svc, "context_len", 0) or 0)
         if context <= 0:
@@ -320,8 +322,8 @@ class Pipeline:
 
     def usage(self, result: dict | None = None) -> dict:
         text = "".join(self._content_before)
-        usage = {"prompt_tokens": estimate_tokens(self._prompt),
-                 "completion_tokens": estimate_tokens(
+        usage = {"prompt_tokens": count_tokens(self._prompt),
+                 "completion_tokens": count_tokens(
                      text + "".join(self._reasoning)),
                  "total_tokens": 0}
         usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]

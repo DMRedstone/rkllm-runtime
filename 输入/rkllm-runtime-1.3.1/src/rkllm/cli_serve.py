@@ -37,6 +37,11 @@ def _cmd_serve(args) -> int:
                        max_tokens_for, max_tokens_limit_for)
     cfg.values["model.path"] = _resolve_model_path(cfg.model.path,
                                                   cfg.model.search_dirs)
+    # token 计数：有 tokenizer.json 就用精确实现，否则靠 prefill_tokens 自校准
+    from .agent.tokens import configure as _configure_tokens, stats as _token_stats
+    _tok = _configure_tokens(cfg.model.path)
+    if _tok["backend"] == "tokenizers":
+        sys.stderr.write("[rkllm] token 计数：精确 tokenizer（%s）\n" % _tok["source"])
     # 档位默认只覆盖 4b/7b；仅当用户未显式配置（source=default）时套用，
     # 显式配置永远优先。更大档位（14b/27b/未知）不内置，打印告警要求手动配置。
     model_class = derive_class(cfg.model.path,

@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from ... import caps
 from ...platform import npu_status
+from ...agent.tokens import stats as _token_stats
 from ..cacheview import cache_stats as _cache_stats
 
 router = APIRouter()
@@ -59,6 +60,8 @@ def health(request: Request):
         "npu": {"available": npu_ok, "detail": npu_detail},
         # 设计 §6.4(4)：缓存命中与占用对运维可见
         "cache": _cache_stats(svc.cfg),
+        # token 计数状态：backend=tokenizers（精确）/estimate（自校准估算）
+        "tokens": _token_stats(),
     }
 
 

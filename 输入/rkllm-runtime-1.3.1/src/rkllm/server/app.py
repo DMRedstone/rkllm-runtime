@@ -235,6 +235,8 @@ def _render_metrics(request: Request) -> str:
     m = svc.queue.metrics
     sup = svc.supervisor.metrics if svc.supervisor else {}
     cache = _cache_stats(svc.cfg)          # 只读一次，避免 /metrics 双次统计
+    from ..agent.tokens import stats as _token_stats
+    tok = _token_stats()                   # token 比例校准状态（counter + gauge 都用）
     counters = {
         "rkllm_requests_total": ("受理的请求数", m["requests_total"]),
         "rkllm_rejected_total": ("被拒绝/超时的请求数", m["rejected_total"]),
@@ -252,6 +254,8 @@ def _render_metrics(request: Request) -> str:
         # 计数器一律以 _total 结尾（Prometheus 约定）：prometheus_client 会给
         # Counter 追加 _total 与 _created，旧名字里的 _sum 后缀会被改写，
         # 与其被库改名，不如先按约定命名。
+        "rkllm_token_calibrations_total": ("token 比例校准样本数",
+                                           tok["samples"]),
         "rkllm_max_tokens_clamped_total": (
             "max_tokens 被 context 预算裁剪的次数",
             m.get("max_tokens_clamped_total", 0)),
@@ -259,6 +263,8 @@ def _render_metrics(request: Request) -> str:
     sampler = getattr(request.app.state, "res_sampler", None)
     snap = sampler.snapshot() if sampler is not None else {}
     gauges = {
+        "rkllm_token_bytes_per_token": ("token 估算的 bytes/token（自校准）",
+                                        tok["bytes_per_token"]),
         "rkllm_npu_freq_mhz": ("NPU 当前频率（MHz）", snap.get("npu_freq_mhz") or 0.0),
         "rkllm_ddr_freq_mhz": ("DDR 当前频率（MHz）", snap.get("ddr_freq_mhz") or 0.0),
         "rkllm_mem_available_mb": ("系统可用内存（MB）",

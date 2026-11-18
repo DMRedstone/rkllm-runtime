@@ -9,8 +9,18 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from rkllm.agent.pipeline import (CONTEXT_MARGIN_TOKENS, Pipeline,
-                                  PROMPT_BYTES_PER_TOKEN)
+import pytest
+
+from rkllm.agent import tokens as token_counter
+from rkllm.agent.pipeline import CONTEXT_MARGIN_TOKENS, Pipeline
+
+
+@pytest.fixture(autouse=True)
+def _fresh_token_counter():
+    # 比例是模块级状态，别的用例校准过就会影响本文件的期望值
+    token_counter.reset()
+    yield
+    token_counter.reset()
 
 
 class _Svc:
@@ -44,7 +54,7 @@ def test_prompt_too_long_rejected_with_clear_error():
 def test_max_tokens_clamped_to_remaining_context():
     svc = _Svc(context=128)
     pipe = _pipe(svc, "hi", 1000)
-    estimated = max(1, len(pipe._prompt.encode("utf-8")) // PROMPT_BYTES_PER_TOKEN)
+    estimated = token_counter.count_tokens(pipe._prompt)
     expected = 128 - estimated - CONTEXT_MARGIN_TOKENS
     assert pipe.max_tokens == expected
     assert pipe.max_tokens_clamped is True
