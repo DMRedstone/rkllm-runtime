@@ -12,6 +12,7 @@ from __future__ import annotations
 import codecs
 import ctypes
 import logging
+import os
 import queue
 import sys
 import threading
@@ -19,9 +20,9 @@ import threading
 from ..abi import (RKLLMError, RKLLM_INFER_GENERATE, RKLLM_INPUT_PROMPT,
                    RKLLM_RUN_ERROR, RKLLM_RUN_FINISH, RKLLM_RUN_NORMAL,
                    BIG_CORE_PLATFORMS, CPU_MASK_HIGH, CPU_MASK_LOW,
-                   MODEL_SUFFIX, _Callback, _InferParam, _Input, _Param,
-                   _PromptCacheParam, _ResultCallback, _SamplingParam,
-                   _TokenizerCallback,
+                   MODEL_SUFFIX, _Callback, _InferParam, _Input, _LoraAdapter,
+                   _LoraParam, _Param, _PromptCacheParam, _ResultCallback,
+                   _SamplingParam, _TokenizerCallback,
                    _EmbedCallback, bind_library, load_library)
 
 STREAM_JOIN_TIMEOUT_S = 60
@@ -84,7 +85,7 @@ class RealEngine:
     def __init__(self, model_path, platform, context_len=4096,
                  max_new_tokens=2048, keep_history=False,
                  threads=4, system_prompt=None, lib_path=None, verbose=False,
-                 prompt_cache=None):
+                 prompt_cache=None, lora_paths=()):
         self.model_path = model_path
         self.model_name = model_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
         if self.model_name.endswith(MODEL_SUFFIX):
@@ -159,7 +160,57 @@ class RealEngine:
         self._infer.mode = RKLLM_INFER_GENERATE
         self._infer.keep_history = self.keep_history
         self._infer.max_new_tokens = 0
+        # LoRA：handle 级加载，推理时按名字选中（infer_params.lora_params）
+        self._lora_params = {}
+        self.load_loras(lora_paths)
         self.system_prompt = (system_prompt or "").strip()
+
+    # -- LoRA ---------------------------------------------------------------
+
+    def load_loras(self, paths) -> dict:
+        """把 adapter 挂到 handle 上，返回 {名字: _LoraParam}。
+
+        名字取文件名 stem（`domain.rkllm` → `domain`），请求里用 `lora` 字段选。
+        三条显性失败路径（都不静默）：
+        * runtime 不导出 `rkllm_load_lora`（旧库）→ 报错，让用户在配置里去掉；
+        * adapter 文件不存在 → 报错；
+        * `rkllm_load_lora` 返回非 0 → 报错并带 code。
+        """
+        loaded: dict = {}
+        paths = [str(p).strip() for p in (paths or []) if str(p).strip()]
+        if not paths:
+            return loaded
+        missing = getattr(self.lib, "rkllm_optional_missing", ())
+        if "rkllm_load_lora" in missing:
+            raise RKLLMError(
+                "当前 librkllmrt.so 不导出 rkllm_load_lora，无法加载 LoRA adapter；"
+                "请升级 runtime，或清空 model.lora_paths")
+        for path in paths:
+            if not os.path.isfile(path):
+                raise RKLLMError("LoRA adapter 不存在：%s" % path)
+            name = os.path.splitext(os.path.basename(path))[0]
+            name_bytes = name.encode("utf-8")
+            adapter = _LoraAdapter(lora_adapter_path=path.encode("utf-8"),
+                                   lora_adapter_name=name_bytes, scale=1.0)
+            code = self.lib.rkllm_load_lora(self._handle,
+                                            ctypes.byref(adapter))
+            if code != 0:
+                raise RKLLMError("rkllm_load_lora(%s) 失败，code %d（%s）"
+                                 % (name, code, path))
+            infer_lora = _LoraParam(lora_adapter_name=name_bytes)
+            # 结构体与字节串都要活到推理结束（ctypes 不留引用会被回收）
+            self._keep.extend([adapter, adapter.lora_adapter_path,
+                               adapter.lora_adapter_name, infer_lora,
+                               name_bytes])
+            loaded[name] = infer_lora
+            if self.verbose:
+                sys.stderr.write("[rkllm] LoRA adapter 已加载：%s\n" % name)
+        self._lora_params.update(loaded)      # 推理时按名字查这张表
+        return loaded
+
+    @property
+    def loras(self) -> tuple:
+        return tuple(self._lora_params)
 
     # -- 回调（绝不 unwind 进 C）--------------------------------------------
 
@@ -193,7 +244,7 @@ class RealEngine:
     # -- 推理 ----------------------------------------------------------------
 
     def stream(self, prompt, role="user", enable_thinking=False,
-               sampling=None, max_new_tokens=None, cache_hint=True):
+               sampling=None, max_new_tokens=None, cache_hint=True, lora=None):
         """产出文本片段。同一引擎并发调用显式失败（_stream_guard）。
 
         前缀缓存（cache.*）在这里决策：命中则让 runtime 加载缓存、只算新增
@@ -203,6 +254,12 @@ class RealEngine:
         """
         if self._destroyed:
             raise RKLLMError("engine already destroyed")
+        lora_name = (lora or "").strip() or None
+        if lora_name is not None and lora_name not in self._lora_params:
+            # 显性拒绝：配了不存在的 adapter 就报错，不要静默按基座模型跑
+            raise RKLLMError(
+                "未知 LoRA adapter: %s（已加载：%s）"
+                % (lora_name, ", ".join(self._lora_params) or "无"))
         if not self._stream_guard.acquire(blocking=False):
             raise RKLLMError("concurrent stream() calls on one engine are not supported")
         try:
@@ -220,7 +277,7 @@ class RealEngine:
                 try:
                     for item in self._stream_once(
                             prompt, role, enable_thinking, sampling,
-                            max_new_tokens, cache_path, save):
+                            max_new_tokens, cache_path, save, lora_name):
                         produced = True
                         yield item
                     break
@@ -243,7 +300,7 @@ class RealEngine:
             self._stream_guard.release()
 
     def _stream_once(self, prompt, role, enable_thinking, sampling,
-                     max_new_tokens, cache_path=None, save=0):
+                     max_new_tokens, cache_path=None, save=0, lora=None):
         """一次完整推理尝试；并发锁与缓存命中判断由 stream() 负责。"""
         self._last_perf = None
         self._decoder.reset()
@@ -266,6 +323,10 @@ class RealEngine:
             run_sampling = _SamplingParam(**build_sampling(sampling))
             sampling_ptr = ctypes.pointer(run_sampling)
         self._infer.sampling_params = sampling_ptr
+        # LoRA 选择：每次推理显式设置（None = 不挂 adapter），避免上一次的选择泄漏
+        lora_param = self._lora_params.get(lora) if lora else None
+        self._infer.lora_params = (ctypes.pointer(lora_param)
+                                   if lora_param is not None else None)
         self._infer.max_new_tokens = int(max_new_tokens) if max_new_tokens else 0
 
         # 前缀缓存指针：结构体与路径 bytes 都必须活到 rkllm_run 返回

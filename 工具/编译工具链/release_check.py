@@ -17,7 +17,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 PACKAGING = ROOT / "输入" / "rkllm-runtime-1.3.1"
 SRC = PACKAGING / "src"
-EXPECTED_KEYS = 85
+# 2026-11-18：新增 model.lora_paths → 86 键（.d 45 键 + 启动最小集）
+EXPECTED_KEYS = 86
 
 
 def _read_version() -> str:

@@ -30,13 +30,25 @@ MIN_NEW_TOKENS = 8
 
 
 class Pipeline:
-    def __init__(self, svc: InferenceGateway, body: dict, *, chat: bool):
+    def __init__(self, svc: InferenceGateway, body: dict, *, chat: bool,
+                 endpoint: str = "chat.completions"):
         # A-5：svc 只需满足 InferenceGateway 契约（模型名/tool 配置/system/
         # supervisor/queue/ttft_log），不再要求完整 ServiceState。
         self.svc = svc
         self.body = body
         self.chat = chat
+        # 指标维度：chat.completions / completions / responses（见 metricsutil）
+        self.endpoint = endpoint
         self.max_tokens = int(body.get("max_tokens") or 0) or None
+        # LoRA（非 OpenAI 标准扩展）：lora 字段选 adapter，名字来自
+        # model.lora_paths 的文件名 stem。未知名字显性拒绝，不静默退回基座模型。
+        self.lora = (body.get("lora") or "").strip() or None
+        if self.lora is not None:
+            known = tuple(getattr(svc, "loras", ()) or ())
+            if self.lora not in known:
+                raise ValueError(
+                    "unknown lora adapter: %s（可用：%s）"
+                    % (self.lora, ", ".join(known) or "无；请在 model.lora_paths 配置"))
         # P1-14：reasoning_effort 真正接线——非 none 即开启思考（runtime 只有
         # enable_thinking 布尔开关）；显式 enable_thinking 存在时优先。
         _re = body.get("reasoning_effort")
@@ -150,7 +162,8 @@ class Pipeline:
             sampling=self.sampling(),
             # 多轮对话才值得写前缀缓存（单轮存了不会命中）
             cache_hint=len(self.body.get("messages") or []) >= 2,
-            request_timeout_s=self.svc.queue.request_timeout_s)
+            request_timeout_s=self.svc.queue.request_timeout_s,
+            lora=self.lora)
         _first = True
         for token in stream:
             if isinstance(token, dict):

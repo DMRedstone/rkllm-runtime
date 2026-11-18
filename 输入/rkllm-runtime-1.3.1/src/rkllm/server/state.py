@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from .. import VERSION
 from ..platform import derive_class, max_tokens_for
@@ -39,6 +40,9 @@ class PolicyView:
         # 键名是 model.class（Python 关键字），只能用 getattr 取。
         self.model_class = derive_class(cfg.model.path,
                                        getattr(cfg.model, "class", "auto"))
+        # LoRA：已配置 adapter 的名字集合（取文件名 stem），供请求侧显性校验
+        self.loras = tuple(
+            Path(p).stem for p in (getattr(cfg.model, "lora_paths", ()) or ()))
         self.default_max_tokens = (cfg.model.max_tokens
                                    or max_tokens_for(self.model_class))
         # 请求 max_tokens 的部署级上限；0=不额外限制，由 context 预算裁剪

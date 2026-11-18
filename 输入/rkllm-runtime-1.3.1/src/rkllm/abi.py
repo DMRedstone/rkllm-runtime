@@ -87,6 +87,17 @@ class _Param(ctypes.Structure):
     ]
 
 
+class _LoraAdapter(ctypes.Structure):
+    """`rkllm_load_lora` 的入参：adapter 文件路径 + 名字 + 缩放系数。
+
+    与 `_LoraParam`（推理时按名字选中已加载的 adapter）是两件事：先用本结构
+    把 adapter 挂到 handle 上，再在 infer_params 里指定用哪一个。
+    """
+    _fields_ = [("lora_adapter_path", ctypes.c_char_p),
+                ("lora_adapter_name", ctypes.c_char_p),
+                ("scale", ctypes.c_float)]
+
+
 class _LoraParam(ctypes.Structure):
     _fields_ = [("lora_adapter_name", ctypes.c_char_p)]
 
@@ -216,6 +227,8 @@ _REQUIRED_SYMBOLS = (
     "rkllm_set_function_tools",
 )
 
+_OPTIONAL_SYMBOLS = ("rkllm_load_lora",)
+
 _SIGNATURES = {
     "rkllm_init": ([ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(_Param),
                     ctypes.POINTER(_Callback)], ctypes.c_int),
@@ -231,6 +244,9 @@ _SIGNATURES = {
                                  ctypes.c_char_p, ctypes.c_char_p], ctypes.c_int),
     "rkllm_set_function_tools": ([ctypes.c_void_p, ctypes.c_char_p,
                                   ctypes.c_char_p, ctypes.c_char_p], ctypes.c_int),
+    # LoRA：handle 级加载（可选符号——旧 runtime 没有该导出，缺失时按不支持处理）
+    "rkllm_load_lora": ([ctypes.c_void_p, ctypes.POINTER(_LoraAdapter)],
+                        ctypes.c_int),
 }
 
 
@@ -298,7 +314,12 @@ def load_library(lib_path: str | None = None) -> tuple[ctypes.CDLL, str, dict]:
 
 
 def bind_library(lib: ctypes.CDLL) -> ctypes.CDLL:
-    """声明函数原型；符号缺失时显式失败（不静默）。"""
+    """声明函数原型；**必需**符号缺失时显式失败（不静默）。
+
+    可选符号（`_OPTIONAL_SYMBOLS`，目前只有 LoRA）缺失时只记录在
+    `lib.rkllm_optional_missing` 里：旧版 runtime 没有该导出属于正常情况，
+    由调用方决定降级（拒绝带 adapter 的请求）还是忽略。
+    """
     for name in _REQUIRED_SYMBOLS:
         try:
             func = getattr(lib, name)
@@ -308,4 +329,15 @@ def bind_library(lib: ctypes.CDLL) -> ctypes.CDLL:
         argtypes, restype = _SIGNATURES[name]
         func.argtypes = argtypes
         func.restype = restype
+    missing = []
+    for name in _OPTIONAL_SYMBOLS:
+        try:
+            func = getattr(lib, name)
+        except AttributeError:
+            missing.append(name)
+            continue
+        argtypes, restype = _SIGNATURES[name]
+        func.argtypes = argtypes
+        func.restype = restype
+    lib.rkllm_optional_missing = tuple(missing)
     return lib

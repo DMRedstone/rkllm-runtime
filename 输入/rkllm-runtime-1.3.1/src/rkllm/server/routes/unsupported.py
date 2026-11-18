@@ -24,12 +24,12 @@ from ... import caps
 router = APIRouter()
 
 # 路径 -> (能力表键, 建议替代)
+# 路径 -> (能力表键, 建议替代)。路径**不带** `/v1`：路由挂载两次（带前缀与
+# 根路径别名），所以这里只描述资源名，前缀由 app.create_app 决定。
 _UNSUPPORTED: dict[str, tuple[str, str]] = {
-    "/v1/embeddings": ("embeddings", "/v1/chat/completions（本服务不提供向量化）"),
-    "/v1/messages": ("messages(anthropic)", "/v1/chat/completions（OpenAI 形状）"),
-    # root_alias 会把 /moderations 改写到这里；没有这条路由就落框架 404，
-    # 与其余 unsupported 端点的显式 501 不一致（10-25 审计 P2）。
-    "/v1/moderations": ("moderations", "/v1/chat/completions（本服务不做内容审核）"),
+    "/embeddings": ("embeddings", "/v1/chat/completions（本服务不提供向量化）"),
+    "/messages": ("messages(anthropic)", "/v1/chat/completions（OpenAI 形状）"),
+    "/moderations": ("moderations", "/v1/chat/completions（本服务不做内容审核）"),
 }
 
 
@@ -41,7 +41,7 @@ def _reject(path: str) -> JSONResponse:
     body = {
         "error": {
             "message": (
-                "endpoint %s is not implemented by this service (capability=%s). "
+                "endpoint /v1%s is not implemented by this service (capability=%s). "
                 "Use %s instead. See GET /v1/capabilities for the full matrix."
                 % (path, tier, alternative)
             ),
@@ -54,19 +54,19 @@ def _reject(path: str) -> JSONResponse:
                         headers={"X-RKLLM-Endpoint": "unsupported"})
 
 
-@router.post("/v1/embeddings", include_in_schema=False)
+@router.post("/embeddings", include_in_schema=False)
 async def embeddings_not_implemented(request: Request) -> JSONResponse:
-    return _reject("/v1/embeddings")
+    return _reject("/embeddings")
 
 
-@router.post("/v1/messages", include_in_schema=False)
+@router.post("/messages", include_in_schema=False)
 async def anthropic_messages_not_implemented(request: Request) -> JSONResponse:
-    return _reject("/v1/messages")
+    return _reject("/messages")
 
 
-@router.post("/v1/moderations", include_in_schema=False)
+@router.post("/moderations", include_in_schema=False)
 async def moderations_not_implemented(request: Request) -> JSONResponse:
-    return _reject("/v1/moderations")
+    return _reject("/moderations")
 
 
 __all__ = ["router", "_UNSUPPORTED"]

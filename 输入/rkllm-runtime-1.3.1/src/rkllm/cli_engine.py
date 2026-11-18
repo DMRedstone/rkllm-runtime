@@ -73,7 +73,8 @@ def _build_supervisor(cfg, *, use_fake: bool):
                 model_path=cfg.model.path, platform=platform,
                 context_len=cfg.model.context, max_new_tokens=max_tokens,
                 keep_history=cfg.model.keep_history, threads=cfg.model.threads,
-                prompt_cache=cache)
+                prompt_cache=cache,
+                lora_paths=list(getattr(cfg.model, "lora_paths", ()) or ()))
         supervisor = LocalSupervisor(engine,
                                      load_timeout_s=cfg.engine.load_timeout_s)
         supervisor.start()
@@ -97,6 +98,9 @@ def _build_supervisor(cfg, *, use_fake: bool):
             worker_args += ["--cache-dir", cfg.cache.dir,
                             "--cache-max-mb", str(cfg.cache.max_mb),
                             "--cache-ttl-s", str(cfg.cache.ttl_s)]
+        # LoRA：adapter 在 worker 里 init 之后加载（handle 级）
+        for lora in getattr(cfg.model, "lora_paths", ()) or ():
+            worker_args += ["--lora-path", lora]
     worker_args += ["--heartbeat-interval",
                     str(cfg.engine.heartbeat_interval_s)]
     supervisor = Supervisor(

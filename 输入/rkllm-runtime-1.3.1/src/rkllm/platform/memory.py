@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import psutil
+
 __all__ = ["MemoryBudgetError", "Plan", "available_mb", "model_size_mb",
            "kv_mb", "plan", "check_budget", "CONTEXT_STEPS"]
 
@@ -95,21 +97,20 @@ def kv_mb(model_class: str, context: int) -> float:
 
 
 def available_mb() -> float | None:
-    """MemAvailable + SwapFree（MiB）；非 Linux 返回 None（跳过校验）。"""
+    """MemAvailable + SwapFree（MiB）；读不到返回 None（跳过校验）。
+
+    改用 psutil 而非手写解析 `/proc/meminfo`：字段语义（available 即
+    MemAvailable）与内核差异由库兜住，我们只负责"怎么用这个数"。
+    """
     try:
-        info: dict[str, int] = {}
-        with open("/proc/meminfo", encoding="ascii", errors="replace") as fh:
-            for line in fh:
-                key, _, rest = line.partition(":")
-                parts = rest.split()
-                if parts:
-                    info[key.strip()] = int(parts[0])     # kB
-    except (OSError, ValueError):
+        mem = psutil.virtual_memory()
+        swap = psutil.swap_memory()
+    except Exception:                     # psutil 在异常内核上会抛 OSError/ValueError
         return None
-    if "MemAvailable" not in info:
+    total_bytes = int(getattr(mem, "available", 0)) + int(getattr(swap, "free", 0))
+    if total_bytes <= 0:
         return None
-    total_kb = info.get("MemAvailable", 0) + info.get("SwapFree", 0)
-    return total_kb / 1024.0
+    return total_bytes / (1024.0 * 1024.0)
 
 
 def plan(model_class: str, configured_context: int, *, model_path: str = "",
@@ -117,8 +118,8 @@ def plan(model_class: str, configured_context: int, *, model_path: str = "",
          available: float | None = None) -> Plan:
     """按设计口径求可行 context。不抛错，只在无法满足时抛 MemoryBudgetError。
 
-    available 显式传入用于测试；None 时读 /proc/meminfo，读不到则视为不校验
-    （返回 configured_context 的 Plan，available 记为 -1）。
+    available 显式传入用于测试；None 时读 psutil（MemAvailable + SwapFree），
+    读不到则视为不校验（返回 configured_context 的 Plan，available 记为 -1）。
     """
     model = model_size_mb(model_path)
     avail = available_mb() if available is None else available

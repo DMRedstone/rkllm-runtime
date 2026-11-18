@@ -395,6 +395,10 @@ def check_data(members: dict[str, bytes], control_info: dict) -> None:
         problems = []
         for m in tf.getmembers():
             name = m.name
+            # dpkg-deb 会额外写一个 "." 作为归档根条目（自写 ar+tar 版本没有），
+            # 归一成 "./" 再判断，避免把权威实现产出的合法包判成不合规。
+            if name == ".":
+                name = "./"
             if not name.startswith("./"):
                 problems.append((name, "path does not start with ./"))
                 continue

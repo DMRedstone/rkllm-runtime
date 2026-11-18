@@ -77,7 +77,7 @@ class WorkerClient:
     def run(self, prompt: str, *, role: str = "user",
             enable_thinking: bool = False, max_new_tokens: int | None = None,
             sampling: dict | None = None, cache_hint: bool = True,
-            request_timeout_s: int = 900) -> Iterator[str]:
+            request_timeout_s: int = 900, lora: str | None = None) -> Iterator[str]:
         req_id = uuid.uuid4().hex[:10]
         self._run_id = req_id
         self.active = True
@@ -91,7 +91,8 @@ class WorkerClient:
                                                          "enable_thinking": enable_thinking,
                                                          "max_new_tokens": max_new_tokens,
                                                          "sampling": sampling,
-                                                         "cache_hint": cache_hint}})
+                                                         "cache_hint": cache_hint,
+                                                         "lora": lora}})
             except OSError as exc:
                 # worker 被 kill -9 后第一次写帧是 BrokenPipeError，不是 EOF：
                 # 不转成 WorkerDown 的话，自愈逻辑不会触发，路由层还会把它当 500。
@@ -483,7 +484,8 @@ class LocalSupervisor:
                 max_new_tokens: int | None = None,
                 sampling: dict | None = None,
                 cache_hint: bool = True,
-                request_timeout_s: int = 900) -> Iterator[str]:
+                request_timeout_s: int = 900,
+                lora: str | None = None) -> Iterator[str]:
         """与 `Supervisor.execute` 同语义：超过 `request_timeout_s` 中止推理。
 
         P2：此前该参数被完全忽略（进程内模式没有 socket 超时），长 prefill
@@ -507,7 +509,7 @@ class LocalSupervisor:
             yield from self.engine.stream(
                 prompt, role=role, enable_thinking=enable_thinking,
                 sampling=sampling, max_new_tokens=max_new_tokens,
-                cache_hint=cache_hint)
+                cache_hint=cache_hint, lora=lora)
             # 对齐 worker 的 end 帧：产出 perf 元数据（usage exact counts 与
             # finish_reason 的 length 判定的依据）。此前进程内模式没有这段，
             # 与 subprocess 路径行为不一致。

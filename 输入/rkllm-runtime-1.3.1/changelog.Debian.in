@@ -1,5 +1,24 @@
 rkllm-runtime (@VERSION@) unstable; urgency=medium
 
+  [ 1.3.1-21 依赖替换、LoRA、观测性与双前缀挂载 ]
+  * 依赖：内存探测改用 python3-psutil；/metrics 改用 python3-prometheus-client；
+    JSON Schema 校验改用 python3-jsonschema；systemd 看门狗用 python3-systemd
+    （unit 改 Type=notify + WatchdogSec=60）。Depends 相应新增四个包。
+  * 配置：新增 model.lora_paths（配置 86 键，.d 45 键）；.d 之前已把三个档位
+    托管键移出，本次随示例配置补充 LoRA 中英注释。
+  * LoRA：绑定 rkllm_load_lora（可选符号），启动时按文件名 stem 加载 adapter，
+    请求用非标准字段 lora 选中；未知名字返回 400，旧 runtime 缺符号则启动失败。
+  * 观测性：TTFT/队列等待/解码时长/生成速率四个直方图带 endpoint 标签
+    （chat.completions / completions / responses 各自成档）；新增 NPU/DDR 频率、
+    内存、进程 RSS 的 5 s 采样 gauge。指标名按 Prometheus 约定改为 _total 结尾。
+  * 路由：删除 root_alias 手工别名中间件，改为每个数据面 router 挂载两次
+    （/v1 与根路径）；/reset、/capabilities 与未实现端点的别名由此自动派生。
+  * 其他：json_payload 改用 stdlib raw_decode；新增 GET /admin/models 只读模型清单；
+    打包默认后端换成 dpkg-deb（--packer ar 保留回退）；新增 SHA256SUMS 生成与校验；
+    新增 .github/workflows/ci.yml。
+
+rkllm-runtime (@VERSION@) unstable; urgency=medium
+
   [ 1.3.1-20 配置拆分与评审整改 ]
   * 配置：/etc/default/rkllm-server 保留启动最小集（model/host/port/key，无注释；unit 依赖 model）；其余模型/运行参数移至 /etc/default/rkllm-server.d/*.conf（47 键）；新增 rkllm-server-example 注释模板；优先级 默认<TOML<.d<原文件/env<CLI。
   * 评审整改：异常分级留痕、flaky 用例、PREFILL 44、路由拆分(sse_stream/responses_validate)、线程设计说明、工具链修复、覆盖率配置、caps balance/FIM N/A。

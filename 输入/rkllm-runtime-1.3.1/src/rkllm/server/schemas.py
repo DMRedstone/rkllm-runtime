@@ -55,6 +55,8 @@ class ChatCompletionRequest(_OpenAICompat, BaseModel):
     model: str = "rkllm"
     messages: list[dict]
     stream: bool = False
+    # 非 OpenAI 标准扩展：选中已加载的 LoRA adapter（名字取 adapter 文件名 stem）
+    lora: str | None = None
     max_tokens: int | None = Field(default=None, ge=1)
     max_completion_tokens: int | None = Field(default=None, ge=1)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
@@ -93,6 +95,8 @@ class CompletionRequest(_OpenAICompat, BaseModel):
     model: str = "rkllm"
     prompt: str
     stream: bool = False
+    # 与 chat 一致：可选 LoRA adapter 名字
+    lora: str | None = None
     max_tokens: int | None = Field(default=None, ge=1)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
 

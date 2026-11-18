@@ -60,7 +60,7 @@ def _k(section: str, name: str, type_: type, default: Any, *,
                implemented=implemented, unwired_reason=unwired_reason)
 
 
-# 85 键全量 schema。分组顺序与《MCP 接入与配置设计》§7.2 一致。
+# 86 键全量 schema。分组顺序与《MCP 接入与配置设计》§7.2 一致。
 SCHEMA: tuple[Key, ...] = (
     # -- server（13）--------------------------------------------------------
     _k("server", "bind_host", str, "127.0.0.1", desc="监听地址；默认只本机，对外需显式改"),
@@ -86,6 +86,9 @@ SCHEMA: tuple[Key, ...] = (
        desc="锁频脚本路径；auto=用内建 sysfs 方案，给了路径则交给脚本"),
     _k("model", "class", str, "auto", choices=("auto", "4b", "7b", "14b", "27b"),
        desc="模型档位（参数量 4b/7b/14b/27b）；auto 按文件名与大小推导"),
+    _k("model", "lora_paths", list, (),
+       desc="LoRA adapter 文件列表（逗号分隔）；名字取文件 stem，"
+            "请求里用 lora 字段选中；runtime 无 rkllm_load_lora 时按不支持拒绝"),
     _k("model", "context", int, 4096, min_v=512, max_v=32768,
        desc="上下文长度；与内存预算联动校验"),
     _k("model", "min_context", int, 1024, min_v=256, max_v=8192,

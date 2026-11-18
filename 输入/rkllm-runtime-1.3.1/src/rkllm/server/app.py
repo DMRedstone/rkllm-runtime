@@ -1,30 +1,30 @@
 """FastAPI 组装 + 优雅退出（改造设计 §6.2 / D11）。
 
 中间件实际顺序（**由外到内**）：
-request_id → CORS → 根路径改写 → 请求体上限 → 鉴权。
+request_id → CORS → 请求体上限 → 鉴权。
 
 注意方向：`app.middleware("http")` 内部是 `add_middleware`，而它是
 `insert(0)`——**后注册的在更外层**，所以执行顺序与本文件里注册的顺序相反
-（本文件注册顺序：鉴权 → 体限 → 根路径改写 → CORS → request_id）。
+（本文件注册顺序：鉴权 → 体限 → CORS → request_id）。
 
 1. request_id（最后注册，最外层）：生成/透传请求 id，预检与被拒请求也有 id；
 2. CORS：OPTIONS 预检必须在鉴权之前放行——浏览器的预检请求不带
    Authorization，若被鉴权拦下，跨域客户端整体不可用；
-3. 根路径改写 root_alias：把 `/chat/completions` 等精确路径改写到 `/v1`，
-   后续鉴权与路由都看改写后的路径；
-4. 请求体上限（server.max_body_bytes）：含 chunked 的流式计数；
-5. 鉴权（N4，最内层）：默认拒绝，仅 `/ready` 豁免；api_key 为空时不启用。
+3. 请求体上限（server.max_body_bytes）：含 chunked 的流式计数；
+4. 鉴权（N4，最内层）：默认拒绝，仅 `/ready` 豁免；api_key 为空时不启用。
 
 取舍：体限在鉴权外层，未授权的超大 body 会先拿到 413 而不是 401。这是既有
-顺序的代价（把体限挪到鉴权内层需连同 root_alias 一起重排，而 CORS 必须
-留在鉴权之外以保证预检放行）。
+顺序的代价（把体限挪到鉴权内层需要重排中间件，而 CORS 必须留在鉴权之外
+以保证预检放行）。
 
 运维端点 /metrics 的路径与开关来自 metrics.enabled / metrics.path。
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -34,6 +34,9 @@ from .auth import make_auth_middleware
 from .errors import install_handlers as install_error_handlers
 from .logsetup import request_id_var
 from .state import ServiceState
+from .sysmetrics import ResourceSampler
+from .watchdog import ready as watchdog_ready
+from .watchdog import start_loop_watchdog, stopping as watchdog_stopping
 
 log = logging.getLogger("rkllm.server")
 
@@ -41,8 +44,25 @@ log = logging.getLogger("rkllm.server")
 def create_app(cfg=None, *, supervisor=None) -> FastAPI:
     from .routes import ops, openai, responses, unsupported
 
+    @asynccontextmanager
+    async def lifespan(_app):
+        # systemd 看门狗：报到前 systemd 认为服务未就绪，报到中断则重启。
+        # 不在 systemd 下（NOTIFY_SOCKET 未设置）时两处都是 no-op。
+        watchdog_ready()
+        start_loop_watchdog(asyncio.get_running_loop())
+        # 资源时序：NPU/DDR 频率、内存、进程 RSS（Prometheus 每次抓取取最新值）
+        sampler = ResourceSampler()
+        sampler.start()
+        _app.state.res_sampler = sampler
+        try:
+            yield
+        finally:
+            sampler.stop()
+            watchdog_stopping()
+
     app = FastAPI(title="rkllm-server", version=VERSION,
-                  docs_url=None, redoc_url=None, openapi_url="/openapi.json")
+                  docs_url=None, redoc_url=None, openapi_url="/openapi.json",
+                  lifespan=lifespan)
     svc = ServiceState(cfg, supervisor=supervisor) if cfg else None
     app.state.svc = svc
 
@@ -95,24 +115,8 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
         # 不用 301：部分客户端不跟随重定向，且 POST 会被改成 GET。
         # 不复制 router：route.path 已含 /v1，去前缀需重建 endpoint 元数据，
         # 与后续路由易漂移。
-        _ROOT_ALIASES = frozenset({
-            "/models", "/chat/completions", "/completions",
-            "/responses", "/embeddings", "/moderations",
-            "/reset", "/capabilities",
-        })
-
-        async def root_alias(request: Request, call_next):
-            path = request.url.path
-            if request.method == "OPTIONS":
-                return await call_next(request)      # 预检交给 CORS 处理
-            # 根路径信息不再在本中间件里直接返回：鉴权中间件在内层，直接 return
-            # 会绕过鉴权（启用 api_key 时 `/` 曾匿名可访问）。现在由下方真实路由
-            # 提供，和 /health 一样受“仅 /ready 豁免”的鉴权口径保护。
-            if path in _ROOT_ALIASES:
-                request.scope["path"] = "/v1" + path
-            return await call_next(request)
-
-        app.middleware("http")(root_alias)
+        # 根路径别名不再靠中间件改写：数据面路由统一 mount 两次（见下方
+        # include_router），新增端点不会再因为忘记加进别名表而漏挂（C-H1）。
 
         # -- CORS（空列表 = 不发 CORS 头）------------------------------------
         origins = list(cfg.server.cors_origins or ())
@@ -137,15 +141,24 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
 
         app.middleware("http")(request_id_mw)
 
-    app.include_router(ops.router)
-    app.include_router(openai.router)
-    app.include_router(responses.router)   # Responses 翻译层（emulated）
-    # 未实现的 OpenAI/Anthropic 端点：显式 501，不落框架 404（G5）
-    app.include_router(unsupported.router)
+    # -- 路由挂载：每个数据面 router 挂两次 ---------------------------------
+    # 带 `/v1` 前缀的那次进 OpenAPI；根路径别名那次 `include_in_schema=False`，
+    # 只服务"base_url 没写 /v1"的客户端。别名由挂载派生，不再有手工别名表。
+    app.include_router(ops.router)         # /health /ready /admin/models（仅根路径）
+    for prefix, in_schema in (("/v1", True), ("", False)):
+        app.include_router(ops.v1_router, prefix=prefix,
+                           include_in_schema=in_schema)      # capabilities / reset
+        app.include_router(openai.router, prefix=prefix,
+                           include_in_schema=in_schema)
+        app.include_router(responses.router, prefix=prefix,
+                           include_in_schema=in_schema)      # Responses 翻译层
+        # 未实现的 OpenAI/Anthropic 端点：显式 501，不落框架 404（G5）
+        app.include_router(unsupported.router, prefix=prefix,
+                           include_in_schema=in_schema)
 
     # -- 根路径信息（与数据面同级鉴权）--------------------------------------
     # 路由注册在鉴权中间件之后，因此启用 api_key 时 `GET /` 也返回 401；
-    # 只有 /ready 在 auth.EXEMPT_PATHS 里豁免。此前在 root_alias 中间件里直接
+    # 只有 /ready 在 auth.EXEMPT_PATHS 里豁免。此前在别名中间件里直接
     # return 会绕过鉴权，泄露模型名/状态/版本。
     @app.get("/", include_in_schema=False)
     def root_info(request: Request):
@@ -166,8 +179,8 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
                                      "/chat/completions"],
                 "completions": ["/v1/completions", "/completions"],
                 "responses": ["/v1/responses", "/responses"],
-                "capabilities": "/v1/capabilities",
-                "reset": "/v1/reset",
+                "capabilities": ["/v1/capabilities", "/capabilities"],
+                "reset": ["/v1/reset", "/reset"],
             },
         }
 
@@ -210,48 +223,55 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
 
 
 def _render_metrics(request: Request) -> str:
-    """Prometheus 文本（设计 §7.4 指标集，含 prompt 缓存命中与占用）。"""
+    """Prometheus 文本（设计 §7.4 指标集，含 prompt 缓存命中与占用）。
+
+    直方图由 `prometheus_client` 对象持有（`svc.queue.metrics_registry`）；
+    标量每渲染一次灌进临时 registry，避免全局可变注册状态——多实例与测试
+    互不干扰，输出仍是标准 exposition 格式。
+    """
     svc = request.app.state.svc
     from .cacheview import cache_stats as _cache_stats   # 与 /health 共用同一份统计
+    from .metricsutil import render_text, scalar_registry
     m = svc.queue.metrics
     sup = svc.supervisor.metrics if svc.supervisor else {}
     cache = _cache_stats(svc.cfg)          # 只读一次，避免 /metrics 双次统计
-    lines = [
-        "# TYPE rkllm_requests_total counter",
-        "rkllm_requests_total %d" % m["requests_total"],
-        "# TYPE rkllm_rejected_total counter",
-        "rkllm_rejected_total %d" % m["rejected_total"],
-        "# TYPE rkllm_queue_depth gauge",
-        "rkllm_queue_depth %d" % svc.queue.queue_depth,
-        "# TYPE rkllm_queue_wait_seconds_sum counter",
-        "rkllm_queue_wait_seconds_sum %f" % m["queue_wait_seconds_sum"],
-        "# TYPE rkllm_tokens_total counter",
-        "rkllm_tokens_total %d" % m["tokens_total"],
-        "# TYPE rkllm_worker_restarts_total counter",
-        "rkllm_worker_restarts_total %d" % sup.get("worker_restarts_total", 0),
-        "# TYPE rkllm_worker_heartbeat_timeouts_total counter",
-        "rkllm_worker_heartbeat_timeouts_total %d"
-        % sup.get("worker_heartbeat_timeouts_total", 0),
-        "# TYPE rkllm_cache_hits_total counter",
-        "rkllm_cache_hits_total %d" % cache["hits"],
-        "# TYPE rkllm_cache_bytes gauge",
-        "rkllm_cache_bytes %d" % cache["bytes"],
-        "# TYPE rkllm_worker_state gauge",
-        'rkllm_worker_state{state="%s"} 1' % (
-            svc.supervisor.state if svc.supervisor else "none"),
-        "# TYPE rkllm_ttft_seconds gauge",
-        "rkllm_ttft_seconds %f" % m.get("last_ttft_s", 0.0),
-        "# TYPE rkllm_request_duration_seconds_sum counter",
-        "rkllm_request_duration_seconds_sum %f" % m.get("duration_sum", 0.0),
-        "# TYPE rkllm_max_tokens_clamped_total counter",
-        "rkllm_max_tokens_clamped_total %d"
-        % m.get("max_tokens_clamped_total", 0),
-    ]
-    from .metricsutil import (QUEUE_WAIT_BUCKETS, TTFT_BUCKETS, render_hist)
-    lines.append("# TYPE rkllm_ttft_histogram_seconds histogram")
-    lines.extend(render_hist(m, "rkllm_ttft_histogram_seconds", "ttft",
-                             TTFT_BUCKETS))
-    lines.append("# TYPE rkllm_queue_wait_histogram_seconds histogram")
-    lines.extend(render_hist(m, "rkllm_queue_wait_histogram_seconds",
-                             "queue_wait", QUEUE_WAIT_BUCKETS))
-    return "\n".join(lines) + "\n"
+    counters = {
+        "rkllm_requests_total": ("受理的请求数", m["requests_total"]),
+        "rkllm_rejected_total": ("被拒绝/超时的请求数", m["rejected_total"]),
+        "rkllm_queue_wait_seconds_total": ("排队等待累计秒数",
+                                         m["queue_wait_seconds_sum"]),
+        "rkllm_tokens_total": ("生成 token 总数", m["tokens_total"]),
+        "rkllm_worker_restarts_total": ("worker 重启次数",
+                                        sup.get("worker_restarts_total", 0)),
+        "rkllm_worker_heartbeat_timeouts_total": (
+            "worker 心跳超时次数",
+            sup.get("worker_heartbeat_timeouts_total", 0)),
+        "rkllm_cache_hits_total": ("prompt 缓存命中次数", cache["hits"]),
+        "rkllm_request_duration_seconds_total": ("请求累计耗时秒数",
+                                               m.get("duration_sum", 0.0)),
+        # 计数器一律以 _total 结尾（Prometheus 约定）：prometheus_client 会给
+        # Counter 追加 _total 与 _created，旧名字里的 _sum 后缀会被改写，
+        # 与其被库改名，不如先按约定命名。
+        "rkllm_max_tokens_clamped_total": (
+            "max_tokens 被 context 预算裁剪的次数",
+            m.get("max_tokens_clamped_total", 0)),
+    }
+    sampler = getattr(request.app.state, "res_sampler", None)
+    snap = sampler.snapshot() if sampler is not None else {}
+    gauges = {
+        "rkllm_npu_freq_mhz": ("NPU 当前频率（MHz）", snap.get("npu_freq_mhz") or 0.0),
+        "rkllm_ddr_freq_mhz": ("DDR 当前频率（MHz）", snap.get("ddr_freq_mhz") or 0.0),
+        "rkllm_mem_available_mb": ("系统可用内存（MB）",
+                                   snap.get("mem_available_mb") or 0.0),
+        "rkllm_mem_total_mb": ("系统总内存（MB）", snap.get("mem_total_mb") or 0.0),
+        "rkllm_process_rss_mb": ("服务进程常驻内存（MB）",
+                                 snap.get("proc_rss_mb") or 0.0),
+        "rkllm_queue_depth": ("当前排队请求数", svc.queue.queue_depth),
+        "rkllm_cache_bytes": ("prompt 缓存占用字节", cache["bytes"]),
+        "rkllm_ttft_seconds": ("最近一次首 token 延迟（秒）",
+                               m.get("last_ttft_s", 0.0)),
+    }
+    labelled = [("rkllm_worker_state", "worker 状态（1=当前状态）",
+                 {"state": svc.supervisor.state if svc.supervisor else "none"}, 1.0)]
+    scalars = scalar_registry(counters, gauges, labelled)
+    return render_text(scalars, svc.queue.metrics_registry)

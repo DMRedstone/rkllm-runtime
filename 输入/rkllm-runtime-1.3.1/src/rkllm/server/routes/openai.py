@@ -36,7 +36,9 @@ from ..supervisor import WorkerDown
 from ... import caps
 from .sse_stream import stream_events
 
-router = APIRouter(prefix="/v1")
+# 前缀由 app.create_app 在挂载时给（同一 router 挂 /v1 与根路径两份），
+# 这里不再自带 prefix，否则双前缀会叠成 /v1/v1/...
+router = APIRouter()
 
 log = logging.getLogger("rkllm.server.openai")
 
@@ -92,7 +94,8 @@ def chat_completions(body: ChatCompletionRequest, request: Request):
         # 效率：仅流式路径构造 Pipeline；非流式交给 _run_blocking_checked 自行
         # 构建，避免重复做一次全量 prompt 构建（原实现两条路径各建一次）。
         try:
-            pipe = _pipeline(svc, {**raw, "max_tokens": max_tokens}, chat=True)
+            pipe = _pipeline(svc, {**raw, "max_tokens": max_tokens}, chat=True,
+                               endpoint="chat.completions")
         except ValueError as exc:
             return _http_error(400, "invalid_request_error", str(exc))
         if pipe.max_tokens_clamped:
@@ -192,7 +195,8 @@ def completions(body: CompletionRequest, request: Request):
 
     if streaming:
         try:
-            pipe = _pipeline(svc, {**raw, "max_tokens": max_tokens}, chat=False)
+            pipe = _pipeline(svc, {**raw, "max_tokens": max_tokens}, chat=False,
+                           endpoint="completions")
         except ValueError as exc:
             return _http_error(400, "invalid_request_error", str(exc))
         if pipe.max_tokens_clamped:
@@ -203,7 +207,8 @@ def completions(body: CompletionRequest, request: Request):
             headers={**sse_response_headers(), **headers})
 
     try:
-        pipe = _pipeline(svc, {**raw, "max_tokens": max_tokens}, chat=False)
+        pipe = _pipeline(svc, {**raw, "max_tokens": max_tokens}, chat=False,
+                           endpoint="completions")
     except ValueError as exc:
         return _http_error(400, "invalid_request_error", str(exc))
     try:

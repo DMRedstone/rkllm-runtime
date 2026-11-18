@@ -11,8 +11,8 @@ import threading
 import time
 from typing import Callable, Iterator
 
-from .metricsutil import (QUEUE_WAIT_BUCKETS, TTFT_BUCKETS, init_hist,
-                          observe)
+from .metricsutil import (DECODE_BUCKETS, QUEUE_WAIT_BUCKETS, TOK_S_BUCKETS,
+                          TTFT_BUCKETS, new_labelled_histogram, new_registry)
 
 __all__ = ["QueueBusy", "QueueTimeout", "InferenceQueue"]
 
@@ -57,8 +57,20 @@ class InferenceQueue:
                         "prompt_tokens_total": 0,
                         "completion_tokens_total": 0,
                         "max_tokens_clamped_total": 0}
-        init_hist(self.metrics, "ttft", TTFT_BUCKETS)
-        init_hist(self.metrics, "queue_wait", QUEUE_WAIT_BUCKETS)
+        # 直方图由 prometheus_client 持有（独立 registry，见 metricsutil）
+        self.metrics_registry = new_registry()
+        self.ttft_hist = new_labelled_histogram(
+            self.metrics_registry, "rkllm_ttft_histogram_seconds",
+            "首 token 延迟（秒）", TTFT_BUCKETS)
+        self.queue_wait_hist = new_labelled_histogram(
+            self.metrics_registry, "rkllm_queue_wait_histogram_seconds",
+            "排队等待时长（秒）", QUEUE_WAIT_BUCKETS)
+        self.decode_hist = new_labelled_histogram(
+            self.metrics_registry, "rkllm_decode_histogram_seconds",
+            "解码阶段时长（首 token 之后，秒）", DECODE_BUCKETS)
+        self.tok_s_hist = new_labelled_histogram(
+            self.metrics_registry, "rkllm_tokens_per_second_histogram",
+            "生成速率（token/s）", TOK_S_BUCKETS)
 
     @property
     def queue_depth(self) -> int:
@@ -67,7 +79,8 @@ class InferenceQueue:
     def run(self, submit: Callable[[], Iterator[str]], *,
             cancelled: Callable[[], bool] | None = None,
             on_acquire: Callable[[], None] | None = None,
-            on_release: Callable[[], None] | None = None) -> Iterator[str]:
+            on_release: Callable[[], None] | None = None,
+            endpoint: str = "unknown") -> Iterator[str]:
         """排队 → 拿槽 → 执行；submit() 返回 token 迭代器（由 worker 客户端给）。
 
         max_wait<=0 表示「不排队」：仅在槽立即空闲时放行，否则立即 503（P1-2）。
@@ -113,7 +126,7 @@ class InferenceQueue:
                 # queue_wait_seconds_sum 实际累加的是推理执行时长）
                 waited = time.monotonic() - enqueued_at
                 self.metrics["queue_wait_seconds_sum"] += waited
-                observe(self.metrics, "queue_wait", QUEUE_WAIT_BUCKETS, waited)
+                self.queue_wait_hist.labels(endpoint=endpoint).observe(waited)
             # -- 已持有执行槽：以下任何路径都必须成对 on_release + release ----
             infer_start = time.monotonic()
             acquire_notified = False

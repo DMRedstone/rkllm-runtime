@@ -30,7 +30,7 @@ class FakeEngine:
         self._destroyed = False
 
     def stream(self, prompt, role="user", enable_thinking=False,
-               sampling=None, max_new_tokens=None, cache_hint=True):
+               sampling=None, max_new_tokens=None, cache_hint=True, lora=None):
         self._turns += 1
         if self.system_prompt:
             prompt = "%s\n\n%s" % (self.system_prompt, prompt)
@@ -65,7 +65,7 @@ class GateEngine(FakeEngine):
         self.release = threading.Event()
 
     def stream(self, prompt, role="user", enable_thinking=False,
-               sampling=None, max_new_tokens=None, cache_hint=True):
+               sampling=None, max_new_tokens=None, cache_hint=True, lora=None):
         self.started.set()
         self.release.wait(15)
         return FakeEngine.stream(self, prompt, role=role, cache_hint=cache_hint,

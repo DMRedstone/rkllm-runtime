@@ -36,6 +36,8 @@ import json
 import os
 import posixpath
 import re
+import shutil
+import subprocess
 import sys
 import tarfile
 import time
@@ -95,9 +97,13 @@ ARCHITECTURES = {
 #   (apt route, decided 2026-10-21 - no vendored wheels). trixie versions meet
 #   the floors (pydantic >= 2.9 supports 3.13); verified on board before
 #   release, see the appendix in 文档/开发记录.md.
+# python3-psutil / python3-jsonschema / python3-prometheus-client: 2026-11-18
+#   把自写的内存探测、JSON Schema 子集校验、Prometheus 文本渲染换成成熟实现
+#   （trixie 均有包：psutil 7.0.0 / jsonschema 4.19.2 / prometheus-client 0.21.1）。
 DEPEND_TEMPLATE = ("libc6 (>= 2.29), libgomp1, libstdc++6, "
                    "python3:any (>= 3.13), python3-fastapi, python3-uvicorn, "
-                   "python3-pydantic")
+                   "python3-pydantic, python3-psutil, python3-jsonschema, "
+                   "python3-prometheus-client, python3-systemd")
 
 # The API server unit keeps a fixed name independent of --package so that
 # operators always find it under the same name.
@@ -637,6 +643,41 @@ def build_deb(items, ctx: BuildContext, out_dir: Path, tmp_dir: Path) -> Path:
     return deb_path
 
 
+def build_deb_dpkg(items, ctx: BuildContext, out_dir: Path,
+                   tree_dir: Path) -> Path:
+    """用 dpkg-deb 打包：staging 树 + `dpkg-deb --build`。
+
+    自写 ar+tar 的组装逻辑（成员顺序、xz 参数、时间戳、root 属主）每一步都有
+    出错空间；dpkg-deb 是这套格式的权威实现，本函数只负责把树摊平、
+    把 md5sums 与时间戳准备好，然后交给它。
+
+    可复现性依赖两点：所有文件 mtime 归一到 `ctx.epoch`，且 `SOURCE_DATE_EPOCH`
+    透传给 dpkg-deb（它据此裁剪压缩包内的时间戳）。
+    """
+    if shutil.which("dpkg-deb") is None:
+        raise SystemExit(
+            "dpkg-deb not found. 构建机上装 dpkg（Debian/Ubuntu 自带），"
+            "或改用 --packer ar 走自写实现。")
+    if tree_dir.exists():
+        raise SystemExit(
+            "staging tree already exists: %s\n"
+            "Remove it first (rm -rf %s) or pass --tree-dir <path>."
+            % (tree_dir, tree_dir))
+    emit_tree(items, ctx, tree_dir)
+    deb_name = f"{ctx.package}_{ctx.version}_{ctx.arch}.deb"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    deb_path = out_dir / deb_name
+    env = dict(os.environ, SOURCE_DATE_EPOCH=str(ctx.epoch), LC_ALL="C.UTF-8")
+    proc = subprocess.run(
+        ["dpkg-deb", "--root-owner-group", "-Zxz", "--build",
+         str(tree_dir), str(deb_path)],
+        env=env, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise SystemExit("dpkg-deb failed (%d):\n%s\n%s"
+                         % (proc.returncode, proc.stdout, proc.stderr))
+    return deb_path
+
+
 def emit_tree(items, ctx: BuildContext, tree_dir: Path) -> None:
     """Materialise the payload as real files, so dpkg-deb can be used later.
 
@@ -683,6 +724,20 @@ def emit_tree(items, ctx: BuildContext, tree_dir: Path) -> None:
         target = debian_dir / name
         target.write_text(body, encoding="utf-8")
         target.chmod(EXEC_MODE if name in ("postinst", "prerm", "postrm") else FILE_MODE)
+    # dpkg-deb 不生成 md5sums，必须自己写（-1 = 不跟随符号链接，与 dpkg 口径一致）
+    md5_lines = []
+    for item in sorted(items, key=lambda i: i.dest):
+        if item.data is None:
+            continue
+        md5_lines.append("%s  %s" % (hashlib.md5(item.data).hexdigest(),
+                                     item.dest.lstrip("/")))
+    sums = debian_dir / "md5sums"
+    sums.write_text("\n".join(md5_lines) + "\n", encoding="utf-8")
+    sums.chmod(FILE_MODE)
+    # 时间戳统一到 epoch：dpkg-deb 直接取文件 mtime，不归零就不可复现
+    for path in sorted(tree_dir.rglob("*")):
+        os.utime(path, (ctx.epoch, ctx.epoch), follow_symlinks=False)
+    os.utime(tree_dir, (ctx.epoch, ctx.epoch))
 
 
 # --------------------------------------------------------------------------
@@ -703,6 +758,11 @@ def main() -> int:
                          "目录已存在时会报错而不是自行删除")
     ap.add_argument("--tree-dir", default=None,
                     help="staging 目录位置(默认 build/tree-<arch>)")
+    ap.add_argument("--no-sums", action="store_true",
+                    help="不生成/刷新 SHA256SUMS（默认在产物目录生成）")
+    ap.add_argument("--packer", choices=("dpkg", "ar"), default="dpkg",
+                    help="dpkg: 调 dpkg-deb --build（默认，格式权威）；"
+                         "ar: 自写 ar+tar 组装（无 dpkg-deb 时的回退）")
     args = ap.parse_args()
 
     if args.revision != DEFAULT_REVISION:
@@ -724,21 +784,39 @@ def main() -> int:
     items, stats = stage(ctx, source_path)
 
     build_dir = ROOT / "build"
-    deb = build_deb(items, ctx, Path(args.out), build_dir / "tmp")
-
-    if args.emit_tree:
-        tree_dir = Path(args.tree_dir) if args.tree_dir else build_dir / f"tree-{ctx.arch}"
-        emit_tree(items, ctx, tree_dir)
+    if args.packer == "dpkg":
+        tree_dir = (Path(args.tree_dir) if args.tree_dir
+                    else build_dir / f"tree-{ctx.arch}")
+        deb = build_deb_dpkg(items, ctx, Path(args.out), tree_dir)
+        if args.emit_tree:
+            print("  注意：--packer dpkg 已使用 staging 树 %s（--emit-tree 无需重复）"
+                  % tree_dir)
+    else:
+        deb = build_deb(items, ctx, Path(args.out), build_dir / "tmp")
+        if args.emit_tree:
+            tree_dir = (Path(args.tree_dir) if args.tree_dir
+                        else build_dir / f"tree-{ctx.arch}")
+            emit_tree(items, ctx, tree_dir)
 
     manifest = build_dir / f"{ctx.package}_{ctx.version}_{ctx.arch}.manifest.json"
     manifest.write_text(json.dumps([{k: v for k, v in vars(i).items() if k != "data"} for i in items],
                                    indent=2, ensure_ascii=False), encoding="utf-8")
+
+    sums = None
+    if not args.no_sums:
+        try:
+            import release_sums
+            sums = release_sums.write_sums(Path(args.out))
+        except SystemExit as exc:      # 目录里没有产物等情况：不阻断构建
+            print(f"  注意：未生成 SHA256SUMS（{exc}）")
 
     size = sum(len(i.data or b"") for i in items)
     print(f"已构建: {deb}")
     print(f"  架构={ctx.arch}  三元组={ctx.triplet}  profile={ctx.profile}")
     print(f"  文件数={len(items)}  解包体积={size/1048576:.1f} MB  deb 体积={deb.stat().st_size/1048576:.2f} MB")
     print(f"  清单: {manifest}")
+    if sums is not None:
+        print(f"  校验: {sums}（sha256sum -c {sums.name} 可核对）")
     if stats["dropped"]:
         print("  裁剪统计:")
         for reason, count in sorted(stats["dropped"].items(), key=lambda kv: -kv[1]):

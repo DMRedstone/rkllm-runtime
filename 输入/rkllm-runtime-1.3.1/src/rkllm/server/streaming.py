@@ -175,7 +175,8 @@ class TokenStream:
                     lambda: self.pipe.iter_tokens(),
                     cancelled=lambda: self.token.cancelled,
                     on_acquire=self._on_slot_acquired,
-                    on_release=self._on_slot_releasing):
+                    on_release=self._on_slot_releasing,
+                    endpoint=getattr(self.pipe, "endpoint", "unknown")):
                 if self.token.cancelled:
                     # 取消：必须在归还执行槽之前 abort，worker 才会停止生成
                     # （只退出循环会让 worker 把整个请求算完）。

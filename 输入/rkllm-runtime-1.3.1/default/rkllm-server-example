@@ -384,6 +384,14 @@ RKLLM_EXTRA_ARGS=
 #     只有 4b、7b 内置 max_tokens / max_tokens_limit / cache.max_mb 默认值，
 #     更大档位启动时告警，需手动配置这三项。
 #RKLLM_MODEL_CLASS=auto
+# EN: LoRA adapters, comma separated. The adapter name is the file stem
+#     (domain.rkllm -> "domain"); select it per request with {"lora": "domain"}.
+#     Requires rkllm_load_lora in librkllmrt.so; a runtime without it rejects
+#     the configuration at startup instead of silently running the base model.
+# 中文: LoRA adapter 列表（逗号分隔）。名字取文件名 stem（domain.rkllm → domain），
+#     请求里用 {"lora": "domain"} 选中。要求 librkllmrt.so 导出 rkllm_load_lora；
+#     旧 runtime 缺该符号时启动即报错，不会静默退回基座模型。
+#RKLLM_MODEL_LORA_PATHS=
 # EN: Generation defaults below are tier-managed: leave them commented out and
 #     they follow the tier (4b = 512/2048/512, 7b = 384/1536/1024). Set them
 #     explicitly to override; an explicit value always wins over the tier.

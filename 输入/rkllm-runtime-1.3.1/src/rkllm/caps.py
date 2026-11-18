@@ -28,12 +28,13 @@ ENDPOINTS: dict[str, str] = {
     "models": "native",               # 单模型；models/{id} 返回同一对象
     "embeddings": "unsupported",      # 仅当配置 embedding 模型才可用，不假装支持
     "messages(anthropic)": "unsupported",
-    "moderations": "unsupported",     # root_alias 有别名，故必须显式 501 而非 404
+    "moderations": "unsupported",     # 有根路径别名（双前缀挂载），故必须显式 501 而非 404
     "health": "native",               # 非标准扩展
     "ready": "native",
     "metrics": "native",
     "capabilities": "native",         # 本项目自定扩展
     "reset": "native",
+    "admin.models": "native",         # 只读：当前模型 + 搜索目录里的 .rkllm
 }
 
 # ---------------------------------------------------------------------------

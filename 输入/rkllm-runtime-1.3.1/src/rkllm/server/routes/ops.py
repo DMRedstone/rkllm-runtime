@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
@@ -13,6 +15,8 @@ from ...platform import npu_status
 from ..cacheview import cache_stats as _cache_stats
 
 router = APIRouter()
+# 数据面同款端点：由 app.create_app 以 `/v1` 前缀挂一次、根路径再挂一次
+v1_router = APIRouter()
 
 
 def _svc(request: Request):
@@ -71,7 +75,7 @@ def ready(request: Request):
                         headers={"Retry-After": str(svc.queue.busy_retry_after_s)})
 
 
-@router.get("/v1/capabilities")
+@v1_router.get("/capabilities")
 def capabilities(request: Request):
     """机器可读能力表（F11/G5：单一事实源 caps.py）。"""
     svc = _svc(request)
@@ -84,7 +88,7 @@ def capabilities(request: Request):
     return view
 
 
-@router.post("/v1/reset")
+@v1_router.post("/reset")
 def reset(request: Request):
     """清 KV / 会话状态（保留旧版扩展语义）。"""
     svc = _svc(request)
@@ -93,3 +97,39 @@ def reset(request: Request):
     except Exception as exc:                    # worker 不可用也不 500
         return {"reset": False, "reason": str(exc)[:200]}
     return {"reset": True}
+
+
+@router.get("/admin/models")
+def admin_models(request: Request) -> JSONResponse:
+    """只读：当前模型 + 搜索目录里可用的 `.rkllm` 文件。
+
+    只列举，不加载、不删除——多模型热切换需要新的资源与路由设计，尚未做。
+    """
+    svc = request.app.state.svc
+    cfg = svc.cfg
+    roots = [d for d in (getattr(cfg.model, "search_dirs", ()) or ()) if d]
+    found: list[dict] = []
+    for root in roots:
+        base = Path(root)
+        if not base.is_dir():
+            continue
+        for path in sorted(base.glob("*.rkllm")):
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            found.append({
+                "id": path.stem,
+                "path": str(path),
+                "size_mb": round(size / (1024 * 1024), 1),
+                "current": str(path) == str(cfg.model.path),
+            })
+    return JSONResponse({
+        "current": {"id": svc.model_name, "path": cfg.model.path,
+                    "model_class": svc.model_class,
+                    "context_len": svc.context_len},
+        "search_dirs": roots,
+        # 说明为什么只有只读：切换模型要重启 worker，属未实现项
+        "switchable": False,
+        "models": found,
+    })

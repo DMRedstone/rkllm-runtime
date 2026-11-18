@@ -6,7 +6,12 @@ StartLimitIntervalSec=120
 StartLimitBurst=5
 
 [Service]
-Type=simple
+# Type=notify + WatchdogSec: 进程必须定期报到，卡死（事件循环被阻塞、死锁）
+# 而不是退出的情况也能被识别并重启。报到由 rkllm 自己在 lifespan 里发出
+# （sd_notify，python3-systemd）；ExecStart 用 exec，报到进程就是主进程。
+Type=notify
+NotifyAccess=main
+WatchdogSec=60
 EnvironmentFile=-/etc/default/rkllm-server
 # Note for anyone tempted to add a ConditionPathExists: there is no single path
 # that reliably means "the NPU is usable". Drivers from 0.9.x onwards do NOT

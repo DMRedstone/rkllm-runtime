@@ -89,5 +89,5 @@ def test_no_key_is_marked_implemented_while_unwired():
 
 
 def test_key_count_is_frozen():
-    """85 键是对外契约（文档、conffile 注释、README 都引用了这个数字）。"""
-    assert len(SCHEMA) == 85
+    """86 键是对外契约（文档、conffile 注释、README 都引用了这个数字）。"""
+    assert len(SCHEMA) == 86

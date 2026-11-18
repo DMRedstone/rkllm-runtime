@@ -19,7 +19,8 @@
 
 设计约定
 --------
-* 纯标准库，Python 3.8+；
+* 传输层用 `httpx`（连接池复用，避免 urllib 每请求新建 TCP 把 connect 时间
+  算进延迟）；其余仍是标准库，Python 3.9+；
 * 一切判读只在这里做：2xx 但非 JSON 的 `/health` 视为**可达**（vLLM 就
   这么回），只有连不上或非 2xx 才算不可用；
 * `ask()` 在正文为空且没有任何 token 计数时报错，而不是静默返回空串；
@@ -31,9 +32,9 @@ from __future__ import annotations
 
 import json
 import os
+import statistics
 import time
-import urllib.error
-import urllib.request
+import httpx
 
 VERSION = "1.0"
 
@@ -173,11 +174,48 @@ def auth_headers(key, auth_header="Authorization", auth_prefix="Bearer "):
 # 客户端
 # ---------------------------------------------------------------------------
 
+_CLIENT = httpx.Client(follow_redirects=True)
+
+
+class _Resp:
+    """把 httpx.Response 包成 urllib 风格（`.status` / `.read()` / 按行迭代 bytes）。
+
+    这样改造前后的调用点（`with board._open(...) as r: r.read()`、
+    `for line in response:`）无需改动；流式走 `httpx` 的 `stream()`，仍是
+    逐块到达，TTFT 不会被整段缓冲污染。
+    """
+
+    def __init__(self, response, closer=None):
+        self._response = response
+        self._closer = closer
+
+    @property
+    def status(self):
+        return self._response.status_code
+
+    def read(self):
+        return self._response.content
+
+    def __iter__(self):
+        for line in self._response.iter_lines():
+            yield line.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        if self._closer is not None:
+            self._closer(None, None, None)
+        else:
+            self._response.close()
+        return False
+
+
 class Board(object):
     """一个目标的 HTTP 客户端。
 
     接口与改造前 `02_llm_stress.Board` 保持一致（`call` / `ask` / `stream` /
-    `health` / `alive` / `last_health_problem` / `_request`），这样各脚本的
+    `health` / `alive` / `last_health_problem` / `_open`），这样各脚本的
     调用点不用改签名，只换 import。
     """
 
@@ -193,6 +231,9 @@ class Board(object):
         self.chat_path = chat_path
         self.health_path = health_path
         self.last_health_problem = None
+        # 连接复用：urllib 每请求新建 TCP，会把 connect 时间算进延迟；
+        # 压力测试的 p90 因此系统性偏高。httpx.Client 保持连接池。
+        self._client = httpx.Client(follow_redirects=True)
 
     # -- 底层 ---------------------------------------------------------
 
@@ -205,25 +246,28 @@ class Board(object):
             headers.update(extra)
         return headers
 
-    def _request(self, path, payload=None, method="POST", timeout=None):
-        """构造 Request 对象（不发送）。保留给畸形请求体用例使用。"""
+    def _body(self, payload):
+        """payload → (bytes|None, 是否 JSON)。畸形请求体用例直接传 bytes。"""
         if isinstance(payload, (bytes, bytearray)):
-            data = bytes(payload)
-        elif payload is None:
-            data = None
-        else:
-            data = json.dumps(payload).encode("utf-8")
-        headers = self._headers()
-        if data is not None:
-            headers["Content-Type"] = "application/json"
-        return urllib.request.Request(
-            join_url(self.base, path, self.base_path),
-            data=data, method=method, headers=headers)
+            return bytes(payload), False
+        if payload is None:
+            return None, False
+        return json.dumps(payload).encode("utf-8"), True
 
     def _open(self, path, payload=None, method="POST", timeout=None, stream=False):
-        return urllib.request.urlopen(
-            self._request(path, payload, method, timeout),
-            timeout=timeout or self.timeout)
+        """发请求 → `_Resp`（urllib 风格）。`stream=True` 走 httpx 流式上下文。"""
+        data, is_json = self._body(payload)
+        headers = self._headers(stream=stream)
+        if is_json:
+            headers["Content-Type"] = "application/json"
+        url = join_url(self.base, path, self.base_path)
+        timeout_ = timeout or self.timeout
+        if stream:
+            ctx = self._client.stream(method, url, content=data,
+                                      headers=headers, timeout=timeout_)
+            return _Resp(ctx.__enter__(), closer=ctx.__exit__)
+        return _Resp(self._client.request(method, url, content=data,
+                                          headers=headers, timeout=timeout_))
 
     # -- 高层 ---------------------------------------------------------
 
@@ -233,20 +277,18 @@ class Board(object):
         status 为 HTTP 码，或字符串 "EXC" 表示客户端异常（连不上/超时）。
         """
         path = path or self.chat_path
-        request = self._request(path, payload, method, timeout)
         started = time.time()
         try:
-            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
+            with self._open(path, payload, method, timeout) as response:
                 body = response.read().decode("utf-8", "replace")
                 usage = None
                 try:
                     usage = json.loads(body).get("usage")
                 except Exception:                                   # noqa: BLE001
                     pass
+                # 4xx/5xx 不再抛异常（httpx 默认不抛）：状态码与响应体一起返回，
+                # 与改前 urllib 捕 HTTPError 的返回形态一致。
                 return response.status, body, time.time() - started, usage
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read().decode("utf-8", "replace"), \
-                time.time() - started, None
         except Exception as exc:                                    # noqa: BLE001
             return "EXC", repr(exc), time.time() - started, None
 
@@ -279,10 +321,10 @@ class Board(object):
         ttft 只算到第一个**有内容**的增量，跳过服务端先发的纯 role chunk。
         """
         payload = dict(payload, stream=True)
-        request = self._request(self.chat_path, payload, timeout=timeout)
         started = time.time()
         try:
-            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
+            with self._open(self.chat_path, payload, timeout=timeout,
+                            stream=True) as response:
                 ttft, pieces = None, []
                 for line in response:
                     if not line.startswith(b"data: "):
@@ -299,9 +341,6 @@ class Board(object):
                             ttft = time.time() - started
                         pieces.append(delta)
                 return response.status, "".join(pieces), time.time() - started, ttft
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read().decode("utf-8", "replace"), \
-                time.time() - started, None
         except Exception as exc:                                    # noqa: BLE001
             return "EXC", repr(exc), time.time() - started, None
 
@@ -328,11 +367,11 @@ class Board(object):
             with self._open(self.health_path, method="GET", timeout=timeout) as response:
                 raw = response.read().decode("utf-8", "replace")
                 status = response.status
-        except urllib.error.HTTPError as exc:
-            self.last_health_problem = "HTTP %s" % exc.code
-            return None
         except Exception as exc:                                    # noqa: BLE001
             self.last_health_problem = repr(exc)[:160]
+            return None
+        if status >= 400:                       # httpx 不抛 4xx：这里显式判
+            self.last_health_problem = "HTTP %s" % status
             return None
         self.last_health_problem = None
         if not raw.strip():
@@ -373,14 +412,12 @@ def request(base, key, path, payload=None, method="POST", timeout=10,
         headers["Content-Type"] = "application/json"
     if send_key and key:
         headers.update(auth_headers(key, auth_header, auth_prefix))
-    req = urllib.request.Request(url, data=data, method=method, headers=headers)
     started = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            return response.status, response.read().decode("utf-8", "replace"), \
-                time.time() - started, None
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8", "replace"), time.time() - started, None
+        response = _CLIENT.request(method, url, content=data, headers=headers,
+                                   timeout=timeout)
+        return response.status_code, response.content.decode("utf-8", "replace"), \
+            time.time() - started, None
     except Exception as exc:                                        # noqa: BLE001
         return "EXC", "", time.time() - started, repr(exc)
 
@@ -441,13 +478,21 @@ def wait_ready(base, key, timeout=90, interval=1.0, base_path=""):
 
 
 def pct(values, p):
-    """线性插值百分位（所有报告统一用这一个口径）。"""
+    """线性插值百分位（所有报告统一用这一个口径）。
+
+    改用 stdlib `statistics.quantiles(method="inclusive")`：其定义与
+    "k=(n-1)·p/100 线性插值"完全一致，但边界（p<=0 / p>=100 / n=1）由标准库保证，
+    不再手写索引——此前手写版本在 n=2 时把 p90 算成 min，就属于这类边界错。
+    """
     if not values:
         return None
     ordered = sorted(values)
-    k = (len(ordered) - 1) * p / 100.0
-    lo, hi = int(k), min(int(k) + 1, len(ordered) - 1)
-    return ordered[lo] + (ordered[hi] - ordered[lo]) * (k - lo)
+    if len(ordered) == 1 or p <= 0:
+        return ordered[0]
+    if p >= 100:
+        return ordered[-1]
+    cuts = statistics.quantiles(ordered, n=100, method="inclusive")
+    return cuts[int(p) - 1]
 
 
 def newest(pattern):

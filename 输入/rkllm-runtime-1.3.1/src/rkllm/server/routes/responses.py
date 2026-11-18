@@ -34,7 +34,9 @@ from ..streaming import (DISCONNECT, DONE, HEARTBEAT, TokenStream,
 from ..supervisor import WorkerDown
 from .responses_validate import validate_body as _validate_body
 
-router = APIRouter(prefix="/v1")
+# 前缀由 app.create_app 在挂载时给（同一 router 挂 /v1 与根路径两份），
+# 这里不再自带 prefix，否则双前缀会叠成 /v1/v1/...
+router = APIRouter()
 
 log = logging.getLogger("rkllm.server.responses")
 
@@ -96,7 +98,7 @@ def create_response(request: Request, body: dict):
 
     if streaming:
         try:
-            pipe = _pipeline(svc, chat_body, chat=True)
+            pipe = _pipeline(svc, chat_body, chat=True, endpoint="responses")
         except ValueError as exc:
             return _http_error(400, "invalid_request_error", str(exc))
         if pipe.max_tokens_clamped:
@@ -118,7 +120,8 @@ def create_response(request: Request, body: dict):
         spec = rf.get("json_schema") or {}
         schema = spec.get("schema") if isinstance(spec, dict) else None
     try:
-        result, pipe = _run_blocking_checked(svc, chat_body, max_tokens, schema)
+        result, pipe = _run_blocking_checked(svc, chat_body, max_tokens, schema,
+                                  endpoint="responses")
     except ValueError as exc:
         return _error(400, str(exc), "invalid_request",
                       err_type="invalid_request_error")

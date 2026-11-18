@@ -86,12 +86,20 @@ def test_additional_properties_false():
 
 
 def test_unsupported_keywords_lists_unknown():
+    # 换成 jsonschema 后 pattern/oneOf 属于受支持关键字，不再报"不支持"；
+    # 真正不认识的是自定义扩展键。
     schema = {"type": "object", "properties": {"a": {"type": "string",
                                                      "pattern": "^x"}},
-              "oneOf": []}
+              "oneOf": [{"required": ["a"]}], "x-custom": 1}
     found = " ".join(unsupported_keywords(schema))
-    assert "pattern" in found and "oneOf" in found
-    assert set(KNOWN_KEYWORDS) & {"type", "properties"}
+    assert "x-custom" in found
+    assert "pattern" not in found and "oneOf" not in found
+    assert set(KNOWN_KEYWORDS) & {"type", "properties", "pattern", "oneOf"}
+    # schema 合法：pattern 真的生效（旧自制校验器会忽略它）
+    schema = {"type": "object", "properties": {"a": {"type": "string",
+                                                     "pattern": "^x"}}}
+    assert validate({"a": "xy"}, schema) == []
+    assert validate({"a": "y"}, schema)
 
 
 # ---------------------------------------------------------------------------

@@ -42,7 +42,8 @@ import time
 import urllib.error
 import urllib.request
 
-from board_api import auth_headers, build_base, default_host, default_key, fetch_server_meta, join_url  # 共享 HTTP 层
+from board_api import (auth_headers, build_base, default_host, default_key,
+                       fetch_server_meta, join_url, pct)  # 共享 HTTP 层（含统一分位口径）
 
 # 强制 UTF-8 输出，避免 Windows 控制台中文乱码
 try:
@@ -478,8 +479,7 @@ def mixed_workload(client, vu, seconds):
     print("      分类: %s" % json.dumps(by_kind, ensure_ascii=False))
     if lat:
         print("      延迟 p50 %.2fs  p90 %.2fs  max %.2fs"
-              % (statistics.median(lat), sorted(lat)[max(0, min(len(lat) - 1, round(0.9 * (len(lat) - 1))))],
-                 max(lat)))
+              % (statistics.median(lat), pct(lat, 90), max(lat)))
     record("mixed", "vu=%d" % vu, len(ok_rows) == len(rows),
            "n=%d ok=%d wall=%.1fs" % (len(rows), len(ok_rows), wall), wall)
     for r in rows:

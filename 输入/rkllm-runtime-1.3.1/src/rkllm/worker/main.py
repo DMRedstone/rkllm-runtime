@@ -127,7 +127,8 @@ class Worker:
                             enable_thinking=bool(params.get("enable_thinking", False)),
                             sampling=params.get("sampling"),
                             max_new_tokens=params.get("max_new_tokens"),
-                            cache_hint=bool(params.get("cache_hint", True))):
+                            cache_hint=bool(params.get("cache_hint", True)),
+                            lora=params.get("lora")):
                         if self._abort_requested.is_set():
                             self._send(wfile, {"op": OP_END, "id": req_id,
                                                "aborted": True})
@@ -254,7 +255,8 @@ def build_engine(args):
     return RealEngine(model_path=args.model, platform=args.platform,
                       context_len=args.context, max_new_tokens=args.max_tokens,
                       keep_history=not args.no_history, threads=args.threads,
-                      prompt_cache=cache)
+                      prompt_cache=cache,
+                      lora_paths=getattr(args, "lora_path", []) or [])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -274,6 +276,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="prompt 前缀缓存目录；空=关闭（cache.enabled=false）")
     parser.add_argument("--cache-max-mb", type=int, default=512)
     parser.add_argument("--cache-ttl-s", type=int, default=604800)
+    parser.add_argument("--lora-path", action="append", default=[],
+                        help="LoRA adapter 文件（可重复）；名字取文件名 stem")
     parser.add_argument("--delay", type=float, default=0.0,
                         help="fake 引擎每 token 延迟（压测/演示）")
     parser.add_argument("--heartbeat-interval", type=float, default=5.0,

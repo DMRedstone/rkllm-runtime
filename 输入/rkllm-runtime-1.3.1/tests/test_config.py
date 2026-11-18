@@ -1,4 +1,4 @@
-"""config.py 单测：85 键契约、优先级、校验、迁移（N11/F13 验收）。"""
+"""config.py 单测：86 键契约、优先级、校验、迁移（N11/F13 验收）。"""
 
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from rkllm.config import SCHEMA, ConfigError, config_docs, load_config
 
-# 85 键分组计数（与《MCP 接入与配置设计》§7.2 一致）
-GROUP_COUNTS = {"server": 13, "model": 12, "engine": 10, "queue": 5,
+# 86 键分组计数（与《MCP 接入与配置设计》§7.2 一致）
+GROUP_COUNTS = {"server": 13, "model": 13, "engine": 10, "queue": 5,
                 "openai": 9, "cache": 5, "mcp": 24, "logging": 5, "metrics": 2}
 
 
-def test_schema_is_exactly_85_keys():
-    assert len(SCHEMA) == 85
+def test_schema_is_exactly_86_keys():
+    assert len(SCHEMA) == 86
     counts: dict[str, int] = {}
     for key in SCHEMA:
         counts[key.section] = counts.get(key.section, 0) + 1

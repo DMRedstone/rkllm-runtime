@@ -20,7 +20,6 @@ from fastapi.responses import JSONResponse
 
 from ..agent.json_schema import validate as validate_schema
 from ..agent.pipeline import Pipeline
-from .metricsutil import TTFT_BUCKETS, observe
 
 
 # 单 NPU 上下文串行（硬件现实，非缺陷）：忙时明确告知客户端，别让它以为
@@ -44,25 +43,51 @@ def http_error(status: int, err_type: str, message: str,
     return JSONResponse(body, status_code=status)
 
 
-def build_pipeline(svc, body: dict, *, chat: bool) -> Pipeline:
+def build_pipeline(svc, body: dict, *, chat: bool,
+                   endpoint: str = "chat.completions") -> Pipeline:
     """从请求构造推理管线（agent 能力在此按需挂载）。"""
-    return Pipeline(svc, body, chat=chat)
+    return Pipeline(svc, body, chat=chat, endpoint=endpoint)
+
+
+def record_timing(queue, endpoint: str, ttft_s: float | None,
+                  decode_s: float | None, gen_tokens: int) -> None:
+    """请求耗时分解：TTFT（含 prefill）、解码时长、生成速率。
+
+    三者都带 `endpoint` 标签——`/v1/responses` 是翻译层，混进同一个桶就看不出
+    它的额外代价。参数为 None 表示该阶段没发生（例如 0 token 就结束）。
+    """
+    if ttft_s is not None:
+        queue.ttft_hist.labels(endpoint=endpoint).observe(ttft_s)
+    if decode_s is not None and decode_s > 0:
+        queue.decode_hist.labels(endpoint=endpoint).observe(decode_s)
+        if gen_tokens > 0:
+            queue.tok_s_hist.labels(endpoint=endpoint).observe(
+                gen_tokens / decode_s)
 
 
 def json_payload(text: str):
-    """宽容提取 JSON（容忍 ``` 代码块与前后缀）；失败抛 ValueError。"""
+    """宽容提取 JSON（容忍 ``` 代码块、前后缀、多个候选）；失败抛 ValueError。
+
+    旧实现取"第一个 { 到最后一个 }"：模型输出两个对象、或结尾带一句带括号的说明
+    （"（注意 {} 不要留空）"）时整段就废了。改用 stdlib `JSONDecoder.raw_decode`
+    在每个 `{`/`[` 起点尝试解析——**由标准库判定边界**，不做手写括号配平。
+
+    只尝试前 8 个起点：响应体里的 JSON 一定靠前，全量扫描反而会被长文本拖慢。
+    """
     candidate = text.strip()
     if candidate.startswith("```"):
         candidate = candidate.strip("`")
         if candidate.startswith("json"):
             candidate = candidate[4:]
-    start = candidate.find("{")
-    if start < 0:
-        start = candidate.find("[")
-    end = max(candidate.rfind("}"), candidate.rfind("]"))
-    if start >= 0 and end > start:
-        candidate = candidate[start:end + 1]
-    return json.loads(candidate)
+    decoder = json.JSONDecoder()
+    starts = [i for i, ch in enumerate(candidate) if ch in "{["][:8]
+    for start in starts:
+        try:
+            value, _end = decoder.raw_decode(candidate[start:])
+            return value
+        except ValueError:
+            continue
+    raise ValueError("no JSON object found in model output")
 
 
 def run_blocking(svc, pipe: Pipeline) -> dict:
@@ -71,7 +96,8 @@ def run_blocking(svc, pipe: Pipeline) -> dict:
     meta: dict = {}
     started = time.monotonic()
     first_token_at: float | None = None
-    for item in svc.queue.run(lambda: pipe.iter_tokens()):
+    for item in svc.queue.run(lambda: pipe.iter_tokens(),
+                              endpoint=pipe.endpoint):
         if isinstance(item, dict):
             meta.update(item)          # perf / tool_calls / reasoning 等管线产物
         else:
@@ -83,10 +109,12 @@ def run_blocking(svc, pipe: Pipeline) -> dict:
     metrics["duration_sum"] = metrics.get("duration_sum", 0.0) + elapsed
     metrics["last_ttft_s"] = ((first_token_at - started)
                               if first_token_at else 0.0)
-    if first_token_at is not None:
-        observe(metrics, "ttft", TTFT_BUCKETS, first_token_at - started)
-    # token 计数（/health stats 兼容字段的来源；perf 的 exact counts 优先）
     perf = meta.get("perf") or {}
+    gen_tokens = int(perf.get("generate_tokens") or 0)
+    ttft = (first_token_at - started) if first_token_at else None
+    decode = (elapsed - ttft) if ttft is not None else None
+    record_timing(svc.queue, pipe.endpoint, ttft, decode, gen_tokens)
+    # token 计数（/health stats 兼容字段的来源；perf 的 exact counts 优先）
     metrics["prompt_tokens_total"] = (metrics.get("prompt_tokens_total", 0)
                                       + int(perf.get("prefill_tokens") or 0))
     metrics["completion_tokens_total"] = (
@@ -96,18 +124,20 @@ def run_blocking(svc, pipe: Pipeline) -> dict:
 
 
 def run_blocking_checked(svc, raw: dict, max_tokens: int,
-                        schema: dict | None) -> tuple[dict, Pipeline]:
+                        schema: dict | None,
+                        endpoint: str = "chat.completions"
+                        ) -> tuple[dict, Pipeline]:
     """非流式 + 可选 json_schema 校验重试（emulated，F6）。"""
     attempts = max(0, int(svc.json_schema_retries)) + 1
     messages = list(raw.get("messages") or [])
     last_errors: list[str] = []
     body = {**raw, "max_tokens": max_tokens}
-    pipe = build_pipeline(svc, body, chat=True)
+    pipe = build_pipeline(svc, body, chat=True, endpoint=endpoint)
     result: dict = {}
     for attempt in range(attempts):
         if attempt:
             body = {**body, "messages": messages}
-            pipe = build_pipeline(svc, body, chat=True)
+            pipe = build_pipeline(svc, body, chat=True, endpoint=endpoint)
         result = run_blocking(svc, pipe)
         if schema is None:
             return result, pipe
@@ -150,11 +180,22 @@ class StreamTimer:
         metrics = svc.queue.metrics
         metrics["duration_sum"] = (metrics.get("duration_sum", 0.0)
                                    + (time.monotonic() - self.started))
-        if self.first_token_at is not None:
-            metrics["last_ttft_s"] = self.first_token_at - self.started
-            observe(metrics, "ttft", TTFT_BUCKETS,
-                    self.first_token_at - self.started)
         perf = pipe.last_perf() if hasattr(pipe, "last_perf") else None
+        # last_perf 可能是 (prefill, generate) 元组，也可能是 dict（fake 路径）
+        if isinstance(perf, dict):
+            gen_tokens = int(perf.get("generate_tokens") or 0)
+        elif perf:
+            gen_tokens = int(perf[1])
+        else:
+            gen_tokens = 0
+        ttft = (self.first_token_at - self.started
+                if self.first_token_at is not None else None)
+        decode = None
+        if ttft is not None:
+            metrics["last_ttft_s"] = ttft
+            decode = time.monotonic() - self.started - ttft
+        record_timing(svc.queue, getattr(pipe, "endpoint", "unknown"),
+                      ttft, decode, gen_tokens)
         if perf:
             metrics["prompt_tokens_total"] = (
                 metrics.get("prompt_tokens_total", 0)
