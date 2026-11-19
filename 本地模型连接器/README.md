@@ -56,8 +56,10 @@ FastAPI 服务，两者互不混放。
 ## 工具
 
 `local_llm_ask` / `chat` / `extract` / `batch` / `status` / `job`；估算超过
-`task_threshold_s`（默认 45 s，必须 < 60）自动转 job，用 `local_llm_job`
-轮询或取消。协议支持四版（2026-07-28 无状态 + 三个 initialize 旧版）。
+转 job 阈值（= `client_timeout_s` − 15 s，默认 60−15=45 s）自动转 job，用
+`local_llm_job` 轮询或取消。解码速率、上下文、输出上限等模型能力从板端
+`/health` 读取，不再在连接器配置。协议支持四版（2026-07-28 无状态 + 三个
+initialize 旧版）。
 
 2026-10-22 修复后：2026 `resultType=complete`、`server/discover` 全版本可用、
 `tools/list` 带 `ttlMs`/`cacheScope`；`ask` 支持 `format=json_object`（提示约束），

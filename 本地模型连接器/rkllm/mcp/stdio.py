@@ -32,6 +32,16 @@ from . import tools as tools_mod
 
 MAX_MESSAGE_BYTES = 8 * 1024 * 1024
 POOL_WORKERS = 4
+# 判定 job 时的"预期生成 token"上限：典型短回答长度。它不是模型参数
+# （真实上限来自板端 `limits.default_max_tokens`），只用于估算"要不要转 job"。
+ESTIMATE_TOKENS_CAP = 128
+# 客户端硬超时的安全余量（秒）：MCP 调用方通常 60 s 硬超时，留出网络与序列化
+# 开销，避免同步请求刚好卡在边界被掐断。这是**客户端**约束，不是模型参数。
+CLIENT_TIMEOUT_MARGIN_S = 15
+# job 读超时：估算的倍数与上限。属传输层常量（板端不知道客户端会等多久），
+# 因此不做成配置项；上限与板端 job_timeout_max_s 默认对齐。
+JOB_TIMEOUT_FACTOR = 1.5
+JOB_TIMEOUT_MAX_S = 4200.0
 
 
 class CancelFlag:
@@ -89,17 +99,46 @@ class StdioServer:
                          name="mcp-model-class").start()
 
     def _refresh_model_class(self) -> None:
+        """从板端 `/health` 拉取能力与实测性能，写进只读快照 `cfg["_board"]`。
+
+        连接器不再自带"档位表 + 阈值"这套判断参数：解码速率、上下文、输出上限、
+        队列超时全部由板端给出（`/health.perf` 与 `/health.limits`）。
+        `_board` 以下划线开头，且不在 `default_cfg()` 里，因此 TOML/env 都写不进来
+        （`load_cfg` 只覆盖已存在的键），它纯粹是运行时快照。
+        """
         try:
             info = self.backend.status()
-            if isinstance(info, dict):
-                found = info.get("model_class")
-                if found and found.endswith("b"):
-                    self.model_class = found
-                    self.cfg["model_class"] = found
-                context_len = info.get("context_len")
-                if isinstance(context_len, int) and context_len > 0:
-                    # 工具层的输入预算按板端实际上下文收窄（避免 4k+ 汉字 400）
-                    self.cfg["context_len"] = context_len
+            if not isinstance(info, dict):
+                return
+            board: dict = dict(self.cfg.get("_board") or {})
+
+            found = info.get("model_class")
+            if found and found.endswith("b"):
+                self.model_class = found
+                self.cfg["model_class"] = found
+            context_len = info.get("context_len")
+            if isinstance(context_len, int) and context_len > 0:
+                # 工具层的输入预算按板端实际上下文收窄（避免 4k+ 汉字 400）
+                self.cfg["context_len"] = context_len
+
+            perf = info.get("perf")
+            if isinstance(perf, dict):
+                tok_s = perf.get("decode_tok_s")
+                if isinstance(tok_s, (int, float)) and tok_s > 0:
+                    board["decode_tok_s"] = float(tok_s)
+                board["perf_source"] = perf.get("source") or "cold"
+
+            limits = info.get("limits")
+            if isinstance(limits, dict):
+                for src, dst in (("max_tokens_limit", "max_tokens_limit"),
+                                 ("default_max_tokens", "default_max_tokens"),
+                                 ("context_margin_tokens", "context_margin_tokens"),
+                                 ("request_timeout_s", "request_timeout_s")):
+                    value = limits.get(src)
+                    if isinstance(value, int) and value > 0:
+                        board[dst] = value
+
+            self.cfg["_board"] = board
         except Exception:
             pass
 
@@ -225,10 +264,7 @@ class StdioServer:
         estimate = (estimator(arguments) if estimator
                     else self._default_estimate(arguments, short))
         task_mode = self.cfg.get("task_mode", "auto")
-        try:
-            threshold = float(self.cfg.get("task_threshold_s", 45))
-        except (TypeError, ValueError):
-            threshold = 45.0
+        threshold = self._task_threshold()
         force_job = task_mode == "always"
         if task_mode != "never" and (force_job or estimate > threshold):
             # job 的读超时必须覆盖"真的生成满 max_tokens"的最坏情况，而不是
@@ -275,17 +311,17 @@ class StdioServer:
 
         旧实现直接拿 max_tokens 当预期输出：默认 512 在 4B 上估算 114 s，
         导致 ask/chat/batch/extract **恒转 job**。现在：
-        - 未显式传 max_tokens 时按 estimate_tokens_cap（默认 128）估；
+        - 未显式传 max_tokens 时按 ESTIMATE_TOKENS_CAP 估（典型短回答长度）；
         - ask 显式传 max_tokens 时按显式值估（大请求继续转 job，避免超时）；
         - extract 按 (重试次数+1) 次尝试估（校验重试是真实的多次推理）；
         - batch 按段数估（串行逐段推理，旧估算漏乘段数）。
         """
+        cap = ESTIMATE_TOKENS_CAP
+        # 生成上限优先用板端给的默认值（`/health.limits.default_max_tokens`），
+        # 板端未给（老版本）才回落配置/512。
         try:
-            cap = int(self.cfg.get("estimate_tokens_cap", 128) or 128)
-        except (TypeError, ValueError):
-            cap = 128
-        try:
-            default = int(self.cfg.get("default_max_tokens", 512) or 512)
+            default = int(self._board_val("default_max_tokens", 0)
+                          or self.cfg.get("default_max_tokens", 512) or 512)
         except (TypeError, ValueError):
             default = 512
         per_call = min(default, cap)
@@ -311,21 +347,38 @@ class StdioServer:
             return per_call * max(1, min(count, max_segments))
         return per_call
 
+    def _board_val(self, key: str, default=None):
+        """读板端能力快照（`_board`）；未刷新到就是 default。"""
+        board = self.cfg.get("_board") or {}
+        value = board.get(key, default)
+        return default if value is None else value
+
+    def _task_threshold(self) -> float:
+        """转 job 的耗时阈值 = 客户端硬超时 − 安全余量。
+
+        这是**客户端**约束（MCP 调用方通常 60 s 硬超时），不属于模型能力，
+        因此留在连接器；模型侧参数（速率/上下文/输出上限）全部来自板端。
+        """
+        try:
+            client = float(self.cfg.get("client_timeout_s", 60) or 60)
+        except (TypeError, ValueError):
+            client = 60.0
+        return max(5.0, client - CLIENT_TIMEOUT_MARGIN_S)
+
     def _default_estimate(self, arguments: dict, short: str | None = None) -> float:
         text = json.dumps(arguments, ensure_ascii=False)
         prefill = max(1, len(text) // 2)   # 中文约 2 字符/token
         return estimate_seconds(self.model_class, prefill,
-                                self._estimate_decode_tokens(arguments, short))
+                                self._estimate_decode_tokens(arguments, short),
+                                decode_tok_s=self._board_val("decode_tok_s"))
 
     def _sync_token_cap(self, arguments: dict, short: str | None) -> int:
         """同步路径的安全生成上限（见 jobs.sync_token_cap）。"""
         text = json.dumps(arguments, ensure_ascii=False)
         prefill = max(1, len(text) // 2)
-        try:
-            threshold = float(self.cfg.get("task_threshold_s", 45))
-        except (TypeError, ValueError):
-            threshold = 45.0
-        cap = sync_token_cap(self.model_class, prefill, threshold)
+        cap = sync_token_cap(self.model_class, prefill,
+                             self._task_threshold(),
+                             decode_tok_s=self._board_val("decode_tok_s"))
         if short == "batch":
             segments = arguments.get("segments")
             count = len(segments) if isinstance(segments, list) else 1
@@ -344,8 +397,11 @@ class StdioServer:
         实际会按 default_max_tokens 生成：读超时必须按最坏值放宽，否则
         默认 ask（预期 85 s 判 job、实际可能 341 s）仍会被 120 s 掐断。
         """
+        # 生成上限优先用板端给的默认值（`/health.limits.default_max_tokens`），
+        # 板端未给（老版本）才回落配置/512。
         try:
-            default = int(self.cfg.get("default_max_tokens", 512) or 512)
+            default = int(self._board_val("default_max_tokens", 0)
+                          or self.cfg.get("default_max_tokens", 512) or 512)
         except (TypeError, ValueError):
             default = 512
         explicit = arguments.get("max_tokens")
@@ -370,26 +426,23 @@ class StdioServer:
                 tokens = default
         text = json.dumps(arguments, ensure_ascii=False)
         prefill = max(1, len(text) // 2)
-        return estimate_seconds(self.model_class, prefill, tokens)
+        return estimate_seconds(self.model_class, prefill, tokens,
+                                decode_tok_s=self._board_val("decode_tok_s"))
 
     def _job_timeout(self, estimate: float) -> float:
-        """job 读超时 = max(target_timeout, 估算×factor+30)，上限可配。
+        """job 读超时 = max(板端请求超时, 估算×factor+30)，上限为传输层常量。
 
         旧实现 job 与同步共用 120 s：27B 档 512 token（估算 341 s）必被掐断。
+        `base` 取板端 `limits.request_timeout_s`（板端已给），拿不到才用
+        `target_timeout_s` 兜底。
         """
         try:
-            base = float(self.cfg.get("target_timeout_s", 120) or 120)
+            base = float(self._board_val("request_timeout_s", 0)
+                         or self.cfg.get("target_timeout_s", 120) or 120)
         except (TypeError, ValueError):
             base = 120.0
-        try:
-            factor = float(self.cfg.get("job_timeout_factor", 1.5) or 1.5)
-        except (TypeError, ValueError):
-            factor = 1.5
-        try:
-            max_s = float(self.cfg.get("job_timeout_max_s", 1800) or 1800)
-        except (TypeError, ValueError):
-            max_s = 1800.0
-        return job_timeout_s(estimate, base_s=base, factor=factor, max_s=max_s)
+        return job_timeout_s(estimate, base_s=base,
+                             factor=JOB_TIMEOUT_FACTOR, max_s=JOB_TIMEOUT_MAX_S)
 
     def _run_as_job(self, short: str, handler, arguments: dict,
                     progress_token, request_id=None, *,
@@ -466,7 +519,7 @@ class StdioServer:
                 "estimated_s": round(float(estimate), 1) if estimate else None,
                 "timeout_s": int(job_timeout),
                 "message": "任务预计超过 %d 秒，已转后台任务；请用 %sjob 轮询"
-                           % (self.cfg.get("task_threshold_s", 45),
+                           % (self._task_threshold(),
                               self.cfg["tool_prefix"])}
         reply = {"content": [{"type": "text",
                               "text": json.dumps(info, ensure_ascii=False)}]}

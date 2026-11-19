@@ -1,4 +1,4 @@
-"""config.py 单测：86 键契约、优先级、校验、迁移（N11/F13 验收）。"""
+"""config.py 单测：84 键契约、优先级、校验、迁移（N11/F13 验收）。"""
 
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from rkllm.config import SCHEMA, ConfigError, config_docs, load_config
 
-# 86 键分组计数（与《MCP 接入与配置设计》§7.2 一致）
+# 84 键分组计数（A 方案移除 mcp.task_threshold_s / max_input_chars 两个孤儿键）
 GROUP_COUNTS = {"server": 13, "model": 13, "engine": 10, "queue": 5,
-                "openai": 9, "cache": 5, "mcp": 24, "logging": 5, "metrics": 2}
+                "openai": 9, "cache": 5, "mcp": 22, "logging": 5, "metrics": 2}
 
 
-def test_schema_is_exactly_86_keys():
-    assert len(SCHEMA) == 86
+def test_schema_is_exactly_84_keys():
+    assert len(SCHEMA) == 84
     counts: dict[str, int] = {}
     for key in SCHEMA:
         counts[key.section] = counts.get(key.section, 0) + 1
@@ -36,7 +36,7 @@ def test_defaults_load():
     cfg = load_config(env={})
     assert cfg.server.bind_host == "127.0.0.1"
     assert cfg.server.port == 8080
-    assert cfg.mcp.task_threshold_s == 45
+    assert cfg.mcp.task_mode == "auto"
     assert cfg.mcp.default_max_tokens == 512
     assert cfg.model.keep_history is False
     assert cfg.queue.max_concurrent == 1
@@ -49,7 +49,7 @@ def test_priority_file_env_cli(tmp_path):
         [server]
         port = 9000
         [mcp]
-        task_threshold_s = 30
+        job_ttl_s = 900
     """), encoding="utf-8")
     env = {"RKLLM_SERVER_PORT": "9100"}
     cfg = load_config(file=str(f), env=env, cli={"server.port": 9200})
@@ -63,7 +63,7 @@ def test_priority_file_env_cli(tmp_path):
     cfg = load_config(file=str(f), env={})
     assert cfg.server.port == 9000
     assert cfg.source_of("server.port") == "file"
-    assert cfg.mcp.task_threshold_s == 30
+    assert cfg.mcp.job_ttl_s == 900
 
 
 def test_env_bool_and_list_coercion():
@@ -76,11 +76,11 @@ def test_env_bool_and_list_coercion():
 def test_validation_collects_all_errors():
     with pytest.raises(ConfigError) as excinfo:
         load_config(env={"RKLLM_SERVER_PORT": "70000",
-                         "RKLLM_MCP_TASK_THRESHOLD_S": "90",
+                         "RKLLM_MCP_TRANSPORT": "http",   # 未配 allow_remote_origin → 跨键校验报错
                          "RKLLM_MODEL_CONTEXT": "100"})
     errs = "\n".join(excinfo.value.errors)
     assert "server.port" in errs
-    assert "mcp.task_threshold_s" in errs   # >= 60 被跨键校验拦截
+    assert "mcp.transport" in errs   # http 无 allow_remote_origin 被跨键校验拦截
     assert "model.context" in errs
     assert len(excinfo.value.errors) >= 3   # 一次性列出，不是首个即停
 

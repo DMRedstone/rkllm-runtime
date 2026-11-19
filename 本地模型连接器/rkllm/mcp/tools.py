@@ -28,6 +28,14 @@ from .protocol import INVALID_PARAMS, JsonRpcError
 
 __all__ = ["build_handlers", "tool_definitions", "Cancelled"]
 
+# 冷启动兜底常量：仅当板端 `/health` 不可达（cfg["_board"] 为空）时使用。
+# 正常运行时 stdio 会把板端 context_len / limits 写进快照，_bval 优先读快照。
+# 与旧 cfg 键（context_window / context_margin_tokens / default_max_tokens）解耦：
+# 那些键 A 方案后不再是判断依据，兜底值集中在这里，避免两处漂移。
+DEFAULT_CONTEXT = 4096
+DEFAULT_CONTEXT_MARGIN = 32
+DEFAULT_MAX_TOKENS = 512
+
 # 模式预设：辅助任务的提示词骨架（中文语境，保留英文关键词）
 _MODE_PROMPTS = {
     "summarize": "对下面的文本做摘要，输出不超过 300 字，只保留关键信息：\n\n",
@@ -155,12 +163,13 @@ def build_handlers(backend, cfg: dict, jobs, *,
     """返回 {工具短名: handler(params, should_cancel=None, max_tokens_cap=None,
     timeout_s=None)->result dict}。
 
-    cfg 需要：default_max_tokens / default_temperature / max_input_chars /
-    max_result_chars / batch_max_segments；上下文预算读 `context_len`
-    （stdio 从 /health 刷新）或 `context_window`（缺省 4096）。
+    cfg 需要：default_temperature / max_result_chars / batch_max_segments。
+    上下文预算与生成上限优先读板端能力快照 `cfg["_board"]`（stdio 从
+    `/health` 刷新：context_len / limits.*）；板端不可达时回落到本模块
+    冷启动常量。旧的 `max_input_chars`/`context_window` 等键不再参与判断。
 
     `max_tokens_cap`：同步路径由 stdio 传入的安全生成上限；job 路径为 None
-    （按调用方请求/默认值生成）。`timeout_s`：本次调用的 HTTP 总读超时。
+    （按调用方请求/板端默认值生成）。`timeout_s`：本次调用的 HTTP 总读超时。
     """
     from .backend import BackendError
 
@@ -174,7 +183,6 @@ def build_handlers(backend, cfg: dict, jobs, *,
         snapshot = bool(value)
         return lambda: snapshot
 
-    input_limit = int(cfg.get("max_input_chars", 12000) or 12000)
     result_limit = int(cfg.get("max_result_chars", 20000) or 20000)
     session_store = sessions if sessions is not None else {}
     session_lock = sessions_lock or threading.Lock()
@@ -184,8 +192,12 @@ def build_handlers(backend, cfg: dict, jobs, *,
     # P2：会话空闲 TTL（秒），0=不过期。陈旧会话不回收会持续占用内存/上下文。
     session_ttl_s = float(cfg.get("session_ttl_s", 0) or 0)
     session_seen: dict[str, float] = {}
-    default_context = int(cfg.get("context_window", 4096) or 4096)
-    context_margin = int(cfg.get("context_margin_tokens", 32) or 32)
+
+    def _bval(key: str, default):
+        """读板端能力快照。每次现读 `cfg["_board"]`（stdio 会整体替换它）。"""
+        board = cfg.get("_board") or {}
+        value = board.get(key, default)
+        return default if value is None else value
 
     def _tokens(text: str) -> int:
         """与板端同口径的粗估：UTF-8 字节数 / 3（agent/tokens.py）。"""
@@ -194,19 +206,33 @@ def build_handlers(backend, cfg: dict, jobs, *,
         return max(1, len(text.encode("utf-8")) // 3)
 
     def _ctx_tokens() -> int:
-        raw = cfg.get("context_len") or default_context
+        """可用输入预算 = 板端上下文 − 板端保留余量。
+
+        两者都来自 `/health`（`context_len` 与 `limits.context_margin_tokens`）；
+        板端不可达时才用冷启动常量，保证工具仍能构造请求让板端自己拒绝。
+        """
+        raw = cfg.get("context_len") or _bval("context_len", 0) or DEFAULT_CONTEXT
         try:
             ctx = int(raw)
         except (TypeError, ValueError):
-            ctx = default_context
-        return max(256, ctx - context_margin)
+            ctx = DEFAULT_CONTEXT
+        try:
+            margin = int(_bval("context_margin_tokens", DEFAULT_CONTEXT_MARGIN))
+        except (TypeError, ValueError):
+            margin = DEFAULT_CONTEXT_MARGIN
+        return max(256, ctx - margin)
 
     def _out_tokens(requested: Any, cap: Any = None) -> int:
         try:
             out = int(requested)
         except (TypeError, ValueError):
-            out = int(cfg.get("default_max_tokens", 512) or 512)
+            # 默认生成长度也由板端给（limits.default_max_tokens）
+            out = int(_bval("default_max_tokens", DEFAULT_MAX_TOKENS))
         out = max(1, out)
+        # 不得越过板端声明的一次输出上限，否则板端会直接 400
+        limit = int(_bval("max_tokens_limit", 0) or 0)
+        if limit > 0:
+            out = min(out, limit)
         if cap is not None:
             try:
                 out = min(out, max(8, int(cap)))
@@ -226,9 +252,9 @@ def build_handlers(backend, cfg: dict, jobs, *,
 
     def _limit_input(text: str, budget_tokens: int | None = None,
                      note: str = "输入") -> str:
-        if len(text) > input_limit:
-            text = text[:input_limit] + \
-                "\n…[输入超限已截断，上限 %d 字符]" % input_limit
+        # 输入裁剪只按板端上下文预算（token，UTF-8 字节安全切分）。
+        # 旧的 max_input_chars 字符硬截断已移除：它与 token 预算是两套口径，
+        # 会互相打架；而且三处调用都传了 budget，不存在"完全不裁"的路径。
         if budget_tokens is not None:
             text = _fit_text(text, budget_tokens, note)
         return text

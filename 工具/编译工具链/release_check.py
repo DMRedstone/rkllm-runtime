@@ -17,8 +17,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 PACKAGING = ROOT / "输入" / "rkllm-runtime-1.3.1"
 SRC = PACKAGING / "src"
-# 2026-11-18：新增 model.lora_paths → 86 键（.d 45 键 + 启动最小集）
-EXPECTED_KEYS = 86
+# 2026-11-18：新增 model.lora_paths → 86 键；2026-11-19：A 方案移除
+# mcp.task_threshold_s / mcp.max_input_chars 两个孤儿键 → 84 键（.d 45 键 + 启动最小集）
+EXPECTED_KEYS = 84
 
 
 def _read_version() -> str:

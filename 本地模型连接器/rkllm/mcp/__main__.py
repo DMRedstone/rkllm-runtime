@@ -37,7 +37,7 @@ def default_config_path() -> str:
 
 
 def default_cfg(endpoint: str, api_key: str) -> dict:
-    """配置缺省（85 键表的 mcp 组在客户端侧的子集；TOML 加载后合并）。"""
+    """配置缺省（板端键表 mcp 组的客户端子集 + 少量客户端专有键；TOML 加载后合并）。"""
     return {
         # -- 模式选择 ------------------------------------------------------
         "enabled": True,                 # mcp.enabled：连接器总开关
@@ -50,19 +50,17 @@ def default_cfg(endpoint: str, api_key: str) -> dict:
         "max_concurrent": 1,             # mcp.max_concurrent：在飞工具调用数
         # -- 工具行为 ------------------------------------------------------
         "tool_prefix": "local_llm_",
+        # 生成上限 / 同步读超时的冷启动兜底：板端可达时分别由
+        # /health.limits.default_max_tokens 与 request_timeout_s 覆盖。
         "default_max_tokens": 512,
         "default_temperature": 0.3,
-        "max_input_chars": 12000,
         "max_result_chars": 20000,
         "batch_max_segments": 20,
         "task_mode": "auto",
-        "task_threshold_s": 45,
-        # job 判定用的"预期生成 token"上限：未显式传 max_tokens 时按它估算，
-        # 让默认短任务走同步（旧实现按 max_tokens=512 估算 → 全部恒转 job）。
-        "estimate_tokens_cap": 128,
-        # 输入预算：context_len 优先从 /health 刷新；不可达时退回 context_window。
-        "context_window": 4096,
-        "context_margin_tokens": 32,
+        # 转 job 的耗时阈值 = client_timeout_s − 15 s（客户端硬超时余量）。
+        # 这是 A 方案唯一保留的"判断参数"：它是客户端约束而非模型能力，
+        # 板端无从得知调用方会等多久。
+        "client_timeout_s": 60,
         "job_ttl_s": 600,
         "job_max": 8,
         "job_poll_hint_s": 2,
@@ -72,10 +70,10 @@ def default_cfg(endpoint: str, api_key: str) -> dict:
         "session_max_count": 256,        # 保留的会话数上限
         "session_ttl_s": 1800,           # 会话空闲过期（秒）；0=不过期
         # -- 目标 ----------------------------------------------------------
-        # 同步调用的单次 HTTP 读超时；job 的读超时按估算自动放宽，见下。
+        # 同步读超时的冷启动兜底；板端 /health.limits.request_timeout_s 优先。
+        # job 读超时 = max(板端请求超时, 估算×1.5+30)，上限 4200 s，
+        # factor/上限均为传输层常量（见 stdio.py），不再作为配置项。
         "target_timeout_s": 120,
-        "job_timeout_factor": 1.5,       # job 读超时 = 估算×factor + 30 s
-        "job_timeout_max_s": 4200,       # job 读超时上限（慢模型长答）
         "target_endpoint": endpoint,
         "target_api_key": api_key,
         # 内部字段（与 target_* 同值；键表用 target_* 命名）
@@ -85,7 +83,7 @@ def default_cfg(endpoint: str, api_key: str) -> dict:
 
 
 def load_cfg() -> dict:
-    """安装目录 mcp.toml + RKLLM_* 环境变量覆盖（env 优先，与板端 85 键一致）。"""
+    """安装目录 mcp.toml + RKLLM_* 环境变量覆盖（env 优先，键名与板端 mcp 组一致）。"""
     endpoint = os.environ.get("RKLLM_ENDPOINT", "http://127.0.0.1:8080/v1")
     api_key = os.environ.get("RKLLM_API_KEY", "")
     cfg = default_cfg(endpoint, api_key)

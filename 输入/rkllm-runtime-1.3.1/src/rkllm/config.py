@@ -1,12 +1,13 @@
-"""85 键 TOML 配置表（MCP 接入设计 §7 / 总体设计 §7.1，需求 N11/F13）。
+"""84 键 TOML 配置表（MCP 接入设计 §7 / 总体设计 §7.1，需求 N11/F13）。
 
 设计要点：
 - 所有影响行为的参数必须进表；代码中不得出现魔法数（协议常量与安全下限除外）。
 - 优先级：内置默认 < 配置文件 < 环境变量（RKLLM_*）< 命令行。
 - 启动校验：类型、范围、互斥项；错误一次性列出并拒绝启动（不再静默回退）。
 - 纯 stdlib（tomllib 为 3.13 内置）：客户端连接器零第三方依赖的前提。
-- 键计数由 tests/test_config.py 守住：server 13 + model 12 + engine 10 + queue 5
-  + openai 9 + cache 5 + mcp 24 + logging 5 + metrics 2 = 85。
+- 键计数由 tests/test_config.py 守住：server 13 + model 13 + engine 10 + queue 5
+  + openai 9 + cache 5 + mcp 22 + logging 5 + metrics 2 = 84。
+  （mcp 原 24 键；A 方案移除 task_threshold_s / max_input_chars 两个孤儿键）
 
 环境变量映射规则：RKLLM_<SECTION>_<NAME>（大写，如 RKLLM_SERVER_PORT）。
 旧 conffile（/etc/default/rkllm-server）经 LEGACY_ENV_MAP 迁移。
@@ -60,7 +61,7 @@ def _k(section: str, name: str, type_: type, default: Any, *,
                implemented=implemented, unwired_reason=unwired_reason)
 
 
-# 86 键全量 schema。分组顺序与《MCP 接入与配置设计》§7.2 一致。
+# 84 键全量 schema。分组顺序与《MCP 接入与配置设计》§7.2 一致。
 SCHEMA: tuple[Key, ...] = (
     # -- server（13）--------------------------------------------------------
     _k("server", "bind_host", str, "127.0.0.1", desc="监听地址；默认只本机，对外需显式改"),
@@ -191,15 +192,11 @@ SCHEMA: tuple[Key, ...] = (
     _k("mcp", "tool_prefix", str, "local_llm_", desc="工具名前缀"),
     _k("mcp", "task_mode", str, "auto", choices=("auto", "always", "never"),
        desc="长任务策略；第一期 job 工具恒可用"),
-    _k("mcp", "task_threshold_s", int, 45, min_v=5, max_v=55,
-       desc="超过此秒数转 job；必须 < 60 避开客户端硬超时"),
     _k("mcp", "job_ttl_s", int, 600, min_v=60, max_v=3600, desc="job 结果保留时长"),
     _k("mcp", "job_max", int, 8, min_v=1, max_v=64, desc="并存 job 上限"),
     _k("mcp", "job_poll_hint_s", int, 2, min_v=1, max_v=30, desc="建议客户端轮询间隔"),
     _k("mcp", "progress_interval_s", int, 5, min_v=0, max_v=30,
        desc="notifications/progress 间隔；0=不发"),
-    _k("mcp", "max_input_chars", int, 12000, min_v=100, max_v=100000,
-       desc="工具输入字符上限（约 4k token 中文）"),
     _k("mcp", "max_result_chars", int, 20000, min_v=1000, max_v=200000,
        desc="工具结果字符上限；超出截断并标注"),
     _k("mcp", "default_max_tokens", int, 512, min_v=1, max_v=8192,
@@ -229,7 +226,7 @@ SCHEMA: tuple[Key, ...] = (
 
 assert len(SCHEMA) == len(set(k.full for k in SCHEMA)), "配置键名重复（N11）"
 
-# 板端默认 TOML 落点。此前 85 键表只有 RKLLM_TOML 环境变量一个入口，deb 也不
+# 板端默认 TOML 落点。此前键表只有 RKLLM_TOML 环境变量一个入口，deb 也不
 # 提供模板，运维根本看不见这张表；现在 load_config 会自动读它（不存在则静默
 # 跳过，默认行为零变化），模板由 `rkllm config init --board` 生成。
 DEFAULT_TOML_PATH = "/etc/rkllm/rkllm.toml"
@@ -487,7 +484,7 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
     dropin = _normalize_legacy(_load_dropins(DEFAULT_DROPIN_DIR))
 
     file_data: dict[str, Any] = {}
-    # 未显式指定时，板端的默认 TOML 存在就用它（85 键的落点；此前只有
+    # 未显式指定时，板端的默认 TOML 存在就用它（键表的落点；此前只有
     # RKLLM_TOML 环境变量一条路，deb 也没打模板，等于运维看不见这张表）。
     # 文件不存在是正常状态，不算错误。
     path = file or DEFAULT_TOML_PATH
@@ -542,9 +539,6 @@ def _cross_validate(values: dict[str, Any], errors: list[str],
     cert, key_pem = values.get("server.tls_cert"), values.get("server.tls_key")
     if cert is not None and key_pem is not None and bool(cert) != bool(key_pem):
         errors.append("server.tls_cert 与 server.tls_key 必须成对给出")
-    threshold = values.get("mcp.task_threshold_s")
-    if threshold is not None and threshold >= 60:
-        errors.append("mcp.task_threshold_s 必须 < 60（客户端 60 s 硬超时）")
     if values.get("mcp.transport") == "http" and not values.get("mcp.allow_remote_origin"):
         errors.append("mcp.transport=http 时必须配置 mcp.allow_remote_origin（安全边界）")
 
@@ -589,7 +583,7 @@ def config_docs() -> str:
 def config_init(target: str = "board") -> str:
     """生成 TOML 模板（设计 §7.2 `rkllm config init --board|--client`）。
 
-    只输出注释 + 少量必填项，保持与 `config docs` 的 85 键同源但不重复抄写
+    只输出注释 + 少量必填项，保持与 `config docs` 的 84 键同源但不重复抄写
     全部默认值——默认值本来就不需要写进文件（优先级链已保证）。
     """
     if target == "client":
@@ -602,17 +596,16 @@ def config_init(target: str = "board") -> str:
 target_endpoint = "http://127.0.0.1:8080/v1"
 # 板端 server.api_key（留空表示板端未启用鉴权）
 target_api_key = ""
-# 单次 HTTP 读超时（秒）
+# 单次 HTTP 读超时（秒）；板端 /health.limits.request_timeout_s 优先
 target_timeout_s = 120
-# 超过此秒数转 job；必须 < 60（客户端工具硬超时）
-task_threshold_s = 45
-# 工具结果与输入上限（字符）
+# MCP 调用方硬超时（秒）：转 job 阈值 = client_timeout_s − 15
+client_timeout_s = 60
+# 工具结果上限（字符）；输入按板端 /health 的上下文预算裁剪
 max_result_chars = 20000
-max_input_chars = 12000
 """
     return """# /etc/rkllm/rkllm.toml - 板端 FastAPI 栈配置（`rkllm serve`）
 # 优先级：内置默认 < 本文件 < RKLLM_* 环境变量 < 命令行
-# 全部 85 键与默认值：  rkllm config docs
+# 全部 84 键与默认值：  rkllm config docs
 # 生效值与来源：        rkllm config show
 # 只填需要改的项即可。
 

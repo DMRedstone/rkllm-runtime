@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from ... import caps
 from ...platform import npu_status
 from ...agent.tokens import stats as _token_stats
+from ...agent.pipeline import CONTEXT_MARGIN_TOKENS
 from ..cacheview import cache_stats as _cache_stats
 
 router = APIRouter()
@@ -22,6 +23,62 @@ v1_router = APIRouter()
 
 def _svc(request: Request):
     return request.app.state.svc
+
+
+def _hist_mean(hist, endpoint: str) -> float | None:
+    """取某 endpoint 标签下直方图的均值（`_sum/_count`）；无样本返回 None。
+
+    直方图由 prometheus_client 持有（`metricsutil`），`_sum`/`_count` 是它
+    对外的累计值，读它们不需要额外的聚合器。任何异常都返回 None，避免
+    `/health` 因为指标对象缺失而 500——探针端点必须永远可用。
+    """
+    if hist is None:
+        return None
+    try:
+        child = hist.labels(endpoint=endpoint)
+        count = float(child._count.get() or 0)
+        if count <= 0:
+            return None
+        return float(child._sum.get()) / count
+    except Exception:
+        return None
+
+
+def _hist_count(hist, endpoint: str) -> int:
+    if hist is None:
+        return 0
+    try:
+        return int(hist.labels(endpoint=endpoint)._count.get() or 0)
+    except Exception:
+        return 0
+
+
+def _perf_stats(svc) -> dict:
+    """板端实测性能 + 能力上限，供客户端自行判断同步/异步与预算。
+
+    为什么放在 `/health` 而不是让客户端按档位表估：解码速率、上下文、输出上限
+    都是板端**已经测出来/算出来**的事实，客户端再写一份档位表只会漂移
+    （换模型/换板子即失效）。客户端读到 `source=measured` 即可直接使用；
+    `cold`（尚无样本）时自行回落保守值。
+    """
+    queue = getattr(svc, "queue", None)
+    tok_s = _hist_mean(getattr(queue, "tok_s_hist", None), "chat.completions")
+    ttft = _hist_mean(getattr(queue, "ttft_hist", None), "chat.completions")
+    samples = _hist_count(getattr(queue, "tok_s_hist", None), "chat.completions")
+    limits = {
+        "max_tokens_limit": int(getattr(svc, "max_tokens_limit", 0) or 0),
+        "default_max_tokens": int(getattr(svc, "default_max_tokens", 0) or 0),
+        "context_margin_tokens": CONTEXT_MARGIN_TOKENS,
+        "request_timeout_s": (int(queue.wait_timeout_s) if queue else 0),
+        "busy_retry_after_s": (int(queue.busy_retry_after_s) if queue else 0),
+    }
+    return {
+        "perf": {"decode_tok_s": round(tok_s, 2) if tok_s else None,
+                 "ttft_s": round(ttft, 3) if ttft else None,
+                 "samples": samples,
+                 "source": "measured" if samples else "cold"},
+        "limits": limits,
+    }
 
 
 @router.get("/health")
@@ -62,6 +119,8 @@ def health(request: Request):
         "cache": _cache_stats(svc.cfg),
         # token 计数状态：backend=tokenizers（精确）/estimate（自校准估算）
         "tokens": _token_stats(),
+        # 实测性能 + 能力上限：客户端据此判断同步/异步与预算，不再自带档位表
+        **_perf_stats(svc),
     }
 
 
@@ -88,6 +147,20 @@ def capabilities(request: Request):
                      "class": svc.model_class,
                      "context_len": svc.context_len,
                      "state": sup.state if sup else "none"}
+    # limits 必须反映**实际生效**的配置（M-8）：它是客户端计算请求预算的唯一
+    # 依据，报出与行为不符的容量会让客户端在真正发请求时收到 400/503。
+    limits = dict(caps.LIMITS)
+    q = getattr(svc, "queue", None)
+    limits.update({
+        "context_len": svc.context_len,
+        "max_output": (int(getattr(svc, "max_tokens_limit", 0) or 0)
+                       or int(getattr(svc, "default_max_tokens", 0) or 0)),
+        "concurrency": 1,                     # 单 NPU 串行，queue 侧已夹紧
+        "queue": (q.max_wait if q else limits.get("queue", 0)),
+        "request_timeout_s": (int(q.wait_timeout_s) if q
+                              else limits.get("request_timeout_s", 0)),
+    })
+    view["limits"] = limits
     return view
 
 

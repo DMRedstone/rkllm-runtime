@@ -186,7 +186,7 @@ def test_config_init_board_parses(tmp_path):
 
 def test_config_init_client_parses():
     data = tomllib.loads(config_init("client"))
-    assert data["mcp"]["task_threshold_s"] == 45
+    assert data["mcp"]["client_timeout_s"] == 60
     assert "target_endpoint" in data["mcp"]
 
 

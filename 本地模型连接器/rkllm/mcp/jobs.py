@@ -1,8 +1,9 @@
 """长任务 job 状态机（MCP 设计 §5.3 / §5.4）。
 
-- 判定：估算耗时 = prefill/44 + max_tokens/decode（档位预设，2026-10-21 真机
-  校准：4B 4.5 / 7B 3.5 / 27B 1.5 tok/s），超过 task_threshold_s（默认 45）→
-  建任务返回 job_id；
+- 判定：估算耗时 = prefill/prefill_tok_s + max_tokens/decode_tok_s，超过阈值 →
+  建任务返回 job_id。**速率优先取板端 `/health` 的实测值**（`perf.decode_tok_s`，
+  由 runtime 的 `perf.generate_tokens` 汇总而来）；只有板端尚无样本（冷启动）时
+  才回落到 `DECODE_TOK_S` 档位预设。这样换模型/换板子不需要改连接器配置。
 - 状态：working → completed | failed | cancelled；
 - 内存表 + TTL（job_ttl_s 默认 600）+ job_max 上限；
 - 取消：job.cancel() 幂等，推理侧通过 cancel_check 协作点感知。
@@ -16,48 +17,64 @@ import uuid
 from typing import Any
 
 __all__ = ["JobTable", "estimate_seconds", "sync_token_cap", "job_timeout_s",
-           "DECODE_TOK_S"]
+           "DECODE_TOK_S", "PREFILL_TOK_S"]
 
 MIN_SYNC_TOKENS = 8
 
-# 解码速度（tok/s）：设计 §5.3 给的是 8 / 5 / 2，2026-10-21 真机校准后下调——
-# 真机实测（4B W8A8 档）45 token / 9.3 s ≈ 4.8 tok/s（单发，型号以板端为准），
-# 长文批量时更低。按 8 tok/s 估算会把 300 token 的请求算成 38.7 s（< 45 阈值）
-# 而同步执行，实际却要 80 s，直接撞上客户端 60 s 硬超时——这是把长任务判错的
-# 方向性错误，因此以实测值下压，宁可多转 job 也不让客户端超时。
+# 冷启动兜底（板端 `/health.perf.source == "cold"` 时才用）：
+# 2026-10-21 真机校准，4B W8A8 45 token / 9.3 s ≈ 4.8 tok/s，取 5 略乐观、
+# 长文批量时更低；宁可多转 job 也不让客户端撞 60 s 硬超时。
 DECODE_TOK_S = {"4b": 5.0, "7b": 3.5}
 PREFILL_TOK_S = 44
 
 
+def _decode_rate(model_class: str, decode_tok_s: float | None) -> float:
+    """解码速率：板端实测优先，冷启动回落档位表，再兜底保守值。"""
+    if decode_tok_s:
+        try:
+            rate = float(decode_tok_s)
+            if rate > 0:
+                return rate
+        except (TypeError, ValueError):
+            pass
+    return DECODE_TOK_S.get(model_class, 1.5)
+
+
 def estimate_seconds(model_class: str, prefill_tokens: int,
-                     max_tokens: int) -> float:
-    decode = DECODE_TOK_S.get(model_class, 1.5)   # 无内置档位（14b/27b）按保守值估，宁多转 job
+                     max_tokens: int,
+                     decode_tok_s: float | None = None) -> float:
+    """估算耗时。`decode_tok_s` 由调用方从板端实测值传入，优先于档位表。"""
+    decode = _decode_rate(model_class, decode_tok_s)
     return prefill_tokens / PREFILL_TOK_S + max_tokens / decode
 
 
 def sync_token_cap(model_class: str, prefill_tokens: int,
-                   threshold_s: float) -> int:
+                   threshold_s: float,
+                   decode_tok_s: float | None = None) -> int:
     """同步调用的安全生成上限（token）。
 
     同步路径传给后端/工具的 max_tokens 会被夹到这个值：让最坏情况下的估算
-    耗时仍落在 task_threshold_s 内（留 1 s 余量），从而不会因为"默认 max_tokens
-    很大"而把短任务误判成 job，也不会让同步调用真的跑过客户端 60 s 硬超时。
-    被夹断时后端会返回 finish_reason=length，工具层会给出明确提示。
+    耗时仍落在阈值内（留 1 s 余量），从而不会因为"默认 max_tokens 很大"而
+    真跑过客户端硬超时。被夹断时板端会返回 `finish_reason=length`。
+
+    **速率来自板端实测**（`decode_tok_s`），所以换模型后上限自动跟随，
+    不需要改连接器配置。
     """
-    decode = DECODE_TOK_S.get(model_class, 1.5)   # 无内置档位（14b/27b）按保守值估，宁多转 job
+    decode = _decode_rate(model_class, decode_tok_s)
     room_s = float(threshold_s) - prefill_tokens / PREFILL_TOK_S - 1.0
     return max(MIN_SYNC_TOKENS, int(room_s * decode))
 
 
 def job_timeout_s(estimate_s: float, base_s: float = 120.0,
-                  factor: float = 1.5, max_s: float = 1800.0) -> float:
+                  factor: float = 1.5, max_s: float = 4200.0) -> float:
     """job 的读超时：估算的 factor 倍 + 30 s 余量，但不小于 base。
 
-    旧实现 job 与同步共用 target_timeout_s=120：27B 档 512 token 的估算
-    约 341 s，必然被 120 s 总超时掐断。job 是后台任务，读超时应按估算放宽。
+    `factor`/`max_s` 是**传输层**常量而非模型参数（板端不知道客户端会等多久），
+    因此不再作为配置暴露；上限与板端 `job_timeout_max_s` 的默认对齐。
     """
     return min(float(max_s),
                max(float(base_s), float(estimate_s) * float(factor) + 30.0))
+
 
 
 class Job:
