@@ -69,6 +69,10 @@ def _perf_stats(svc) -> dict:
         "max_tokens_limit": int(getattr(svc, "max_tokens_limit", 0) or 0),
         "default_max_tokens": int(getattr(svc, "default_max_tokens", 0) or 0),
         "context_margin_tokens": CONTEXT_MARGIN_TOKENS,
+        # request_timeout_s 对外取 wait_timeout_s（默认 600s）而非 queue 的
+        # request_timeout_s（900s）：这是 GHZ 2026-11-19 拍板的保守值——连接器
+        # 拿它当 job 读超时的 base，600s 已足够覆盖单请求，且留更多余量给
+        # factor 放大。不是漏报，勿改回 900s（审查报告 P1-B 已记录该决策）。
         "request_timeout_s": (int(queue.wait_timeout_s) if queue else 0),
         "busy_retry_after_s": (int(queue.busy_retry_after_s) if queue else 0),
     }
@@ -157,6 +161,7 @@ def capabilities(request: Request):
                        or int(getattr(svc, "default_max_tokens", 0) or 0)),
         "concurrency": 1,                     # 单 NPU 串行，queue 侧已夹紧
         "queue": (q.max_wait if q else limits.get("queue", 0)),
+        # 同 /health.limits：对外保守取 wait_timeout_s（600s），见上方说明。
         "request_timeout_s": (int(q.wait_timeout_s) if q
                               else limits.get("request_timeout_s", 0)),
     })

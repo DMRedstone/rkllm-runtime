@@ -97,16 +97,21 @@ class HttpBackend:
         last_exc: Exception | None = None
         for attempt in (0, 1):
             conn = self._connection(t)
+            # P2-D：POST 非幂等——重试只允许发生在"请求尚未送达"阶段。
+            # conn.request() 失败 = 连接没建立，可安全重建重试；一旦 request()
+            # 成功，getresponse() 阶段再失败也绝不重发，否则同一推理执行两次。
             try:
                 conn.request("POST", self._prefix + path, body=body,
                              headers=headers)
-                return conn.getresponse()
             except (http.client.HTTPException, OSError) as exc:
                 last_exc = exc
                 self._drop_connection()
                 if attempt == 0:
                     continue
-        raise BackendError("无法连接板端：%s" % last_exc)
+                raise BackendError("无法连接板端：%s" % last_exc) from exc
+            # 请求已送达：此后的异常原样抛出，不重试。
+            return conn.getresponse()
+        raise BackendError("无法连接板端：%s" % last_exc)  # pragma: no cover
 
     def chat(self, messages: list[dict], *, max_tokens: int = 512,
              temperature: float = 0.3,

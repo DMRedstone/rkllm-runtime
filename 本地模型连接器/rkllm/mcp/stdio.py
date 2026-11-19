@@ -23,6 +23,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
+from .backend import BackendError
 from .jobs import (JobTable, estimate_seconds, job_timeout_s,
                    sync_token_cap)
 from .protocol import (Dispatcher, JsonRpcError, INVALID_PARAMS, PARSE_ERROR,
@@ -32,6 +33,11 @@ from . import tools as tools_mod
 
 MAX_MESSAGE_BYTES = 8 * 1024 * 1024
 POOL_WORKERS = 4
+# 板端能力/实测速率的刷新周期（秒）。A 方案的性能快照必须周期性重读：
+# 构造时板端通常还没跑过推理、tok_s_hist 无样本（source=cold），只在 __init__
+# 刷一次会让实测 decode_tok_s 永远拿不到（P1-A）。30 s 足够让首批样本出现后
+# 很快生效，且 /health 是廉价探针。做成常量而非配置项：属运行时机制，不暴露。
+BOARD_REFRESH_INTERVAL_S = 30
 # 判定 job 时的"预期生成 token"上限：典型短回答长度。它不是模型参数
 # （真实上限来自板端 `limits.default_max_tokens`），只用于估算"要不要转 job"。
 ESTIMATE_TOKENS_CAP = 128
@@ -94,9 +100,23 @@ class StdioServer:
             extract_retries=cfg.get("extract_retries", 2),
             sessions=self._sessions, sessions_lock=self._sessions_lock)
         self.dispatcher = self._build_dispatcher()
-        # 档位从板端 /health 取（F9）：失败不影响启动，退回 env 默认
-        threading.Thread(target=self._refresh_model_class, daemon=True,
-                         name="mcp-model-class").start()
+        # 板端能力/实测速率：启动即刷一次，之后周期重刷（P1-A）。
+        # 失败不影响启动，退回 env 默认/cold 兜底。
+        self._board_refresh_stop = threading.Event()
+        threading.Thread(target=self._board_refresh_loop, daemon=True,
+                         name="mcp-board-refresh").start()
+
+    def _board_refresh_loop(self) -> None:
+        """周期性重读 `/health`，让实测速率在板端跑过样本后能被刷新到。
+
+        wait(interval) 可被 `_board_refresh_stop` 立即唤醒退出，进程退出不残留
+        线程；单次刷新由 `_refresh_model_class` 自己吞异常，循环不会因板端暂时
+        不可达而中断（P1-A）。
+        """
+        while not self._board_refresh_stop.is_set():
+            self._refresh_model_class()
+            if self._board_refresh_stop.wait(BOARD_REFRESH_INTERVAL_S):
+                break
 
     def _refresh_model_class(self) -> None:
         """从板端 `/health` 拉取能力与实测性能，写进只读快照 `cfg["_board"]`。
@@ -137,6 +157,12 @@ class StdioServer:
                     value = limits.get(src)
                     if isinstance(value, int) and value > 0:
                         board[dst] = value
+                        # P1-C：默认生成长度回写 cfg，让 tools.py 各 handler 的
+                        # `cfg["default_max_tokens"]` 正常路径也拿到板端值，而不是
+                        # 只有 _out_tokens 的 except 分支才读快照。回写时机与周期
+                        # 刷新一致（见 _board_refresh_loop），换模型后自动跟随。
+                        if dst == "default_max_tokens":
+                            self.cfg["default_max_tokens"] = value
 
             self.cfg["_board"] = board
         except Exception:
@@ -300,6 +326,20 @@ class StdioServer:
         except tools_mod.Cancelled:
             return {"content": [{"type": "text", "text": "任务已取消"}],
                     "isError": True, "_meta": {"cancelled": True}}
+        except BackendError as exc:
+            # P2-B：板端忙/加载中是"可重试"的临时状态，不是内部错误。
+            # 兜在统一入口转成 isError 结果 + _meta.retryAfter，让客户端能
+            # 据此退避；其余 BackendError 重抛，仍由 dispatcher 报 -32603。
+            if getattr(exc, "kind", "") in ("busy", "loading"):
+                retry = getattr(exc, "retry_after_s", None)
+                meta: dict = {"busy": True, "kind": exc.kind}
+                if isinstance(retry, (int, float)) and retry >= 0:
+                    meta["retryAfter"] = retry
+                detail = str(exc)[:300]
+                return {"content": [{"type": "text",
+                                     "text": "板端繁忙，请稍后重试：" + detail}],
+                        "isError": True, "_meta": meta}
+            raise
         finally:
             if key is not None:
                 with self._lock:
@@ -632,6 +672,7 @@ class StdioServer:
                 pass
         for job in self.jobs.all():
             job.cancel()
+        self._board_refresh_stop.set()      # 唤醒并停止 /health 周期刷新线程
         self._control_pool.shutdown(wait=False, cancel_futures=True)
         self._pool.shutdown(wait=False, cancel_futures=True)
 

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 import uuid
@@ -20,6 +21,9 @@ __all__ = ["JobTable", "estimate_seconds", "sync_token_cap", "job_timeout_s",
            "DECODE_TOK_S", "PREFILL_TOK_S"]
 
 MIN_SYNC_TOKENS = 8
+# 数值安全上限：防止客户端传超大整数（如 10**1000）或板端回报非有限值时
+# 在估算里溢出成 OverflowError（P2-A）。超过此值即夹紧，估算上界也随之有界。
+MAX_ESTIMATE_TOKENS = 10 ** 7
 
 # 冷启动兜底（板端 `/health.perf.source == "cold"` 时才用）：
 # 2026-10-21 真机校准，4B W8A8 45 token / 9.3 s ≈ 4.8 tok/s，取 5 略乐观、
@@ -33,9 +37,12 @@ def _decode_rate(model_class: str, decode_tok_s: float | None) -> float:
     if decode_tok_s:
         try:
             rate = float(decode_tok_s)
-            if rate > 0:
+            # P2-A：json.loads 默认接受非标准 Infinity/NaN；inf 会让后续
+            # `int(room_s*decode)` 抛 OverflowError，把同步调用打成 -32603。
+            # 非有限值一律不采信，回落档位表。
+            if rate > 0 and math.isfinite(rate):
                 return rate
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             pass
     return DECODE_TOK_S.get(model_class, 1.5)
 
@@ -45,7 +52,11 @@ def estimate_seconds(model_class: str, prefill_tokens: int,
                      decode_tok_s: float | None = None) -> float:
     """估算耗时。`decode_tok_s` 由调用方从板端实测值传入，优先于档位表。"""
     decode = _decode_rate(model_class, decode_tok_s)
-    return prefill_tokens / PREFILL_TOK_S + max_tokens / decode
+    # P2-A：max_tokens 可能是超大合法 JSON 整数（10**1000），直接转 float 溢出。
+    # 夹紧到有界上限，估算值随之有界；真实生成仍受板端 max_tokens_limit 约束。
+    tokens = max(0, min(int(max_tokens), MAX_ESTIMATE_TOKENS))
+    prefill = max(0, min(int(prefill_tokens), MAX_ESTIMATE_TOKENS))
+    return prefill / PREFILL_TOK_S + tokens / decode
 
 
 def sync_token_cap(model_class: str, prefill_tokens: int,
@@ -61,8 +72,20 @@ def sync_token_cap(model_class: str, prefill_tokens: int,
     不需要改连接器配置。
     """
     decode = _decode_rate(model_class, decode_tok_s)
-    room_s = float(threshold_s) - prefill_tokens / PREFILL_TOK_S - 1.0
-    return max(MIN_SYNC_TOKENS, int(room_s * decode))
+    prefill = max(0, min(int(prefill_tokens), MAX_ESTIMATE_TOKENS))
+    try:
+        threshold = float(threshold_s)
+        if not math.isfinite(threshold):
+            threshold = 0.0
+    except (TypeError, ValueError, OverflowError):
+        threshold = 0.0
+    room_s = threshold - prefill / PREFILL_TOK_S - 1.0
+    raw = room_s * decode
+    # P2-A：decode 已保证有限，threshold 也做了 isfinite 检查；这里再兜一层，
+    # 任何非有限结果都回落到最小安全上限，绝不抛 OverflowError 出去。
+    if not math.isfinite(raw):
+        return MIN_SYNC_TOKENS
+    return max(MIN_SYNC_TOKENS, int(raw))
 
 
 def job_timeout_s(estimate_s: float, base_s: float = 120.0,
