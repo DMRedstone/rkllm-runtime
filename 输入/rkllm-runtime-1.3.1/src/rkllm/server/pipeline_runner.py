@@ -121,10 +121,10 @@ def run_blocking(svc, pipe: Pipeline) -> dict:
                 first_token_at = time.monotonic()
             parts.append(item)
     elapsed = time.monotonic() - started
-    metrics = svc.queue.metrics
-    metrics["duration_sum"] = metrics.get("duration_sum", 0.0) + elapsed
-    metrics["last_ttft_s"] = ((first_token_at - started)
-                              if first_token_at else 0.0)
+    # 计数一律走 queue.bump/gauge（原子），不要直接改 metrics dict
+    svc.queue.bump("duration_sum", elapsed)
+    svc.queue.gauge("last_ttft_s",
+                    (first_token_at - started) if first_token_at else 0.0)
     perf = meta.get("perf") or {}
     _calibrate_tokens(pipe, perf)
     gen_tokens = int(perf.get("generate_tokens") or 0)
@@ -132,11 +132,9 @@ def run_blocking(svc, pipe: Pipeline) -> dict:
     decode = (elapsed - ttft) if ttft is not None else None
     record_timing(svc.queue, pipe.endpoint, ttft, decode, gen_tokens)
     # token 计数（/health stats 兼容字段的来源；perf 的 exact counts 优先）
-    metrics["prompt_tokens_total"] = (metrics.get("prompt_tokens_total", 0)
-                                      + int(perf.get("prefill_tokens") or 0))
-    metrics["completion_tokens_total"] = (
-        metrics.get("completion_tokens_total", 0)
-        + int(perf.get("generate_tokens") or 0))
+    svc.queue.bump("prompt_tokens_total", int(perf.get("prefill_tokens") or 0))
+    svc.queue.bump("completion_tokens_total",
+                   int(perf.get("generate_tokens") or 0))
     return {"text": "".join(parts), **meta}
 
 
@@ -194,33 +192,25 @@ class StreamTimer:
             self.first_token_at = time.monotonic()
 
     def finish(self, svc, pipe) -> None:
-        metrics = svc.queue.metrics
-        metrics["duration_sum"] = (metrics.get("duration_sum", 0.0)
-                                   + (time.monotonic() - self.started))
+        svc.queue.bump("duration_sum", time.monotonic() - self.started)
+        # `Pipeline.last_perf()` 恒返回 dict | None（agent/pipeline.py）；此前为
+        # 早期 fake 路径保留的"元组"分支是死代码，已删（2026-11-20 审计）。
         perf = pipe.last_perf() if hasattr(pipe, "last_perf") else None
-        if isinstance(perf, dict):
-            _calibrate_tokens(pipe, perf)
-        elif perf:
-            _calibrate_tokens(pipe, {"prefill_tokens": perf[0]})
-        # last_perf 可能是 (prefill, generate) 元组，也可能是 dict（fake 路径）
-        if isinstance(perf, dict):
-            gen_tokens = int(perf.get("generate_tokens") or 0)
-        elif perf:
-            gen_tokens = int(perf[1])
+        if not isinstance(perf, dict):
+            perf = None
         else:
-            gen_tokens = 0
+            _calibrate_tokens(pipe, perf)
+        gen_tokens = int(perf.get("generate_tokens") or 0) if perf else 0
         ttft = (self.first_token_at - self.started
                 if self.first_token_at is not None else None)
         decode = None
         if ttft is not None:
-            metrics["last_ttft_s"] = ttft
+            svc.queue.gauge("last_ttft_s", ttft)
             decode = time.monotonic() - self.started - ttft
         record_timing(svc.queue, getattr(pipe, "endpoint", "unknown"),
                       ttft, decode, gen_tokens)
         if perf:
-            metrics["prompt_tokens_total"] = (
-                metrics.get("prompt_tokens_total", 0)
-                + int(perf.get("prefill_tokens") or 0))
-            metrics["completion_tokens_total"] = (
-                metrics.get("completion_tokens_total", 0)
-                + int(perf.get("generate_tokens") or 0))
+            svc.queue.bump("prompt_tokens_total",
+                           int(perf.get("prefill_tokens") or 0))
+            svc.queue.bump("completion_tokens_total",
+                           int(perf.get("generate_tokens") or 0))

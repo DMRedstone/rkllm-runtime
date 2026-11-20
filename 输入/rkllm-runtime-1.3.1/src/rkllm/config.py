@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -22,6 +23,8 @@ from typing import Any
 
 __all__ = ["Key", "SCHEMA", "Config", "ConfigError", "load_config",
            "config_docs", "config_init", "config_show"]
+
+log = logging.getLogger("rkllm.config")
 
 # ---------------------------------------------------------------------------
 # schema 定义
@@ -71,7 +74,9 @@ SCHEMA: tuple[Key, ...] = (
     _k("server", "cors_origins", list, (), desc="CORS 白名单；空=不发 CORS 头"),
     _k("server", "max_body_bytes", int, 8388608, min_v=1024, max_v=67108864,
        desc="请求体上限（默认 8 MiB）"),
-    _k("server", "read_timeout_s", int, 30, min_v=1, max_v=600, desc="socket 读超时"),
+    _k("server", "read_timeout_s", int, 30, min_v=1, max_v=600,
+       desc="HTTP keep-alive 空闲超时（uvicorn timeout_keep_alive）；"
+            "不限制慢速请求体，请求体上限由 max_body_bytes 兜"),
     _k("server", "request_queue_size", int, 128, min_v=1, max_v=1024,
        desc="内核 accept 队列"),
     _k("server", "max_connections", int, 256, min_v=1, max_v=4096, desc="并发连接上限"),
@@ -362,6 +367,20 @@ class _SectionView:
             raise AttributeError(key) from None
 
 
+def _overrides(key: Key, raw: Any) -> bool:
+    """该来源（`.d` / env）的值是否参与覆盖。
+
+    空串对 **str/list** 键是"显式清空上游层"（如 `RKLLM_SERVER_API_KEY=` 关掉
+    TOML 里的 key），对数值/布尔键则是"未设置"——旧 conffile 里 `RKLLM_PORT=`
+    这类空值不能变成校验错误（2026-11-20 审计）。
+    """
+    if raw is None:
+        return False
+    if raw != "":
+        return True
+    return key.type in (str, list)
+
+
 def _coerce(key: Key, raw: Any, origin: str, errors: list[str]) -> Any:
     """把原始值收敛为 schema 类型；问题记入 errors 而不中断（一次性列出）。"""
     try:
@@ -407,7 +426,9 @@ def _coerce(key: Key, raw: Any, origin: str, errors: list[str]) -> Any:
             if isinstance(raw, str):
                 items = tuple(s.strip() for s in raw.split(",") if s.strip())
             elif isinstance(raw, (list, tuple)):
-                items = tuple(raw)
+                # 元素统一字符串化并丢空项：`cors_origins = [1, 2]` 原样进 tuple
+                # 会让下游 join/比较抛 TypeError（2026-11-20 审计）
+                items = tuple(str(v).strip() for v in raw if str(v).strip())
             else:
                 raise ValueError("需为列表")
             if key.min_v is not None and len(items) < key.min_v:
@@ -493,7 +514,9 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
     sources: dict[str, str] = {}
 
     env = _normalize_legacy(env)
-    dropin = _normalize_legacy(_load_dropins(DEFAULT_DROPIN_DIR))
+    # 显式 file= 时不再读系统 .d：调用方（测试 / 客户端 / 排障）要的是隔离配置，
+    # 不能被板端 /etc/default/rkllm-server.d 悄悄覆盖（2026-11-20 审计）。
+    dropin = {} if file else _normalize_legacy(_load_dropins(DEFAULT_DROPIN_DIR))
 
     file_data: dict[str, Any] = {}
     # 未显式指定时，板端的默认 TOML 存在就用它（键表的落点；此前只有
@@ -516,6 +539,19 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
             # 权限不足 / 路径是目录等：转成一次性错误，不能以 traceback 退出
             errors.append(f"配置文件读取失败：{path}：{exc}")
 
+    # 未知键不是错误（旧配置常带拼错段名），但静默丢弃会让用户以为生效了
+    # （2026-11-20 审计）。只对 TOML 告警：env/`.d` 里有大量由 cli 层消费的
+    # 历史变量（RKLLM_HOST/SYSTEM/TOP_K…），按 SCHEMA 逐键比对会大面积误报。
+    if file_data:
+        known = {(k.section, k.name) for k in SCHEMA}
+        for section, payload in file_data.items():
+            if not isinstance(payload, dict):
+                continue          # 非表 section 已在下面报错误
+            for name in payload:
+                if (section, name) not in known:
+                    log.warning("配置文件未知键被忽略：%s.%s（不在 84 键表内）",
+                                section, name)
+
     bad_sections: set[str] = set()
     for key in SCHEMA:
         value, source = key.default, "default"
@@ -533,11 +569,14 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
         raw = section_data
         if key.name in raw:
             value, source = _coerce(key, raw[key.name], "file", errors), "file"
+        # 空串语义（2026-11-20 审计）：str/list 键用空值 = 显式清空上游层
+        # （如 `RKLLM_SERVER_API_KEY=` 关掉 TOML 里的 key）；数值/布尔键空值
+        # 无意义，仍按"未设置"跳过，保持旧 conffile 的容错。
         drop_val = dropin.get(key.env)
-        if drop_val is not None and drop_val != "":
+        if _overrides(key, drop_val):
             value, source = _coerce(key, drop_val, ".d", errors), ".d"
         env_val = env.get(key.env)
-        if env_val is not None and env_val != "":
+        if _overrides(key, env_val):
             value, source = _coerce(key, env_val, "env", errors), "env"
         if cli and key.full in cli and cli[key.full] is not None:
             value, source = _coerce(key, cli[key.full], "cli", errors), "cli"

@@ -50,6 +50,10 @@ class InferenceQueue:
         self._slot = threading.Semaphore(1)
         self._waiting = 0
         self._lock = threading.Lock()
+        # metrics 是普通 dict，`metrics[k] += 1` 在多线程下会丢更新
+        # （2026-11-20 审计）。所有写点改走 bump()/gauge()，在此锁内更新；
+        # 锁序固定为 _lock → _metrics_lock，无反向获取。
+        self._metrics_lock = threading.Lock()
         # 指标（Prometheus 文本由 routes/ops 渲染）
         self.metrics = {"requests_total": 0, "rejected_total": 0,
                         "errors_total": 0, "queue_wait_seconds_sum": 0.0,
@@ -71,6 +75,16 @@ class InferenceQueue:
         self.tok_s_hist = new_labelled_histogram(
             self.metrics_registry, "rkllm_tokens_per_second_histogram",
             "生成速率（token/s）", TOK_S_BUCKETS)
+
+    def bump(self, key: str, delta=1) -> None:
+        """原子累加计数（并发请求下必须走这里，不要直接 `metrics[k] += x`）。"""
+        with self._metrics_lock:
+            self.metrics[key] = self.metrics.get(key, 0) + delta
+
+    def gauge(self, key: str, value) -> None:
+        """写入瞬时值（TTFT 等），同样在锁内更新。"""
+        with self._metrics_lock:
+            self.metrics[key] = value
 
     @property
     def queue_depth(self) -> int:
@@ -97,17 +111,17 @@ class InferenceQueue:
             if self.max_wait <= 0:
                 # 不排队模式：非阻塞抢槽，抢不到立即 503（旧实现 0>=0 恒真→全线 503）
                 if not self._slot.acquire(blocking=False):
-                    self.metrics["rejected_total"] += 1
+                    self.bump("rejected_total")
                     raise QueueBusy(self.busy_retry_after_s)
                 acquired = True
-                self.metrics["requests_total"] += 1
+                self.bump("requests_total")
             else:
                 if self._waiting >= self.max_wait:
-                    self.metrics["rejected_total"] += 1
+                    self.bump("rejected_total")
                     raise QueueBusy(self.busy_retry_after_s)
                 self._waiting += 1
                 waiting_counted = True
-                self.metrics["requests_total"] += 1
+                self.bump("requests_total")
         try:
             if not acquired:
                 enqueued_at = time.monotonic()
@@ -119,13 +133,13 @@ class InferenceQueue:
                         acquired = True
                         break
                     if time.monotonic() > deadline:
-                        self.metrics["rejected_total"] += 1
+                        self.bump("rejected_total")
                         raise QueueTimeout("queue wait timeout %ds"
                                            % self.wait_timeout_s)
                 # 排队时长 = 入队到拿槽（此前 start 记在拿槽之后，
                 # queue_wait_seconds_sum 实际累加的是推理执行时长）
                 waited = time.monotonic() - enqueued_at
-                self.metrics["queue_wait_seconds_sum"] += waited
+                self.bump("queue_wait_seconds_sum", waited)
                 self.queue_wait_hist.labels(endpoint=endpoint).observe(waited)
             # -- 已持有执行槽：以下任何路径都必须成对 on_release + release ----
             infer_start = time.monotonic()
@@ -144,9 +158,9 @@ class InferenceQueue:
                     if cancelled and cancelled():
                         break
                     yield token
-                    self.metrics["tokens_total"] += 1
-                self.metrics["infer_seconds_sum"] += (time.monotonic()
-                                                     - infer_start)
+                    self.bump("tokens_total")
+                self.bump("infer_seconds_sum",
+                          time.monotonic() - infer_start)
             finally:
                 # 回调严格配对：on_acquire 没触发过就不调 on_release；
                 # 即使 on_release 抛异常也必须先归还槽位（否则整条队列死锁）。
@@ -160,7 +174,7 @@ class InferenceQueue:
         except Exception:
             # 请求级失败（RequestFailed/WorkerDown 等）：errors 计数供
             # /health stats 兼容字段与 Prometheus 使用
-            self.metrics["errors_total"] += 1
+            self.bump("errors_total")
             raise
         finally:
             if waiting_counted:

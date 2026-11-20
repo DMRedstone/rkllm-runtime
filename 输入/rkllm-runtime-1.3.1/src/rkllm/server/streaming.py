@@ -270,7 +270,15 @@ async def iterate_stream(request, stream: TokenStream, heartbeat_s: int):
                 message = await request.receive()
                 if message.get("type") == "http.disconnect":
                     log.info("client disconnected -> abort worker")
-                    stream.cancel()        # 第一段 + 第二段（归还 NPU）
+                    # 两段式取消拆分执行（2026-11-20 审计）：
+                    # 第一段置位必须在事件循环里同步完成（泵线程下一轮即停）；
+                    # 第二段 abort 是 supervisor.abort() → 阻塞写 worker socket，
+                    # 直接在这里跑会卡住整个事件循环，交给默认线程池执行。
+                    stream.token.cancel()
+                    try:
+                        loop.run_in_executor(None, stream.token.abort_once)
+                    except RuntimeError:      # 线程池已关闭（进程收尾）
+                        stream.token.abort_once()
                     try:
                         loop.call_soon_threadsafe(queue.put_nowait,
                                                   DISCONNECT_ITEM)

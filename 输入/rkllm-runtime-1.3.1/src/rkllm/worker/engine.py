@@ -18,6 +18,7 @@ import sys
 import threading
 
 from ..abi import (RKLLMError, RKLLM_INFER_GENERATE, RKLLM_INPUT_PROMPT,
+                   describe_rc,
                    RKLLM_RUN_ERROR, RKLLM_RUN_FINISH, RKLLM_RUN_NORMAL,
                    BIG_CORE_PLATFORMS, CPU_MASK_HIGH, CPU_MASK_LOW,
                    MODEL_SUFFIX, _Callback, _InferParam, _Input, _LoraAdapter,
@@ -155,9 +156,9 @@ class RealEngine:
         code = self.lib.rkllm_init(ctypes.byref(self._handle),
                                    ctypes.byref(param), ctypes.byref(callback))
         if code != 0:
-            raise RKLLMError("rkllm_init failed with code %d. Common causes: the "
-                             "model file is not a valid .rkllm for this runtime "
-                             "version, or NPU memory is exhausted." % code)
+            raise RKLLMError("rkllm_init 失败：%s。常见原因：模型文件不是本 runtime "
+                             "版本的有效 .rkllm，或 NPU 内存耗尽。"
+                             % describe_rc(code))
 
         self._infer = _InferParam()
         ctypes.memset(ctypes.byref(self._infer), 0, ctypes.sizeof(_InferParam))
@@ -199,8 +200,8 @@ class RealEngine:
             code = self.lib.rkllm_load_lora(self._handle,
                                             ctypes.byref(adapter))
             if code != 0:
-                raise RKLLMError("rkllm_load_lora(%s) 失败，code %d（%s）"
-                                 % (name, code, path))
+                raise RKLLMError("rkllm_load_lora(%s) 失败：%s（%s）"
+                                 % (name, describe_rc(code), path))
             infer_lora = _LoraParam(lora_adapter_name=name_bytes)
             # 结构体与字节串都要活到推理结束（ctypes 不留引用会被回收）
             self._keep.extend([adapter, adapter.lora_adapter_path,
@@ -348,7 +349,7 @@ class RealEngine:
                 code = self.lib.rkllm_run(self._handle, ctypes.byref(rkllm_input),
                                           ctypes.byref(self._infer), None)
                 if code != 0:
-                    sink.put(_Failure("rkllm_run returned %d" % code))
+                    sink.put(_Failure("rkllm_run 失败：%s" % describe_rc(code)))
             except Exception as exc:
                 sink.put(_Failure("inference crashed: %s" % exc))
             finally:

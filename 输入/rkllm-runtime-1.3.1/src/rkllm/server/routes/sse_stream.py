@@ -46,6 +46,9 @@ def stream_events(request: Request, svc, pipe, session: SseSession, raw: dict, *
                 else:
                     yield session.error_frame("internal error")
                 yield session.done()
+                # 2026-11-20 审计：错误路径此前直接 return，首 token 与耗时
+                # 不进指标（成功路径才计）。这里补一次收尾记账。
+                timer.finish(svc, pipe)
                 stream.mark_settled()           # 已发终帧：收尾不再 abort
                 return
             if isinstance(item, dict):

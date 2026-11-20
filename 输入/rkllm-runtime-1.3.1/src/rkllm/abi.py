@@ -16,6 +16,7 @@ import hashlib
 import os
 
 __all__ = ["RKLLMError", "load_library", "bind_library",
+           "describe_rc", "struct_sizes", "RETURN_CODES",
            "MODEL_SUFFIX", "DEFAULT_CONTEXT", "DEFAULT_MAX_NEW_TOKENS",
            "CPU_MASK_LOW", "CPU_MASK_HIGH", "BIG_CORE_PLATFORMS",
            "RKLLM_RUN_NORMAL", "RKLLM_RUN_WAITING", "RKLLM_RUN_FINISH",
@@ -42,6 +43,22 @@ CPU_MASK_HIGH = (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7)
 # 都用高掩码；此前只列 rk3588 会让 RK3576 落到 A53 小核，prefill/解码慢 3-4 倍
 # （2026-10-27 审核 P1-2）。rk3562 是 4×A53、rv1126b 是 4×A7，保持低掩码。
 BIG_CORE_PLATFORMS = frozenset({"rk3588", "rk3576"})
+
+# rkllm 返回码 → 人话（2026-11-20 审计：此前只把数字拼进错误文案，负值与内部码
+# 只能靠注释推测）。**只登记有实测/代码依据的码**；未登记的码由 describe_rc
+# 原样回显数字，绝不猜原因。
+RETURN_CODES: dict[int, str] = {
+    0: "成功",
+    -1: "runtime 内部失败（已实测：prompt+max_new_tokens 超出上下文；"
+        "cache 文件加载失败同为此码，见 engine 的熔断重试）",
+    10000: "prompt cache 加载失败（内部码，2026-10-22 实测；promptcache.disable 熔断）",
+}
+
+
+def describe_rc(code: int) -> str:
+    """返回码的可读解释；未知码回显数字，绝不猜原因。"""
+    reason = RETURN_CODES.get(code)
+    return "code %d（%s）" % (code, reason) if reason else "code %d" % code
 
 
 class RKLLMError(Exception):
@@ -302,22 +319,50 @@ def load_library(lib_path: str | None = None) -> tuple[ctypes.CDLL, str, dict]:
     for candidate in candidates:
         try:
             lib = ctypes.CDLL(candidate)
-            # CDLL 只记住搜索名；映射到真实路径后再算指纹
-            fp_path = _resolve_library_path(getattr(lib, "_name", candidate))
-            fingerprint = {"path": fp_path}
-            try:
-                st = os.stat(fp_path)
-                with open(fp_path, "rb") as fh:
-                    fingerprint["sha256"] = hashlib.sha256(fh.read()).hexdigest()[:16]
-                fingerprint["size"] = st.st_size
-            except OSError:
-                fingerprint["sha256"] = None
-            return lib, fp_path, fingerprint
         except OSError as exc:
             errors.append("  %s: %s" % (candidate, exc))
+            continue
+        # 2026-11-20 审计：仅 dlopen 成功就返回会让"名字对但内容不是 rkllm"的库
+        # （错架构副本、别的同名 .so）提前终止候选链，随后 bind_library 报错却
+        # 不提其他候选。这里先预检必需符号，缺则继续下一个候选。
+        missing = [n for n in _REQUIRED_SYMBOLS if not hasattr(lib, n)]
+        if missing:
+            errors.append("  %s: 缺少必需符号 %s（不是 RKLLM runtime）"
+                          % (candidate, ", ".join(missing)))
+            continue
+        # CDLL 只记住搜索名；映射到真实路径后再算指纹
+        fp_path = _resolve_library_path(getattr(lib, "_name", candidate))
+        fingerprint = {"path": fp_path, "struct_sizes": struct_sizes()}
+        try:
+            st = os.stat(fp_path)
+            with open(fp_path, "rb") as fh:
+                fingerprint["sha256"] = hashlib.sha256(fh.read()).hexdigest()[:16]
+            fingerprint["size"] = st.st_size
+        except OSError:
+            fingerprint["sha256"] = None
+        return lib, fp_path, fingerprint
     raise RKLLMError("cannot load librkllmrt.so. Tried:\n%s\n"
                      "Install rkllm-runtime, or point RKLLM_LIB at the library."
                      % "\n".join(errors))
+
+
+def struct_sizes() -> dict:
+    """各结构体的运行时 sizeof（字节）。
+
+    2026-11-20 审计：模块没有尺寸校验，换 runtime 导致布局漂移仍是静默内存破坏。
+    但"硬断言"需要头文件里的真实常量——我们的 `_fields_` 就是照头文件写的，
+    拿自己的 sizeof 去断言等于自证。因此改为**暴露尺寸供比对**：写入
+    `/health.lib_fingerprint.struct_sizes` 与启动日志，换库后可直接对照。
+    """
+    return {
+        "_Param": ctypes.sizeof(_Param),
+        "_ExtendParam": ctypes.sizeof(_ExtendParam),
+        "_SamplingParam": ctypes.sizeof(_SamplingParam),
+        "_InferParam": ctypes.sizeof(_InferParam),
+        "_Input": ctypes.sizeof(_Input),
+        "_Result": ctypes.sizeof(_Result),
+        "_PromptCacheParam": ctypes.sizeof(_PromptCacheParam),
+    }
 
 
 def bind_library(lib: ctypes.CDLL) -> ctypes.CDLL:

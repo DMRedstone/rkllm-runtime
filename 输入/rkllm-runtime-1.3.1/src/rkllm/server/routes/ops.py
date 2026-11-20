@@ -25,32 +25,30 @@ def _svc(request: Request):
     return request.app.state.svc
 
 
-def _hist_mean(hist, endpoint: str) -> float | None:
-    """取某 endpoint 标签下直方图的均值（`_sum/_count`）；无样本返回 None。
+def _hist_stats(hist, endpoint: str) -> tuple[float | None, int]:
+    """取某 endpoint 标签下直方图的 (均值, 样本数)；无样本返回 (None, 0)。
 
-    直方图由 prometheus_client 持有（`metricsutil`），`_sum`/`_count` 是它
-    对外的累计值，读它们不需要额外的聚合器。任何异常都返回 None，避免
-    `/health` 因为指标对象缺失而 500——探针端点必须永远可用。
+    用公开的 `collect()` 解析 samples，不再读 `child._sum` / `child._count`
+    私有属性（2026-11-20 审计：私有属性在 prometheus_client 升级后可能消失，
+    表现为 /health 的实测速率静默变 None）。任何异常都返回空值——探针端点
+    必须永远可用。
     """
     if hist is None:
-        return None
+        return None, 0
     try:
-        child = hist.labels(endpoint=endpoint)
-        count = float(child._count.get() or 0)
+        total = 0.0
+        count = 0
+        for metric in hist.labels(endpoint=endpoint).collect():
+            for sample in metric.samples:
+                if sample.name.endswith("_sum"):
+                    total = float(sample.value)
+                elif sample.name.endswith("_count"):
+                    count = int(sample.value)
         if count <= 0:
-            return None
-        return float(child._sum.get()) / count
+            return None, 0
+        return total / count, count
     except Exception:
-        return None
-
-
-def _hist_count(hist, endpoint: str) -> int:
-    if hist is None:
-        return 0
-    try:
-        return int(hist.labels(endpoint=endpoint)._count.get() or 0)
-    except Exception:
-        return 0
+        return None, 0
 
 
 def _perf_stats(svc) -> dict:
@@ -62,15 +60,15 @@ def _perf_stats(svc) -> dict:
     `cold`（尚无样本）时自行回落保守值。
     """
     queue = getattr(svc, "queue", None)
-    tok_s = _hist_mean(getattr(queue, "tok_s_hist", None), "chat.completions")
-    ttft = _hist_mean(getattr(queue, "ttft_hist", None), "chat.completions")
-    samples = _hist_count(getattr(queue, "tok_s_hist", None), "chat.completions")
+    tok_s, samples = _hist_stats(getattr(queue, "tok_s_hist", None),
+                                 "chat.completions")
+    ttft, _ = _hist_stats(getattr(queue, "ttft_hist", None), "chat.completions")
     limits = {
         "max_tokens_limit": int(getattr(svc, "max_tokens_limit", 0) or 0),
         "default_max_tokens": int(getattr(svc, "default_max_tokens", 0) or 0),
         "context_margin_tokens": CONTEXT_MARGIN_TOKENS,
         # request_timeout_s 对外取 wait_timeout_s（默认 600s）而非 queue 的
-        # request_timeout_s（900s）：这是 GHZ 2026-11-19 拍板的保守值——连接器
+        # request_timeout_s（900s）：这是 2026-11-19 拍板的保守值——连接器
         # 拿它当 job 读超时的 base，600s 已足够覆盖单请求，且留更多余量给
         # factor 放大。不是漏报，勿改回 900s（审查报告 P1-B 已记录该决策）。
         "request_timeout_s": (int(queue.wait_timeout_s) if queue else 0),

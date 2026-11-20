@@ -146,10 +146,12 @@ class Pipeline:
         self.max_tokens = wanted
         if self.max_tokens_clamped:
             queue = getattr(self.svc, "queue", None)
-            metrics = getattr(queue, "metrics", None)
-            if isinstance(metrics, dict):
-                metrics["max_tokens_clamped_total"] = (
-                    metrics.get("max_tokens_clamped_total", 0) + 1)
+            # 走 queue.bump 保持原子（并发请求下 += 会丢计数）
+            if hasattr(queue, "bump"):
+                queue.bump("max_tokens_clamped_total")
+            elif isinstance(getattr(queue, "metrics", None), dict):
+                m = queue.metrics
+                m["max_tokens_clamped_total"] = m.get("max_tokens_clamped_total", 0) + 1
 
     # -- token 流 -----------------------------------------------------------
 

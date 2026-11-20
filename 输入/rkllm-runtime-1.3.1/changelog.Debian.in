@@ -4,8 +4,10 @@ rkllm-runtime (@VERSION@) unstable; urgency=medium
   * 依赖：内存探测改用 python3-psutil；/metrics 改用 python3-prometheus-client；
     JSON Schema 校验改用 python3-jsonschema；systemd 看门狗用 python3-systemd
     （unit 改 Type=notify + WatchdogSec=60）。Depends 相应新增四个包。
-  * 配置：新增 model.lora_paths（配置 86 键，.d 45 键）；.d 之前已把三个档位
-    托管键移出，本次随示例配置补充 LoRA 中英注释。
+  * 配置：新增 model.lora_paths；键表 **86 → 84**——A 方案把 MCP 侧判断参数
+    下沉到板端 `/health`，删除 `mcp.task_threshold_s` 与 `mcp.max_input_chars`
+    两个孤儿键（`.d` 仍为 45 键）；.d 之前已把三个档位托管键移出，本次随示例
+    配置补充 LoRA 中英注释。
   * LoRA：绑定 rkllm_load_lora（可选符号），启动时按文件名 stem 加载 adapter，
     请求用非标准字段 lora 选中；未知名字返回 400，旧 runtime 缺符号则启动失败。
   * 观测性：TTFT/队列等待/解码时长/生成速率四个直方图带 endpoint 标签
