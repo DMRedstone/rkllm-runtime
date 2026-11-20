@@ -353,16 +353,16 @@ RKLLM_EXTRA_ARGS=
 #     name and this file's path are unchanged, so every entry above still
 #     works. This section only adds options the old file did not have; all of
 #     them are optional - leave them commented out to use the built-in default.
-#     85-key rule: any configuration key can also be set here as
+#     84-key rule: any configuration key can also be set here as
 #     RKLLM_<SECTION>_<NAME> (e.g. RKLLM_SERVER_MAX_BODY_BYTES=8388608).
-#     `rkllm config show` prints all 85 keys with effective value and source;
+#     `rkllm config show` prints all 84 keys with effective value and source;
 #     `rkllm config docs` prints the full table.
 # 中文: `rkllm serve` 的实现已换成新栈（FastAPI + 推理子进程）。
 #     命令、参数、systemd 单元名与本文件路径均未变化，上面的条目继续有效。
 #     本节只补充旧文件没有的选项，全部可选——保持注释即使用内置默认。
-#     85 键规则：任何配置键都可以在此以 RKLLM_<组>_<键名> 形式设置
+#     84 键规则：任何配置键都可以在此以 RKLLM_<组>_<键名> 形式设置
 #     （如 RKLLM_SERVER_MAX_BODY_BYTES=8388608）。`rkllm config show` 查看
-#     85 键的生效值与来源，`rkllm config docs` 打印完整键表。
+#     84 键的生效值与来源，`rkllm config docs` 打印完整键表。
 # ===========================================================================
 
 # -- 推理进程 / engine ---------------------------------------------

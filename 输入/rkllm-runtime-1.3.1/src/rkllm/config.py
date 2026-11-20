@@ -181,7 +181,7 @@ SCHEMA: tuple[Key, ...] = (
     # （worker/promptcache.py）。此前是模块级常量，不可配。
     _k("cache", "similarity", float, 0.5, min_v=0.0, max_v=1.0,
        desc="前缀相似度阈值；低于该值判定为无关会话（llama.cpp 默认 0.5）"),
-    # -- mcp（24）-----------------------------------------------------------
+    # -- mcp（22）-----------------------------------------------------------
     _k("mcp", "enabled", bool, True, desc="MCP 连接器总开关"),
     _k("mcp", "transport", str, "stdio", choices=("stdio", "http"), desc="传输方式"),
     _k("mcp", "http_path", str, "/mcp", desc="HTTP 模式端点路径"),
