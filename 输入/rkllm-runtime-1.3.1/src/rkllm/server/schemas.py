@@ -98,13 +98,23 @@ class CompletionRequest(_OpenAICompat, BaseModel):
     # 与 chat 一致：可选 LoRA adapter 名字
     lora: str | None = None
     max_tokens: int | None = Field(default=None, ge=1)
+    # 2026-11-20 审计：caps 把 completions 标 native 且 NATIVE_PARAMS 含这些键，
+    # 但本 schema 缺字段 + extra=forbid → 客户端按能力表发参数直接 422，
+    # 能力表与实现对不上。补齐后由 Pipeline.sampling()/enable_thinking 正常接线。
+    max_completion_tokens: int | None = Field(default=None, ge=1)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, gt=0.0, le=1.0)
+    top_k: int | None = Field(default=None, ge=1, le=128)
+    repeat_penalty: float | None = Field(default=None, ge=0.5, le=2.0)
+    frequency_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
+    enable_thinking: bool | None = None
 
     @field_validator("temperature", mode="before")
     @classmethod
     def _temperature_finite(cls, v):
         return _reject_non_finite(v)
-    top_p: float | None = Field(default=None, gt=0.0, le=1.0)
     stop: str | list[str] | None = None
 
     model_config = {"extra": "forbid"}

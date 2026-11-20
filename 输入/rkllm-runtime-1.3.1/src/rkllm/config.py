@@ -2,7 +2,7 @@
 
 设计要点：
 - 所有影响行为的参数必须进表；代码中不得出现魔法数（协议常量与安全下限除外）。
-- 优先级：内置默认 < 配置文件 < 环境变量（RKLLM_*）< 命令行。
+- 优先级：内置默认 < 配置文件 < `.d` 目录 < 环境变量（RKLLM_*）< 命令行。
 - 启动校验：类型、范围、互斥项；错误一次性列出并拒绝启动（不再静默回退）。
 - 纯 stdlib（tomllib 为 3.13 内置）：客户端连接器零第三方依赖的前提。
 - 键计数由 tests/test_config.py 守住：server 13 + model 13 + engine 10 + queue 5
@@ -80,7 +80,7 @@ SCHEMA: tuple[Key, ...] = (
     _k("server", "tls_cert", str, "", desc="TLS 证书；与 tls_key 成对给出才启用"),
     _k("server", "tls_key", str, "", desc="TLS 私钥"),
     _k("server", "access_log", bool, True, desc="访问日志开关"),
-    # -- model（12）---------------------------------------------------------
+    # -- model（13）---------------------------------------------------------
     _k("model", "path", str, "", desc=".rkllm 模型路径；serve 必填"),
     _k("model", "search_dirs", list, (), desc="裸模型名的搜索目录"),
     _k("model", "freq_helper", str, "auto",
@@ -298,6 +298,11 @@ def _quiet_to_level(raw: str) -> str:
 # 值转换表：旧变量 → 新键时连取值也要转换的项（普通项直接复制字符串）。
 _LEGACY_VALUE_TRANSFORM = {
     "RKLLM_QUIET": _quiet_to_level,
+    # 旧 conffile 的模型搜索目录用 `:` 分隔（default/rkllm-server-example、
+    # cli_engine._search_dirs 均按 `:` 解析），而 list 类型的 TOML/env 值按
+    # 逗号切分——不转换的话 `/var/a:/var/b` 会成为单个非法路径元素，
+    # /admin/models 静默列空（2026-11-20 审计）。
+    "RKLLM_MODEL_DIR": lambda raw: raw.replace(":", ","),
 }
 
 
@@ -373,6 +378,13 @@ def _coerce(key: Key, raw: Any, origin: str, errors: list[str]) -> Any:
         if key.type is int:
             if isinstance(raw, bool):
                 raise ValueError("需为整数")
+            # 2026-11-20 审计：TOML `inf` 是合法字面量，int(inf) 抛 OverflowError
+            # （非 ValueError）会逃成启动 traceback；浮点带小数静默截断属有损转换。
+            if isinstance(raw, float) and (raw != raw or raw in (
+                    float("inf"), float("-inf"))):
+                raise ValueError("需为有限整数")
+            if isinstance(raw, float) and raw != int(raw):
+                raise ValueError("需为整数（不接受小数）")
             val = int(raw)
             if key.min_v is not None and val < key.min_v:
                 raise ValueError(f"需 ≥ {key.min_v}")
@@ -497,10 +509,28 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
                 errors.append(f"配置文件不存在：{file}")
         except tomllib.TOMLDecodeError as exc:
             errors.append(f"配置文件 TOML 语法错误：{exc}")
+        except UnicodeDecodeError as exc:
+            # 非 UTF-8 文件：tomllib 抛的不是 TOMLDecodeError
+            errors.append(f"配置文件编码错误（需 UTF-8）：{exc}")
+        except OSError as exc:
+            # 权限不足 / 路径是目录等：转成一次性错误，不能以 traceback 退出
+            errors.append(f"配置文件读取失败：{path}：{exc}")
 
+    bad_sections: set[str] = set()
     for key in SCHEMA:
         value, source = key.default, "default"
-        raw = file_data.get(key.section, {})
+        section_data = file_data.get(key.section, {})
+        # 2026-11-20 审计：section 被写成标量/数组（`server = 1`）时，
+        # `key.name in raw` 抛 TypeError（int 不可迭代）或按子串误判。
+        # 每段只报一次，避免 84 个键重复同一条错误。
+        if not isinstance(section_data, dict):
+            if key.section not in bad_sections:
+                bad_sections.add(key.section)
+                errors.append("配置文件：%s 段必须是表（[%s]），实际是 %s"
+                              % (key.section, key.section,
+                                 type(section_data).__name__))
+            section_data = {}
+        raw = section_data
         if key.name in raw:
             value, source = _coerce(key, raw[key.name], "file", errors), "file"
         drop_val = dropin.get(key.env)
@@ -541,6 +571,14 @@ def _cross_validate(values: dict[str, Any], errors: list[str],
         errors.append("server.tls_cert 与 server.tls_key 必须成对给出")
     if values.get("mcp.transport") == "http" and not values.get("mcp.allow_remote_origin"):
         errors.append("mcp.transport=http 时必须配置 mcp.allow_remote_origin（安全边界）")
+    # 2026-11-20 审计：两键各自合法但可组合出 timeout < interval —— 每次心跳
+    # 检查都判"NPU 卡死"，worker 被反复杀掉重启。默认 20 = 2×5 留足余量。
+    hb_interval, hb_timeout = (values.get("engine.heartbeat_interval_s"),
+                               values.get("engine.heartbeat_timeout_s"))
+    if hb_interval is not None and hb_timeout is not None \
+            and hb_timeout < 2 * hb_interval:
+        errors.append("engine.heartbeat_timeout_s 必须 ≥ 2 × "
+                      "engine.heartbeat_interval_s（否则缺一次心跳即误杀 worker）")
 
 
 # ---------------------------------------------------------------------------

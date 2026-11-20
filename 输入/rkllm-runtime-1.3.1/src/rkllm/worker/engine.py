@@ -99,6 +99,10 @@ class RealEngine:
         self.platform = resolve_platform(platform)
         self.lib, self.lib_path, self.lib_fingerprint = load_library(lib_path)
         bind_library(self.lib)
+        # 2026-11-20 审计：load_loras 里读 self.verbose，但此前只用了构造参数
+        # （`if verbose:`），实例属性从未赋值——配置任一 LoRA 时构造期
+        # AttributeError 直接导致服务起不来。测试替身手工补了该字段，掩盖了缺陷。
+        self.verbose = bool(verbose)
 
         self._keep = []            # 引擎寿命缓冲（model path 等）
         self._run_keep = []        # 单次推理缓冲，run 结束即清
@@ -146,7 +150,7 @@ class RealEngine:
         self._callback = callback
         self._param = param
 
-        if verbose:
+        if self.verbose:
             sys.stderr.write("[rkllm] loading %s with %s\n" % (model_path, self.lib_path))
         code = self.lib.rkllm_init(ctypes.byref(self._handle),
                                    ctypes.byref(param), ctypes.byref(callback))

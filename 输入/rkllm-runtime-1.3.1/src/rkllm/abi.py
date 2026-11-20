@@ -223,11 +223,15 @@ class _Callback(ctypes.Structure):
 
 _REQUIRED_SYMBOLS = (
     "rkllm_init", "rkllm_run", "rkllm_abort", "rkllm_is_running",
-    "rkllm_destroy", "rkllm_clear_kv_cache", "rkllm_set_chat_template",
-    "rkllm_set_function_tools",
+    "rkllm_destroy", "rkllm_clear_kv_cache",
 )
 
-_OPTIONAL_SYMBOLS = ("rkllm_load_lora",)
+# 已绑定但**不被调用**的符号：rkllm_set_function_tools 是 ADR-06 明确不走的
+# 路径（handle 级污染），rkllm_set_chat_template 由本项目自拼 prompt 取代
+# （agent/conversation.py）。旧 runtime 缺这两个导出属正常情况，列为必需会把
+# 未使用的能力当硬依赖、无谓收紧兼容性（2026-11-20 审计）。
+_OPTIONAL_SYMBOLS = ("rkllm_load_lora", "rkllm_set_chat_template",
+                     "rkllm_set_function_tools")
 
 _SIGNATURES = {
     "rkllm_init": ([ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(_Param),
@@ -266,10 +270,13 @@ def _resolve_library_path(candidate: str) -> str:
     try:
         with open("/proc/self/maps", encoding="utf-8", errors="replace") as fh:
             for line in fh:
-                if base in line:
-                    mapped = line.rsplit(None, 1)[-1]
-                    if os.path.isfile(mapped):
-                        return mapped
+                mapped = line.rsplit(None, 1)[-1]
+                # 精确比较 basename：子串匹配会命中 librkllmrt.so.1.2.3、
+                # librkllmrt.so.bak 等不同文件，指纹记到别的库上（2026-11-20 审计）
+                if os.path.basename(mapped) != base:
+                    continue
+                if os.path.isfile(mapped):
+                    return mapped
     except OSError:
         pass
     return candidate

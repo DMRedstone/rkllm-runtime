@@ -17,7 +17,7 @@
 ├── 输入/                   构建输入：打包脚手架 + 上游 SDK 源料
 ├── 工具/
 │   ├── 编译工具链/         make_deb · verify_deb · crosscheck_deb · render_template
-│   ├── 大模型测试工具链/   10 个脚本 + board_api.py + quality.py
+│   ├── 大模型测试工具链/   11 个脚本 + board_api.py + quality.py
 │   └── 脚本/               运维脚本：备份、测试 harness、协议一致性
 ├── 文档/                   部署说明 · 对话接口用法 · 开发记录 · 待办事项
 ├── 测试数据/Qwen3.5-4B测试/    结果 JSON/CSV、10 份脱敏真实公文、输出样本

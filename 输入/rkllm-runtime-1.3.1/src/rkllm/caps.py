@@ -46,10 +46,14 @@ NATIVE_PARAMS: tuple[str, ...] = (
     "max_tokens", "max_completion_tokens",
     "temperature", "top_p", "top_k", "repeat_penalty",
     "presence_penalty", "frequency_penalty",
-    "reasoning_effort", "enable_thinking",
+    "enable_thinking",
 )
 
 EMULATED_PARAMS: tuple[str, ...] = (
+    # reasoning_effort 只有 none/非 none 两档语义（runtime 仅 enable_thinking
+    # 布尔开关），low/medium/high 行为完全相同——标 native 属名不副实
+    # （2026-11-20 审计）。
+    "reasoning_effort",
     "tools", "tool_choice", "parallel_tool_calls",
     "response_format.json_object", "response_format.json_schema",
 )
@@ -89,6 +93,9 @@ NOTES: dict[str, str] = {
                    "requests are queued (queue.max_wait) or rejected with 503",
     "json_schema": "prompt+validate+retry on non-stream requests; streaming "
                    "returns 400 (cannot correct frames already sent)",
+    "reasoning_effort": "only two states are real: none (thinking off) vs "
+                        "any other value (thinking on); low/medium/high behave "
+                        "identically because rkllm exposes a boolean switch",
     "tools": "prompt-injected; accuracy depends on model; handle-level "
              "rkllm_set_function_tools avoided by design",
     "tool_choice": "auto/none are honored (none suppresses tool injection); "
@@ -144,8 +151,14 @@ def check_request_params(body: dict[str, Any], *,
     reject: list[str] = []
     warn: list[str] = []
 
-    if body.get("n", 1) not in (1, None):
-        reject.append("n>1")
+    n = body.get("n")
+    if n is not None and n != 1:
+        # n=0/-1 是无效值、n>1 是不支持——分开标注，别把无效值也说成 n>1。
+        # responses 路径的 body 未过 pydantic，n 可能不是 int，先归一。
+        try:
+            reject.append("n<1" if int(n) < 1 else "n>1")
+        except (TypeError, ValueError, OverflowError):
+            reject.append("n")
     # tool_choice 与 json_schema 同属语义关键项：声明为「必须拦」就必须真的拦
     # ——旧实现只在注释里拒绝、代码里静默忽略（审计 P2-8）。
     tc = body.get("tool_choice")
@@ -158,8 +171,19 @@ def check_request_params(body: dict[str, Any], *,
             reject.append("tool_choice")
     for name in ("seed", "logprobs", "top_logprobs", "logit_bias",
                  "modalities", "audio", "prediction"):
-        if name in body and body[name] not in (None, False, []):
-            (reject if policy == "reject" else warn).append(name)
+        # 2026-11-20 审计：旧写法 `not in (None, False, [])` 依赖 0 == False，
+        # seed=0 / top_logprobs=0 会被当成"未提供"静默放行；用身份判断区隔
+        # 0 与 False，空容器单独判空。
+        if name not in body:
+            continue
+        value = body[name]
+        if value is None or value is False:
+            continue
+        # 空容器（modalities=[] / logit_bias={}）等同未提供；0 不是容器，
+        # 因此 seed=0 会正常进入 reject/warn。
+        if isinstance(value, (list, dict)) and not value:
+            continue
+        (reject if policy == "reject" else warn).append(name)
     rf = body.get("response_format") or {}
     if isinstance(rf, dict) and rf.get("type") == "json_schema":
         if stream:

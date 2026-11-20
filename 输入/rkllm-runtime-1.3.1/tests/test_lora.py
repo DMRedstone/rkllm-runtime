@@ -163,3 +163,35 @@ def test_run_frame_carries_lora_to_worker():
     finally:
         client.close()
         right.close()
+
+
+# -- 2026-11-20 审计回归：RealEngine.__init__ 必须真正设置 verbose ------------
+
+class _FullStubLib(_StubLib):
+    """完整路径替身：rkllm_init 返回 0，其余沿用 _StubLib。"""
+
+    def rkllm_init(self, handle_ref, param_ref, callback_ref):
+        return 0
+
+
+def test_real_engine_init_sets_verbose_and_loads_lora(tmp_path, monkeypatch):
+    """配置 LoRA 时 __init__ 不得因 self.verbose 未定义而崩（真实 bug：
+    实例属性从未赋值，测试替身手工补齐才通过）。此处用库替身走完整
+    __init__ → load_loras 路径。"""
+    from rkllm.worker import engine as eng
+
+    stub = _FullStubLib()
+    monkeypatch.setattr(eng, "load_library", lambda _p: (stub, "stub.so", {}))
+    monkeypatch.setattr(eng, "bind_library", lambda _lib: None)
+    monkeypatch.setattr("rkllm.platform.soc.resolve_platform",
+                        lambda _p: "rk3588")
+
+    adapter = tmp_path / "domain.rkllm"
+    adapter.write_bytes(b"fake")
+    model = tmp_path / "m.rkllm"
+    model.write_bytes(b"fake")
+
+    real = eng.RealEngine(str(model), "auto", lora_paths=[str(adapter)])
+    assert real.verbose is False
+    assert real.loras == ("domain",)
+    assert stub.calls, "rkllm_load_lora 应被调用一次"
