@@ -214,29 +214,34 @@ def build_handlers(backend, cfg: dict, jobs, *,
         raw = cfg.get("context_len") or _bval("context_len", 0) or DEFAULT_CONTEXT
         try:
             ctx = int(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             ctx = DEFAULT_CONTEXT
         try:
             margin = int(_bval("context_margin_tokens", DEFAULT_CONTEXT_MARGIN))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             margin = DEFAULT_CONTEXT_MARGIN
         return max(256, ctx - margin)
 
     def _out_tokens(requested: Any, cap: Any = None) -> int:
         try:
             out = int(requested)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError：JSON 的 Infinity（json.loads 默认接受）转 int 会抛
+            # 且非 ValueError，漏捕会逃成 -32603（2026-11-19 审计 P2）。
             # 默认生成长度也由板端给（limits.default_max_tokens）
             out = int(_bval("default_max_tokens", DEFAULT_MAX_TOKENS))
         out = max(1, out)
         # 不得越过板端声明的一次输出上限，否则板端会直接 400
-        limit = int(_bval("max_tokens_limit", 0) or 0)
+        try:
+            limit = int(_bval("max_tokens_limit", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            limit = 0
         if limit > 0:
             out = min(out, limit)
         if cap is not None:
             try:
                 out = min(out, max(8, int(cap)))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 pass
         return out
 
@@ -267,6 +272,17 @@ def build_handlers(backend, cfg: dict, jobs, *,
 
     def _purge_expired_locked() -> None:
         """剔除空闲超过 TTL 的会话（调用方须已持有 session_lock）。"""
+        # P2（2026-11-19 审计）：per-session 锁表只增不减——会话被 TTL/上限
+        # 逐出后锁对象仍残留。只清"既不在 store 也不在 seen、且当前未持有"的
+        # 锁；与 _session_lock() 的取用都在 session_lock 下串行，窗口极小，
+        # 且仅影响"首次会话在首个请求途中被清理"，该场景 store 本无历史。
+        # 放在 TTL 判断之外：TTL=0（不过期）时 max_sessions 淘汰同样要清锁。
+        for name in list(session_locks):
+            if name in session_store or name in session_seen:
+                continue
+            lk = session_locks.get(name)
+            if lk is not None and not lk.locked():
+                session_locks.pop(name, None)
         if session_ttl_s <= 0:
             return
         now = time.monotonic()
@@ -403,7 +419,8 @@ def build_handlers(backend, cfg: dict, jobs, *,
         try:
             requested = int(params.get("max_tokens")
                             or cfg["default_max_tokens"])
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError：客户端传 JSON Infinity 时 int() 会抛，按非法参数报
             _invalid("max_tokens 必须是整数")
             requested = int(cfg["default_max_tokens"])
         used = _out_tokens(requested, max_tokens_cap)
@@ -504,7 +521,7 @@ def build_handlers(backend, cfg: dict, jobs, *,
             _invalid("schema 必须是 JSON Schema 对象")
         try:
             requested = int(cfg["default_max_tokens"]) * 2
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             requested = int(cfg.get("default_max_tokens", 512)) * 2
         used = _out_tokens(requested, max_tokens_cap)
         schema_json = json.dumps(schema, ensure_ascii=False)
@@ -571,7 +588,7 @@ def build_handlers(backend, cfg: dict, jobs, *,
         system = str(params.get("system") or "")
         try:
             requested = int(cfg["default_max_tokens"])
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             requested = 512
         used = _out_tokens(requested, max_tokens_cap)
         prefix = _MODE_PROMPTS.get(mode, "") if mode else ""
@@ -640,7 +657,8 @@ def build_handlers(backend, cfg: dict, jobs, *,
                 # /health 是板端上下文的事实源；工具层预算随后按它收窄
                 cfg["context_len"] = context_len
             model_class = info.get("model_class")
-            if model_class and model_class.endswith("b"):
+            # 非字符串真值调 .endswith 会抛 AttributeError（2026-11-19 审计 P2）
+            if isinstance(model_class, str) and model_class.endswith("b"):
                 cfg["model_class"] = model_class
         lines = ["模型状态：" + json.dumps(info, ensure_ascii=False)]
         return {"content": [{"type": "text", "text": "\n".join(lines)}]}

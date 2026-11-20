@@ -25,6 +25,9 @@ _log = logging.getLogger("rkllm.mcp.backend")
 # 取消轮询粒度：长 prefill 期间板端不产出 chunk，主循环的检查点进不来，
 # 由看门狗线程按这个间隔检查（P2：取消原先只在收到 chunk 后生效）。
 CANCEL_POLL_S = 0.2
+# 连接建立阶段的独立超时：读超时（job 可达 4200 s）不能同时当成 TCP 连接超时——
+# 板端不可达/隧道黑洞时，同步调用会在建连阶段挂到读超时（2026-11-19 审计 P2）。
+CONNECT_TIMEOUT_S = 10.0
 
 
 class BackendError(Exception):
@@ -66,7 +69,10 @@ class HttpBackend:
         if conn is None:
             cls = (http.client.HTTPSConnection if self._scheme == "https"
                    else http.client.HTTPConnection)
-            conn = cls(self._host, self._port, timeout=want)
+            # 建连阶段用短超时（CONNECT_TIMEOUT_S），避免读超时（job 可达
+            # 4200 s）被当成 TCP 连接超时；建连成功后由 _request 切回 want。
+            conn = cls(self._host, self._port,
+                       timeout=min(want, CONNECT_TIMEOUT_S))
             self._local.conn = conn
             self._local.conn_timeout = want
         return conn
@@ -101,6 +107,9 @@ class HttpBackend:
             # conn.request() 失败 = 连接没建立，可安全重建重试；一旦 request()
             # 成功，getresponse() 阶段再失败也绝不重发，否则同一推理执行两次。
             try:
+                if conn.sock is None:
+                    conn.connect()          # 建连阶段：短超时（见 _connection）
+                conn.sock.settimeout(t)     # 读阶段：本次调用的读超时
                 conn.request("POST", self._prefix + path, body=body,
                              headers=headers)
             except (http.client.HTTPException, OSError) as exc:
@@ -109,8 +118,15 @@ class HttpBackend:
                 if attempt == 0:
                     continue
                 raise BackendError("无法连接板端：%s" % last_exc) from exc
-            # 请求已送达：此后的异常原样抛出，不重试。
-            return conn.getresponse()
+            # 请求已送达：此后的异常不重发（非幂等），但必须归一为 BackendError
+            # 并丢弃半开连接，否则会以裸 OSError 逃成 -32603、且坏连接残留
+            # 线程本地（2026-11-19 审计 P1）。
+            try:
+                return conn.getresponse()
+            except (http.client.HTTPException, OSError) as exc:
+                self._drop_connection()
+                raise BackendError("板端连接中断（响应读取失败）：%s"
+                                   % exc) from exc
         raise BackendError("无法连接板端：%s" % last_exc)  # pragma: no cover
 
     def chat(self, messages: list[dict], *, max_tokens: int = 512,

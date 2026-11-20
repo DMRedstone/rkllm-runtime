@@ -77,7 +77,12 @@ initialize 旧版）。
 输入按 `context_window - context_margin_tokens - 生成预算` 裁剪；`_inflight` 成功
 路径也清理；reasoning 模型空正文且 `finish_reason=length` 返回 `isError`，并在
 `_meta` 透传 `finish_reason/usage/reasoning_chars`；invalid args 返回 `-32602`。
-新键见 `mcp.toml.example`。
+
+> **2026-11-19 A 方案后机制已调整**（上段为当时的历史表述）：`estimate_tokens_cap`
+> 不再存在，预期输出上限为传输层常量 `ESTIMATE_TOKENS_CAP=128`；输入裁剪按板端
+> `/health` 的 `context_len − limits.context_margin_tokens`；生成默认值与速率同样
+> 来自 `/health.limits`、`/health.perf`。**权威配置键表 = 板端 `config.py` SCHEMA
+> （84 键），本文件与 `mcp.toml.example` 只列常用键。**
 
 ## 测试
 
@@ -90,5 +95,6 @@ python 工具/脚本/mcp_conformance.py
 
 ## 相关文档
 
-- 设计与决策：`rkllm-设计方案/rkllm-mcp-接入与配置设计.md`
-- 落地安装与踩坑：`文档/开发记录.md`「MCP 连接器落地安装」
+- 落地安装与踩坑：`文档/开发记录.md` §5（MCP 连接器段）
+- A 方案能力下沉：`文档/开发记录.md` §19、§20（审查后续修复）
+- 设计取舍与决策：`文档/开发记录.md` §18.9

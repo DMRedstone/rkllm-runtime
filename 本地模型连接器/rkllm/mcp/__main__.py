@@ -44,7 +44,10 @@ def default_cfg(endpoint: str, api_key: str) -> dict:
         "transport": "stdio",            # mcp.transport：一期只支持 stdio
         "http_path": "/mcp",             # mcp.http_path：二期
         "backend": "auto",               # auto/http=HTTP 后端；local=板端进程内
-        "tools": (),                     # 启用的工具（短名）；空=全部
+        # 启用的工具（短名）；空=全部。必须是 list 而非 tuple：_coerce_cfg_types
+        # 按本表类型模板归一化，tuple 不命中 list 分支会被 str() 掉，
+        # 变成真值字符串 "()" 导致全部推理工具被判禁用（2026-11-19 审计 P0）。
+        "tools": [],
         "allow_remote_origin": [],       # mcp.allow_remote_origin：二期
         "protocol_versions": list(DEFAULT_PROTOCOL_VERSIONS),
         "max_concurrent": 1,             # mcp.max_concurrent：在飞工具调用数
@@ -102,8 +105,11 @@ def load_cfg() -> dict:
                 cfg["endpoint"] = str(section["target_endpoint"])
             if section.get("target_api_key") is not None:
                 cfg["api_key"] = str(section["target_api_key"])
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            # 配置存在但读不出来必须留痕（审计 P2）：静默回退会让用户以为
+            # 配置已生效，实际跑的是默认值。stdio 模式下 stderr 不进协议线。
+            sys.stderr.write("[rkllm-mcp] 读取配置失败，已回退默认值：%s: %s\n"
+                             % (toml_path, exc))
     # 环境变量最终覆盖 TOML（RKLLM_MCP_* 或兼容名 RKLLM_ENDPOINT / RKLLM_API_KEY）
     for key in list(cfg.keys()):
         env_key = "RKLLM_MCP_" + key.upper()

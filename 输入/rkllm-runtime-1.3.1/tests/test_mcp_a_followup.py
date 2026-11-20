@@ -137,10 +137,21 @@ def test_p2b_non_busy_backend_error_still_raises():
 
 # -- P2-D：非幂等 POST 的重试边界 -------------------------------------------
 
+class _SockStub:
+    def settimeout(self, _t):
+        pass
+
+
 class _FakeConn:
     def __init__(self, *, fail_at, calls):
         self.fail_at = fail_at          # "request" 或 "getresponse"
         self.calls = calls              # 外部计数列表
+        # 与真实 http.client 连接一致：_request 先显式 connect()（短超时），
+        # 成功后再 settimeout(读超时) 并 request()
+        self.sock = None
+
+    def connect(self):
+        self.sock = _SockStub()
 
     def request(self, *a, **kw):
         self.calls.append("request")
@@ -181,12 +192,17 @@ def test_p2d_retries_when_request_not_sent(monkeypatch):
 
 
 def test_p2d_no_retry_after_request_sent(monkeypatch):
-    """P2-D：getresponse() 阶段失败（请求已送达）绝不重发 POST。"""
+    """P2-D：getresponse() 阶段失败（请求已送达）绝不重发 POST。
+
+    2026-11-19 审计 P1 起，该失败归一为 BackendError（不再是裸 HTTPException），
+    便于上层给出可诊断错误；不重发的语义不变。
+    """
     calls = []
     be = _backend_with_conns(
         [_FakeConn(fail_at="getresponse", calls=calls),
          _FakeConn(fail_at=None, calls=calls)], monkeypatch)
-    with pytest.raises(http.client.HTTPException):
+    with pytest.raises(BackendError) as ei:
         be._request("/chat/completions", b"{}")
+    assert "连接中断" in str(ei.value)
     # 只有一次 request —— 第二次连接（若被误用会再发一次）不应被取用
     assert calls == ["request", "getresponse"]

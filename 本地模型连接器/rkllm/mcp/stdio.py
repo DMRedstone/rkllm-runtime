@@ -32,7 +32,6 @@ from .protocol import (Dispatcher, JsonRpcError, INVALID_PARAMS, PARSE_ERROR,
 from . import tools as tools_mod
 
 MAX_MESSAGE_BYTES = 8 * 1024 * 1024
-POOL_WORKERS = 4
 # 板端能力/实测速率的刷新周期（秒）。A 方案的性能快照必须周期性重读：
 # 构造时板端通常还没跑过推理、tok_s_hist 无样本（source=cold），只在 __init__
 # 刷一次会让实测 decode_tok_s 永远拿不到（P1-A）。30 s 足够让首批样本出现后
@@ -86,7 +85,13 @@ class StdioServer:
         self._protocol_version = protocol_version
         # mcp.max_concurrent：同时在飞**推理**工具数（默认 1，板端串行）。
         # status/job 不改推理状态，走独立控制池，长 ask 期间仍可秒回。
-        workers = max(1, int(cfg.get("max_concurrent") or POOL_WORKERS))
+        # 显式判 None 而非 falsy：配 0 是"不要并发"的合法表达，不能被
+        # `or POOL_WORKERS` 吞成 4 路并发（2026-11-19 审计 P2）。
+        _concurrent = cfg.get("max_concurrent")
+        try:
+            workers = max(1, int(1 if _concurrent is None else _concurrent))
+        except (TypeError, ValueError):
+            workers = 1
         self._pool = ThreadPoolExecutor(max_workers=workers,
                                         thread_name_prefix="mcp-call")
         self._control_pool = ThreadPoolExecutor(max_workers=2,
@@ -133,7 +138,9 @@ class StdioServer:
             board: dict = dict(self.cfg.get("_board") or {})
 
             found = info.get("model_class")
-            if found and found.endswith("b"):
+            # 非字符串真值（旧版板端/异常响应）调 .endswith 会抛 AttributeError，
+            # 被外层 except 吞掉后整轮 perf/limits 都解析不到（2026-11-19 审计 P2）。
+            if isinstance(found, str) and found.endswith("b"):
                 self.model_class = found
                 self.cfg["model_class"] = found
             context_len = info.get("context_len")
@@ -189,8 +196,15 @@ class StdioServer:
         self._send(note)
 
     def _tool_enabled(self, short: str) -> bool:
-        """mcp.tools：启用的工具（短名）；空=全部；status/job 控制工具恒可用。"""
+        """mcp.tools：启用的工具（短名）；空=全部；status/job 控制工具恒可用。
+
+        配置来源有三条路径（TOML 数组 / env 逗号串 / 程序内 list），归一化后
+        可能是 list 也可能是字符串。**必须按元素比较**——直接 `set(字符串)`
+        会打散成单字符，导致所有工具被判禁用（2026-11-19 审计 P0）。
+        """
         enabled = self.cfg.get("tools") or ()
+        if isinstance(enabled, str):
+            enabled = [s.strip() for s in enabled.split(",") if s.strip()]
         if not enabled:
             return True
         return short in ("status", "job") or short in set(enabled)
@@ -369,7 +383,9 @@ class StdioServer:
         if explicit is not None:
             try:
                 per_call = max(1, int(explicit))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                # OverflowError：JSON 里的 Infinity（json.loads 默认接受）转 int
+                # 会抛，且不是 ValueError——漏捕会变成 -32603（2026-11-19 审计 P2）。
                 per_call = min(default, cap)
         if short == "extract":
             try:
@@ -462,7 +478,8 @@ class StdioServer:
         else:
             try:
                 tokens = max(1, int(explicit)) if explicit is not None else default
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                # OverflowError 同 _estimate_decode_tokens：Infinity 转 int 抛出
                 tokens = default
         text = json.dumps(arguments, ensure_ascii=False)
         prefill = max(1, len(text) // 2)
@@ -541,6 +558,19 @@ class StdioServer:
                 job.complete(result)
             except tools_mod.Cancelled:
                 job.cancel()
+            except BackendError as exc:
+                # P2-B 的 isError+retryAfter 只覆盖同步路径（2026-11-19 审计 P2）。
+                # job 路径把 busy/loading 的「可重试」语义带进 error 文本，
+                # 否则客户端轮询只看到 failed、不知道该等多久。
+                if job.cancel_requested:
+                    return
+                if getattr(exc, "kind", "") in ("busy", "loading"):
+                    retry = getattr(exc, "retry_after_s", None)
+                    hint = ("建议 %s 秒后重试" % retry
+                            if isinstance(retry, (int, float)) else "稍后重试")
+                    job.fail("%s（%s）" % (str(exc)[:260], hint))
+                else:
+                    job.fail(str(exc)[:300])
             except Exception as exc:
                 if job.cancel_requested:
                     return
