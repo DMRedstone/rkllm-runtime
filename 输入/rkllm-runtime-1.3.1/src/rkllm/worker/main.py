@@ -43,17 +43,55 @@ class Worker:
         self._progress = 0
         self._run_started = 0.0
         self._abort_requested = threading.Event()
+        # P2.2：abort 按请求 id 匹配。旧的 abort 帧只有 op、没有 id，且读线程
+        # 无条件置位全局 event——上一条请求迟到的 abort 会误杀下一条在飞请求；
+        # 反向地，abort 帧先于推理线程取到 run 帧时（prefill 尚未开始）又会
+        # 被 run 起点 `clear()` 抹掉，导致 abort 丢失。这里按 id 记账：
+        # - `_active_run_id`：推理线程正在执行的请求；
+        # - `_pending_run_id`：读线程已入队、推理线程还没取的请求；
+        # - `_aborted_ids`：已收到 abort 的请求 id（跨线程，锁保护）。
+        self._active_run_id: str | None = None
+        self._pending_run_id: str | None = None
+        self._aborted_ids: set[str] = set()
+        self._abort_lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._run_queue: queue.Queue = queue.Queue(maxsize=1)
-        self._shutdown = threading.Event()      # 进程级：仅 shutdown 帧触发
+        self._shutdown = threading.Event()      # 进程级：仅 shutdown/写失败触发
         self._conn_closed = threading.Event()   # 连接级：EOF 触发，停推理等待
         self._infer_active = threading.Event()  # 推理中：心跳线程据此发帧
+        self._conn = None                       # 写失败时主动关连接唤醒读线程
 
     # -- 写回（锁保护） -----------------------------------------------------
 
-    def _send(self, wfile, frame: dict) -> None:
-        with self._write_lock:
-            write_frame(wfile, frame)
+    def _send(self, wfile, frame: dict) -> bool:
+        """写一帧；失败只标记连接死亡并返回 False，**绝不向推理线程抛异常**。
+
+        P2.2：此前写失败（客户端断开/被杀）会把 OSError 抛进推理线程，
+        线程直接死掉；worker 进程仍在 accept 下一个连接，但新连接不会重发
+        ready（first=False），supervisor 只能等满 load_timeout。现在写失败 =
+        本连接不可恢复：置 `_conn_closed`/`_shutdown` 并关掉 socket，让
+        worker 干净退出，由 supervisor 重建进程（恢复可服务状态）。
+        """
+        try:
+            with self._write_lock:
+                write_frame(wfile, frame)
+            return True
+        except (OSError, ValueError) as exc:
+            logging.getLogger(__name__).warning(
+                "worker 写帧失败（连接已断）：%r", exc)
+            self._fail_connection()
+            return False
+
+    def _fail_connection(self) -> None:
+        """连接级致命错误：停推理/心跳，关闭 socket 唤醒读线程，进程退出。"""
+        self._conn_closed.set()
+        self._shutdown.set()
+        conn = self._conn
+        if conn is not None:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     # -- 心跳线程 -----------------------------------------------------------
 
@@ -92,14 +130,25 @@ class Worker:
                 if progress == seen and not in_grace:
                     continue          # 卡死/停滞：停止续命，交给 supervisor 超时
                 seen = progress
-                try:
-                    self._send(wfile, {"op": OP_HEARTBEAT,
-                                      "ts": time.time(),
-                                      "progress": progress})
-                except (OSError, ValueError):
+                if not self._send(wfile, {"op": OP_HEARTBEAT,
+                                          "ts": time.time(),
+                                          "progress": progress}):
                     return
 
     # -- 推理线程 -----------------------------------------------------------
+
+    def _abort_pending(self, req_id: str) -> bool:
+        """本次 run 是否已被 abort（全局旧帧或按 id 匹配的新帧）。"""
+        with self._abort_lock:
+            return (self._abort_requested.is_set()
+                    or req_id in self._aborted_ids)
+
+    def _finish_run(self, req_id: str) -> None:
+        """run 收尾：清当前 id / abort 记录，避免影响下一次 run。"""
+        with self._abort_lock:
+            self._active_run_id = None
+            self._abort_requested.clear()
+            self._aborted_ids.discard(req_id)
 
     def _inference_loop(self, wfile) -> None:
         while not self._shutdown.is_set():
@@ -112,7 +161,13 @@ class Worker:
                     return
                 continue
             req_id = frame.get("id", "")
-            self._abort_requested.clear()
+            with self._abort_lock:
+                self._active_run_id = req_id
+                self._pending_run_id = None
+                self._abort_requested.clear()
+                # abort 帧可能先于本线程取到 run 帧（排队窗口）：按 id 记账后
+                # 这里必须立刻兑现，不能因为起点清标志而丢掉。
+                pre_aborted = req_id in self._aborted_ids
             try:
                 params = frame.get("params") or {}
                 # 进度/起点必须在置位 _infer_active 之前写好：心跳线程已置位后
@@ -121,33 +176,64 @@ class Worker:
                 self._run_started = time.monotonic()
                 self._infer_active.set()
                 try:
-                    for token in self.engine.stream(
-                            frame.get("prompt", ""),
-                            role=params.get("role", "user"),
-                            enable_thinking=bool(params.get("enable_thinking", False)),
-                            sampling=params.get("sampling"),
-                            max_new_tokens=params.get("max_new_tokens"),
-                            cache_hint=bool(params.get("cache_hint", True)),
-                            lora=params.get("lora")):
-                        if self._abort_requested.is_set():
+                    if pre_aborted:
+                        # run 还没开始就被取消：不进入 engine（不触发 prefill），
+                        # 直接回明确的 aborted end，避免"假完成"。
+                        self._send(wfile, {"op": OP_END, "id": req_id,
+                                           "aborted": True})
+                        continue
+                    try:
+                        aborted = False
+                        for token in self.engine.stream(
+                                frame.get("prompt", ""),
+                                role=params.get("role", "user"),
+                                enable_thinking=bool(params.get("enable_thinking", False)),
+                                sampling=params.get("sampling"),
+                                max_new_tokens=params.get("max_new_tokens"),
+                                cache_hint=bool(params.get("cache_hint", True)),
+                                lora=params.get("lora")):
+                            if self._abort_pending(req_id):
+                                aborted = True
+                                break
+                            self._progress += 1
+                            if not self._send(wfile, {"op": OP_TOKEN,
+                                                      "id": req_id,
+                                                      "text": token}):
+                                return      # 写失败：连接已死，线程退出
+                        # P2.2：for 正常结束（含 0 个 token 的 prefill 阶段被
+                        # abort）也要看 abort——此前只有循环体内检查，prefill
+                        # 期间 abort 会落到 try/else 发**正常 end**（假完成）。
+                        if not aborted and self._abort_pending(req_id):
+                            aborted = True
+                    except Exception as exc:     # 推理失败不拖垮 worker
+                        # abort 打断 C 调用后引擎常以异常收尾：这是取消，不是
+                        # 请求失败，必须回 aborted end（否则 supervisor 会当
+                        # RequestFailed 503）。
+                        if self._abort_pending(req_id):
                             self._send(wfile, {"op": OP_END, "id": req_id,
                                                "aborted": True})
-                            break
-                        self._progress += 1
-                        self._send(wfile, {"op": OP_TOKEN, "id": req_id,
-                                           "text": token})
+                        else:
+                            self._send(wfile, {"op": OP_ERROR, "id": req_id,
+                                               "message": str(exc)[:500]})
+                        continue
+                    if aborted:
+                        self._send(wfile, {"op": OP_END, "id": req_id,
+                                           "aborted": True})
                     else:
                         perf = self.engine.last_perf()
                         body: dict = {"op": OP_END, "id": req_id}
                         if perf:
                             body["perf"] = {"prefill_tokens": perf[0],
                                             "generate_tokens": perf[1]}
-                        self._send(wfile, body)
+                        if not self._send(wfile, body):
+                            return
                 finally:
                     self._infer_active.clear()
-            except Exception as exc:             # 推理失败不拖垮 worker
+                    self._finish_run(req_id)
+            except Exception as exc:             # 兜底：绝不静默杀死推理线程
                 self._send(wfile, {"op": OP_ERROR, "id": req_id,
                                    "message": str(exc)[:500]})
+                self._finish_run(req_id)
 
     # -- 读线程（唯一读方） ---------------------------------------------------
 
@@ -160,20 +246,50 @@ class Worker:
                     break                        # EOF
                 op = frame.get("op")
                 if op == OP_RUN:
+                    with self._abort_lock:
+                        self._pending_run_id = frame.get("id", "")
                     try:
                         self._run_queue.put_nowait(frame)
                     except queue.Full:
+                        with self._abort_lock:
+                            self._pending_run_id = None
                         self._send(wfile, {"op": OP_ERROR,
                                            "id": frame.get("id", ""),
                                            "message": "busy",
                                            "busy": True})
                 elif op == OP_ABORT:
-                    self._abort_requested.set()
-                    try:
-                        self.engine.abort()
-                    except Exception as exc:
-                        logging.getLogger(__name__).warning(
-                            "engine.abort failed (cancel): %r", exc)
+                    # P2.2：按 id 匹配。旧客户端不带 id → 作用于当前在飞请求；
+                    # 带 id 时只认「正在推理」或「已入队待推理」的 id，迟到的
+                    # 旧请求 abort 一律忽略，绝不误杀下一条请求。
+                    fid = frame.get("id")
+                    with self._abort_lock:
+                        active = self._active_run_id
+                        pending = self._pending_run_id
+                    if fid:
+                        if fid not in (active, pending):
+                            logging.getLogger(__name__).info(
+                                "忽略迟到的 abort（id=%s, active=%s）",
+                                fid, active)
+                            continue
+                        with self._abort_lock:
+                            self._aborted_ids.add(fid)
+                        if fid == active:
+                            # 只有真的在推理时才打断 C 调用；仅排队（pending）
+                            # 时由推理线程在开跑前兑现，避免对空闲句柄 abort。
+                            try:
+                                self.engine.abort()
+                            except Exception as exc:
+                                logging.getLogger(__name__).warning(
+                                    "engine.abort failed (cancel): %r", exc)
+                    else:
+                        if active is None and pending is None:
+                            continue        # 空闲：没有可取消的请求
+                        self._abort_requested.set()
+                        try:
+                            self.engine.abort()
+                        except Exception as exc:
+                            logging.getLogger(__name__).warning(
+                                "engine.abort failed (cancel): %r", exc)
                 elif op == OP_PING:
                     self._send(wfile, {"op": OP_STATE, "state": "ready"})
                 elif op == OP_SHUTDOWN:
@@ -188,6 +304,7 @@ class Worker:
 
     def serve_connection(self, conn) -> None:
         wfile = conn.makefile("wb")
+        self._conn = conn
         self._conn_closed.clear()
         inference = threading.Thread(target=self._inference_loop, args=(wfile,),
                                      daemon=True)
@@ -199,6 +316,7 @@ class Worker:
         self._conn_closed.set()
         inference.join(timeout=5)
         heartbeat.join(timeout=self.heartbeat_interval_s + 1)
+        self._conn = None
         try:
             conn.shutdown(socket.SHUT_RDWR)
         except OSError:
@@ -276,6 +394,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="prompt 前缀缓存目录；空=关闭（cache.enabled=false）")
     parser.add_argument("--cache-max-mb", type=int, default=512)
     parser.add_argument("--cache-ttl-s", type=int, default=604800)
+    # P2.2：cache.similarity 此前只有 build_engine 的 getattr 默认值，CLI 从未
+    # 定义该参数 → 配置项是死键。补上参数面，由 server 侧 worker_args 传入。
+    parser.add_argument("--cache-similarity", type=float, default=0.5,
+                        help="前缀缓存接管单槽的相似度阈值（cache.similarity）")
     parser.add_argument("--lora-path", action="append", default=[],
                         help="LoRA adapter 文件（可重复）；名字取文件名 stem")
     parser.add_argument("--delay", type=float, default=0.0,
@@ -289,6 +411,8 @@ def main(argv: list[str] | None = None) -> int:
     # P2：命令行范围校验，避免 --context=-1 / --max-tokens=0 直达 C 结构体
     if args.context <= 0 or args.max_tokens <= 0 or args.threads <= 0:
         parser.error("--context/--max-tokens/--threads 必须为正整数")
+    if not 0.0 <= args.cache_similarity <= 1.0:
+        parser.error("--cache-similarity 必须在 [0, 1] 内")
     engine = build_engine(args)
     try:
         Worker(engine, heartbeat_interval_s=args.heartbeat_interval,

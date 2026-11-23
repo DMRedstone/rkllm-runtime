@@ -93,9 +93,10 @@ class SseSession:
 
     def _frame(self, delta: dict, finish_reason: str | None,
                usage: dict | None = None) -> str:
-        if self.legacy and usage is not None:
+        if usage is not None:
             # usage-only 帧：OpenAI 文档 "choices field will always be an
-            # empty array"；客户端（含 openai-python）据此区分 token 帧。
+            # empty array"——chat 与 legacy completions 同约（P2-1：此前只有
+            # legacy 分支清空，chat 的 usage 帧还带一个空 delta choice）。
             choices: list[dict] = []
         else:
             choices = [self._choice(delta, finish_reason)]

@@ -15,7 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["CAPS", "param_tier", "check_request_params"]
+__all__ = ["CAPS", "param_tier", "check_request_params", "reject_message",
+           "JSON_OBJECT_SCHEMA"]
 
 # ---------------------------------------------------------------------------
 # 端点三档
@@ -54,7 +55,7 @@ EMULATED_PARAMS: tuple[str, ...] = (
     # 布尔开关），low/medium/high 行为完全相同——标 native 属名不副实
     # （2026-11-20 审计）。
     "reasoning_effort",
-    "tools", "tool_choice", "parallel_tool_calls",
+    "tools", "tool_choice",
     "response_format.json_object", "response_format.json_schema",
 )
 
@@ -65,7 +66,15 @@ IGNORED_PARAMS: tuple[str, ...] = (
 UNSUPPORTED_PARAMS: tuple[str, ...] = (
     "n>1", "seed", "logprobs", "top_logprobs", "logit_bias",
     "modalities", "audio", "prediction",
+    # P2-1：此前标 emulated 但没有任何实现——`parallel_tool_calls=false` 的
+    # "最多一个工具调用"语义无法保证（模型可能一次吐出多个），`true` 也没有
+    # 额外的并行保证。按诚实原则降级为 unsupported（warn 策略只写响应头，
+    # reject 策略 400），不再让它冒充已实现能力。
+    "parallel_tool_calls",
 )
+
+# json_object 的校验口径（与 OpenAI 一致：必须是一个 JSON 对象，不是任意值）。
+JSON_OBJECT_SCHEMA: dict[str, Any] = {"type": "object"}
 
 _PARAM_TIER: dict[str, str] = {
     **{p: "native" for p in NATIVE_PARAMS},
@@ -93,6 +102,20 @@ NOTES: dict[str, str] = {
                    "requests are queued (queue.max_wait) or rejected with 503",
     "json_schema": "prompt+validate+retry on non-stream requests; streaming "
                    "returns 400 (cannot correct frames already sent)",
+    "json_object": "prompt hint on every request; non-stream output is validated "
+                   "as a JSON object and retried (openai.json_schema_retries); "
+                   "streaming cannot retry once frames are sent",
+    "reasoning": "thinking content is streamed incrementally as "
+                 "delta.reasoning_content (chat) / response.reasoning_text.* "
+                 "(responses) while the model thinks; non-stream responses "
+                 "expose the full reasoning_content field",
+    "parallel_tool_calls": "not implemented: the runtime has no request-level "
+                           "parallel-tool flag, and 'false' (at most one tool "
+                           "call) cannot be enforced; explicit values are "
+                           "reported via X-RKLLM-Unsupported or rejected",
+    "repeat_penalty": "values >= 1.0 are passed to the runtime; values < 1.0 "
+                      "are rejected (400) because the runtime silently clamps "
+                      "them to 1.1 instead of honoring them",
     "reasoning_effort": "only two states are real: none (thinking off) vs "
                         "any other value (thinking on); low/medium/high behave "
                         "identically because rkllm exposes a boolean switch",
@@ -191,6 +214,35 @@ def check_request_params(body: dict[str, Any], *,
         # 非流式：交由 Pipeline 注入提示 + 校验重试（emulated），不在此拦截
     elif isinstance(rf, dict) and rf.get("type") == "json_object":
         pass  # emulated：由 agent/pipeline.py 追加 json_hint 提示，不在此拦截
+    # P2-1：parallel_tool_calls 降级为 unsupported（见 UNSUPPORTED_PARAMS 注释）。
+    # 只有显式给出时才处理：新 SDK 不发该字段时不打扰客户端。
+    if body.get("parallel_tool_calls") is not None:
+        (reject if policy == "reject" else warn).append("parallel_tool_calls")
+    # P2-1：repeat_penalty < 1.0 会被 worker 的 build_sampling 静默夹到 1.1，
+    # 等于"接受了参数但不按它执行"。语义关键项恒 400（不随 warn 策略放行）。
+    rp = body.get("repeat_penalty")
+    if rp is not None:
+        try:
+            rp_value = float(rp)
+        except (TypeError, ValueError):
+            reject.append("repeat_penalty")
+        else:
+            if rp_value < 1.0:
+                reject.append("repeat_penalty")
     for name in IGNORED_PARAMS:
         body.pop(name, None)   # 静默剥离：不生效、不告警、不打挂
     return reject, warn
+
+
+def reject_message(params: list[str], body: dict[str, Any] | None = None
+                   ) -> str:
+    """把 reject 列表渲染成对客户端有信息量的错误文案（P2-1）。
+
+    参数名本身不够时（例如 repeat_penalty 只在 <1.0 时被拒）给出具体范围，
+    避免客户端把"支持 1.2"读成"完全不支持"。
+    """
+    body = body or {}
+    if params and params[0] == "repeat_penalty":
+        return ("repeat_penalty must be >= 1.0; the runtime silently clamps "
+                "values below 1.0 to 1.1, so they are rejected instead")
+    return "unsupported parameter(s): %s" % ", ".join(params)

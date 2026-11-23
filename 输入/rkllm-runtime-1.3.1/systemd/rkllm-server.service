@@ -12,6 +12,12 @@ StartLimitBurst=5
 Type=notify
 NotifyAccess=main
 WatchdogSec=60
+# 启动超时：systemd 对 Type=notify 的默认值是 90s，而 engine.load_timeout_s
+# 默认 300s（27B 冷加载实测），键表上限 900s——不显式拉长会在模型加载到一半
+# 时被 systemd 杀掉，表现为"服务起不来"而 journal 里只有一条 timeout。
+# 960s = 900s（load_timeout_s 允许的最大值）+ 60s 余量；默认值下 supervisor
+# 自己会在 300s 超时退出，这里只是兜底。调小 load_timeout_s 时可同步调小。
+TimeoutStartSec=960
 EnvironmentFile=-/etc/default/rkllm-server
 # Note for anyone tempted to add a ConditionPathExists: there is no single path
 # that reliably means "the NPU is usable". Drivers from 0.9.x onwards do NOT

@@ -1,7 +1,10 @@
 """推理管线：conversation 回填 → worker token 流 → reasoning/tools 解析。
 
-iter_tokens() 产出 str（内容 token）或 dict（一次性元数据：perf/reasoning/
-tool_calls/parse_error）。finish_reason() 与 usage() 在流结束后可用。
+iter_tokens() 产出 str（内容 token）或 dict（一次性元数据：perf/reasoning_delta/
+tool_calls/parse_error）。`reasoning_delta` 在**思考阶段即时产出**（P2-1：不再
+等到流结束一次性回填），SSE 层据此逐帧下发 reasoning 增量；`_reasoning` 仍
+累积全文，供非流式响应的 reasoning_content 与 usage 计数使用。
+finish_reason() 与 usage() 在流结束后可用。
 json_object/json_schema 仿真由 apply_response_format 在 prompt 侧注入，
 校验重试在非流式路径由 complete_with_retry 处理（设计 §6.4(3)）。
 """
@@ -261,6 +264,9 @@ class Pipeline:
         reasoning, content = self._splitter.feed(token)
         if reasoning:
             self._reasoning.append(reasoning)
+            # P2-1：思考阶段即时产出 reasoning 增量（SSE 层转 delta 帧），
+            # 不再只在 trailing_frames 里一次性回填。
+            yield {"reasoning_delta": reasoning}
         if content:
             yield from self._route_content(content)
 
@@ -281,6 +287,8 @@ class Pipeline:
         reasoning, content = self._splitter.finish()
         if reasoning:
             self._reasoning.append(reasoning)
+            # 未闭合的 think 段：同样作为增量下发，而不是终点一次性回填。
+            yield {"reasoning_delta": reasoning}
         if content:
             yield from self._route_content(content)
         if self._parser is not None:
@@ -345,6 +353,11 @@ class Pipeline:
     def reasoning_text(self) -> str:
         return "".join(self._reasoning)
 
+    @property
+    def thinking_enabled(self) -> bool:
+        """本请求是否开启思考（供流式层决定是否提前宣告 reasoning item）。"""
+        return self._enable_thinking
+
     @staticmethod
     def _tool_call_delta(call: dict) -> dict:
         """parser 的 tool_call → OpenAI `delta.tool_calls[]` 元素。
@@ -372,11 +385,14 @@ class Pipeline:
         }
 
     def trailing_frames(self, session) -> list[str]:
-        """流式收尾附加帧：tool_calls 增量帧与 reasoning 帧。"""
+        """流式收尾附加帧：tool_calls 增量帧。
+
+        P2-1：reasoning 已改为思考阶段逐帧下发（`reasoning_delta`），不再在
+        终点用 trailing_frames 一次性回填——否则客户端会在正文之后才拿到
+        思考内容，顺序错误且长思考期间没有任何增量。
+        """
         frames = []
         if self._tool_calls:
             frames.append(session.delta_frame(
                 tool_calls=[self._tool_call_delta(c) for c in self._tool_calls]))
-        if self._reasoning:
-            frames.append(session.delta_frame(reasoning=self.reasoning_text))
         return frames

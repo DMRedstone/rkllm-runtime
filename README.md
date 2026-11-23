@@ -14,12 +14,15 @@
 
 ```
 .
-├── 输入/                   构建输入：打包脚手架 + 上游 SDK 源料
+├── 输入/                   构建输入：打包脚手架 + 上游精简 tarball（见 输入/构建资料说明.md）
 ├── 工具/
-│   ├── 编译工具链/         make_deb · verify_deb · crosscheck_deb · render_template
+│   ├── 编译工具链/         make_deb · verify_deb · crosscheck_deb · release_check
+│   │                       golden_diff · render_caps_doc · render_template · release_sums
 │   ├── 大模型测试工具链/   11 个脚本 + board_api.py + quality.py
-│   └── 脚本/               运维脚本：备份、测试 harness、协议一致性
+│   └── 脚本/               运维脚本：备份、测试 harness、MCP 协议一致性
 ├── 文档/                   部署说明 · 对话接口用法 · 开发记录 · 待办事项
+├── .github/workflows/      ci.yml：pytest + golden_diff + mcp_conformance
+│                           + caps 文档/caps 一致性 + 打 deb + verify_deb + release_check
 ├── 测试数据/Qwen3.5-4B测试/    结果 JSON/CSV、10 份脱敏真实公文、输出样本
 ├── 模型测试报告/Qwen3.5-4B测试/ 性能测试报告 · 真实公文场景测试报告
 ├── 本地模型连接器/         客户端 MCP 连接器（独立源码交付，不随 deb）
@@ -42,6 +45,15 @@ python 工具/编译工具链/make_deb.py --arch arm64        # 产物落 工具
 # 静态自检（88 项）
 python 工具/编译工具链/verify_deb.py 工具/dist/rkllm-runtime_1.3.1-21_arm64.deb
 
+# 发布门禁（与 CI 的 release-check 作业同款）
+python 工具/编译工具链/release_check.py --deb 工具/dist/rkllm-runtime_1.3.1-21_arm64.deb
+python 工具/编译工具链/render_caps_doc.py --check 文档/对话接口用法.md
+
+# 测试（与 CI 的 test 作业同款；当前基线 704 passed / 3 skipped）
+cd 输入/rkllm-runtime-1.3.1 && PYTHONPATH=src python3 -m pytest tests -q && cd ../..
+python 工具/编译工具链/golden_diff.py                  # 新栈 golden 基线：5/5
+python 工具/脚本/mcp_conformance.py                   # MCP 四版本协议：45/45
+
 # 板端测试全流程
 cd 工具/大模型测试工具链 && python run_all.py --host <板端地址> --key <令牌>
 
@@ -52,6 +64,10 @@ rkllm chat qwen2.5-1.5b
 rkllm serve qwen2.5-1.5b
 # 或 systemctl enable --now rkllm-server（配置在 /etc/default/rkllm-server 与 /etc/default/rkllm-server.d/）
 ```
+
+> 当前版本 **1.3.1-21**，未打 tag；deb 459 文件 / 14.03 MB（解包 84.4 MB），
+> `verify_deb` 88 checks / FAIL=0 / WARN=0。CI 在 Ubuntu runner 上跑上述全部门禁
+> （见 `.github/workflows/ci.yml`）。
 
 ## 关于上游源料
 

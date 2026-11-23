@@ -37,3 +37,6 @@
 | `f10_frameworks.py` | `f10_frameworks.py 说明.md` |
 
 > 本目录的脚本与说明均只引用仓库内文件；开发记录维护脚本已随记录重写而退役。
+>
+> CI 门禁（`.github/workflows/ci.yml`）会跑 `mcp_conformance.py`；`magic_numbers.py`
+> 与 `coverage_report.py` 由本地/发布流程按需调用。

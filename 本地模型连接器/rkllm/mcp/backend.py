@@ -31,11 +31,96 @@ CONNECT_TIMEOUT_S = 10.0
 
 
 class BackendError(Exception):
+    """板端调用错误；kind 决定上层如何归一为有语义的 MCP 错误（P2.5）。
+
+    kind 取值（新增的是板端 HTTP/流语义，不再一律 -32603）：
+    - busy / loading / rate_limited：可重试（带 retry_after_s）；
+    - bad_request：板端 400/422，参数或上下文预算问题，不可重试；
+    - auth：板端 401/403，key 错误；
+    - not_found：板端 404；
+    - stream：SSE 流中的错误帧；
+    - upstream：板端 5xx / 其他 HTTP；
+    - cancelled：客户端取消；
+    - backend / error / config：连接失败或配置错误（沿用旧语义）。
+    """
+
     def __init__(self, message: str, *, retry_after_s: int | None = None,
-                 kind: str = "backend"):
+                 kind: str = "backend", http_status: int | None = None,
+                 code: str | None = None):
         super().__init__(message)
         self.retry_after_s = retry_after_s
-        self.kind = kind        # busy / loading / error
+        self.kind = kind
+        self.http_status = http_status
+        self.code = code
+
+    def meta(self) -> dict:
+        """转成 MCP tool result 的 `_meta`（不含 key、不含 URL 查询串）。"""
+        meta: dict = {"kind": self.kind}
+        if self.http_status is not None:
+            meta["httpStatus"] = int(self.http_status)
+        if self.code:
+            meta["code"] = self.code
+        if isinstance(self.retry_after_s, (int, float)):
+            meta["retryAfter"] = self.retry_after_s
+        return meta
+
+
+# HTTP 状态码 → 语义 kind（P2.5：400/401/流错误不再统一 -32603）
+_HTTP_KIND = {
+    400: "bad_request", 422: "bad_request",
+    401: "auth", 403: "auth",
+    404: "not_found",
+    429: "rate_limited",
+    503: "busy",
+}
+# 这些 kind 是可重试的临时状态：上层回 isError + retryAfter，而不是内部错误
+RETRYABLE_KINDS = frozenset({"busy", "loading", "rate_limited"})
+# 这些 kind 是"有语义"的板端失败：上层回结构化 isError（不是 -32603）
+SEMANTIC_KINDS = frozenset({"bad_request", "auth", "not_found", "stream",
+                            "upstream", "http"}) | RETRYABLE_KINDS
+
+
+def _parse_retry_after(resp) -> int | None:
+    """Retry-After 只采信整数秒；HTTP-date/非法值返回 None（不猜）。"""
+    try:
+        raw = resp.getheader("Retry-After")
+    except (AttributeError, TypeError):
+        return None
+    if not raw:
+        return None
+    try:
+        seconds = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def _http_error(status: int, detail: str, resp) -> BackendError:
+    """把板端 HTTP 错误归一成带语义的 BackendError（P2.5）。"""
+    kind = _HTTP_KIND.get(status, "upstream" if status >= 500 else "http")
+    retry = _parse_retry_after(resp) if status in (429, 503) else None
+    label = {
+        "bad_request": "板端拒绝请求（参数/上下文预算）",
+        "auth": "板端鉴权失败（API key 无效或缺失）",
+        "not_found": "板端端点不存在",
+        "rate_limited": "板端限流",
+        "busy": "模型忙",
+        "upstream": "板端服务错误",
+        "http": "板端 HTTP 错误",
+    }.get(kind, "板端 HTTP 错误")
+    # 板端 OpenAI 错误帧通常是 {"error":{"message":...}}；取出 message 便于排障
+    text = detail.strip()
+    try:
+        parsed = json.loads(text)
+        err = parsed.get("error") if isinstance(parsed, dict) else None
+        if isinstance(err, dict) and err.get("message"):
+            text = str(err["message"])
+        elif isinstance(err, str):
+            text = err
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return BackendError("%s（HTTP %d）：%s" % (label, status, text[:200]),
+                        retry_after_s=retry, kind=kind, http_status=status)
 
 
 class HttpBackend:
@@ -132,39 +217,34 @@ class HttpBackend:
     def chat(self, messages: list[dict], *, max_tokens: int = 512,
              temperature: float = 0.3,
              cancel_check: Callable[[], bool] | None = None,
-             timeout_s: float | None = None) -> dict:
+             timeout_s: float | None = None,
+             include_usage: bool = True) -> dict:
         """返回 {"text", "usage", "finish_reason", "reasoning_chars"}。
 
         - cancel_check：job 取消 / 客户端断开时返回 True；命中后必须抛
           `BackendError(kind="cancelled")`——绝不能把底层读循环异常（跨线程
           关闭 response 时的 AttributeError 等）裸露成 -32603；
-        - timeout_s：本次调用的**总读超时**（job 按估算放宽，见 stdio）。
+        - timeout_s：本次调用的**总读超时**（job 按估算放宽，见 stdio）；
+        - include_usage：P2.5 起按需发送 `stream_options.include_usage`。板端
+          只在该开关下于 [DONE] 前发 usage-only 帧；工具层要 `_meta.usage`
+          就必须带上它（默认 True；批处理等确实不需要时可关）。
         """
         deadline_s = float(timeout_s or self.timeout_s)
-        body = json.dumps({
+        payload: dict = {
             "model": "rkllm",
             "messages": messages,
             "stream": True,
             "max_tokens": max_tokens,
             "temperature": temperature,
-        }).encode("utf-8")
+        }
+        if include_usage:
+            payload["stream_options"] = {"include_usage": True}
+        body = json.dumps(payload).encode("utf-8")
         resp = self._request("/chat/completions", body, timeout_s=deadline_s)
         if resp.status >= 400:
             detail = resp.read(2000).decode("utf-8", "replace")
             self._drop_connection()   # 错误响应后连接状态不确定，不复用
-            if resp.status == 503:
-                retry = resp.getheader("Retry-After")
-                retry_s = None
-                if retry:
-                    try:
-                        retry_s = int(retry)
-                    except (TypeError, ValueError):
-                        # M-2：HTTP-date 或非法值不应把「忙可重试」变成 -32603
-                        retry_s = None
-                raise BackendError("模型忙：" + detail[:200],
-                                   retry_after_s=retry_s, kind="busy")
-            raise BackendError("板端 HTTP %d：%s"
-                               % (resp.status, detail[:200]))
+            raise _http_error(resp.status, detail, resp)
 
         text_parts: list[str] = []
         reasoning_chars = 0
@@ -218,9 +298,17 @@ class HttpBackend:
                     raise BackendError("任务已取消", kind="cancelled")
                 err = chunk.get("error")
                 if err:
-                    # P2：板端中途错误的帧没有 choices，旧逻辑会静默吞成假成功
-                    msg = err.get("message") if isinstance(err, dict) else err
-                    raise BackendError("板端流中错误：%s" % str(msg)[:200])
+                    # P2：板端中途错误的帧没有 choices，旧逻辑会静默吞成假成功。
+                    # P2.5：归一为 kind="stream" 的语义错误（带板端 code/type），
+                    # 上层回 isError + _meta，而不是 -32603。
+                    if isinstance(err, dict):
+                        msg = err.get("message") or err.get("type") or str(err)
+                        code = err.get("code") or err.get("type")
+                    else:
+                        msg, code = err, None
+                    raise BackendError("板端流中错误：%s" % str(msg)[:200],
+                                       kind="stream",
+                                       code=str(code) if code else None)
                 choices = chunk.get("choices") or [{}]
                 choice = choices[0]
                 if choice.get("finish_reason"):

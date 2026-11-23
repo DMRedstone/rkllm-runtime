@@ -474,3 +474,49 @@ RKLLM_EXTRA_ARGS=
 #     /tmp/rkllm/prefix。
 #RKLLM_CACHE_ENABLED=false
 #RKLLM_CACHE_DIR=/dev/shm/rkllm/prefix
+
+
+# ===========================================================================
+# 部署层与运行时环境变量 / deployment layers & runtime env
+# ---------------------------------------------------------------------------
+# EN: Layering of `rkllm serve`: built-in defaults < /etc/rkllm/rkllm.toml (or
+#     the file RKLLM_TOML points at) < .d drop-ins < this EnvironmentFile's
+#     RKLLM_* variables < command line. RKLLM_TOML only replaces the TOML layer;
+#     the .d drop-ins still apply on top of it, exactly as documented. An empty
+#     value in .d means "not configured" (it never clears a TOML value), while
+#     an empty RKLLM_* value in this file still clears a str/list key.
+# 中文: `rkllm serve` 的层叠顺序：内置默认 < /etc/rkllm/rkllm.toml（或
+#     RKLLM_TOML 指向的文件）< `.d` 目录 < 本文件的 RKLLM_* 环境变量 < 命令行。
+#     RKLLM_TOML 只替换 TOML 这一层，`.d` 仍在其上生效，与文档一致。`.d` 里的
+#     空值表示"未配置"（不会清空 TOML 的 str/list 键）；本文件里空的 RKLLM_*
+#     值仍是显式清空。
+#
+# EN: List values are comma separated; file-system path lists
+#     (model.search_dirs, model.lora_paths) also accept ':' for compatibility
+#     with the old RKLLM_MODEL_DIR convention. A ':' inside a URL is not split.
+# 中文: list 值用逗号分隔；文件路径列表（model.search_dirs、model.lora_paths）
+#     额外接受 ':'（兼容旧 RKLLM_MODEL_DIR 习惯）；URL 里的 ':' 不会被切开。
+# 可选写法 / optional form:
+#RKLLM_MODEL_SEARCH_DIRS=/var/lib/rkllm/models:/data/models
+#RKLLM_MODEL_SEARCH_DIRS=/var/lib/rkllm/models,/data/models
+#
+# EN: Start timeout: the unit sets TimeoutStartSec=960 so a slow model load is
+#     not killed at systemd's 90s default. engine.load_timeout_s (default 300,
+#     max 900) is the per-load budget; lower the unit timeout if you lower it.
+# 中文: 启动超时：单元里 TimeoutStartSec=960，避免慢速加载被 systemd 默认的
+#     90s 杀掉。engine.load_timeout_s（默认 300，最大 900）是单次加载预算；
+#     调小它时可同步调小单元超时。
+#
+# EN: Runtime environment variables read directly by the code, NOT part of the
+#     84-key table (not shown by `rkllm config show`; listed by
+#     `rkllm config docs`):
+#       RKLLM_TOML            explicit TOML path for `rkllm serve`
+#       RKLLM_TOKENIZER_JSON  tokenizer.json path for exact token counting
+#       RKLLM_RUNTIME_VERSION version injected by the build/release pipeline
+#       RKLLM_DEBUG           non-empty: print tracebacks on CLI failure
+# 中文: 代码直接读取的运行时环境变量，不属于 84 键表（`rkllm config show`
+#     不显示，`rkllm config docs` 会列出）：RKLLM_TOML（显式 TOML 路径）、
+#     RKLLM_TOKENIZER_JSON（精确 token 计数的 tokenizer.json）、
+#     RKLLM_RUNTIME_VERSION（构建/发布流水线注入的版本）、
+#     RKLLM_DEBUG（非空时 CLI 失败打印堆栈）。
+# ===========================================================================

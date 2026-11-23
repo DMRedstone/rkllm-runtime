@@ -7,6 +7,15 @@
   P1-C1）：`.d` 里的空串对 str/list 视为"未配置"（不覆盖、不清空 TOML），env 里
   的空串仍是"显式清空"（旧 conffile `RKLLM_SERVER_API_KEY=` 依赖它）。打包的
   `default/rkllm-server.d/10-model.conf` 因此不再存在任何生效赋值，只留注释示例。
+  优先级链描述的是**部署**里 `rkllm serve` 的实际生效值：显式 `RKLLM_TOML`
+  只是替换 TOML 这一层，`.d` 仍是它之上的部署覆盖层（serve 传
+  `use_dropins=True`）。程序化 `load_config(file=...)` 默认不读系统 `.d`——
+  测试 / 客户端要的是隔离输入（2026-11-20 审核的既有契约）；需要系统层时显式
+  `use_dropins=True`，要完全离线装配（如 selftest）则 `system=False`。
+- 直接读 `os.environ` 的运行时开关（RKLLM_TOML / RKLLM_TOKENIZER_JSON /
+  RKLLM_RUNTIME_VERSION / RKLLM_DEBUG）不进 84 键表、也不参与上面的优先级链，
+  统一登记在 `RUNTIME_ENV_VARS`，并由 `rkllm config docs` 一并列出，避免出现
+  "某个模块偷偷读环境变量"的隐性配置。
 - 启动校验：类型、范围、互斥项；错误一次性列出并拒绝启动（不再静默回退）。
   serve 路径（require_model_path=True）额外做 P1-S1 安全 fail-closed 校验：
   api_key_file 不可用拒绝启动；非回环地址 + 无 key 拒绝启动。
@@ -28,7 +37,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 __all__ = ["Key", "SCHEMA", "Config", "ConfigError", "load_config",
-           "config_docs", "config_init", "config_show"]
+           "config_docs", "config_init", "config_show",
+           "RUNTIME_ENV_VARS"]
 
 log = logging.getLogger("rkllm.config")
 
@@ -243,6 +253,20 @@ assert len(SCHEMA) == len(set(k.full for k in SCHEMA)), "配置键名重复（N1
 DEFAULT_TOML_PATH = "/etc/rkllm/rkllm.toml"
 DEFAULT_DROPIN_DIR = "/etc/default/rkllm-server.d"
 
+# 直接读 os.environ 的运行时开关：它们**不是** 84 键配置的一部分（不参与优先级
+# 链，`config show` 的 values 里也没有），但确实影响行为，所以必须显式登记，
+# 不能散落在各模块的 `os.environ.get()` 里。登记项的实现读取点由
+# tests/test_p2_config.py 逐条交叉核对，`config docs` 会打印这张表。
+RUNTIME_ENV_VARS: dict[str, str] = {
+    "RKLLM_TOML": "serve：显式 TOML 路径（替换默认 /etc/rkllm/rkllm.toml；"
+                  "`.d` 部署层照常生效）",
+    "RKLLM_TOKENIZER_JSON": "精确 token 计数用的 tokenizer.json 路径"
+                            "（需可选依赖 tokenizers；否则用自校准估算）",
+    "RKLLM_RUNTIME_VERSION": "构建/发布流水线注入的版本号"
+                             "（默认取 src/rkllm/__init__.py 的 DEFAULT_VERSION）",
+    "RKLLM_DEBUG": "非空时 CLI 失败打印堆栈（排障用，不改变配置）",
+}
+
 _BY_SECTION: dict[str, list[Key]] = {}
 for _key in SCHEMA:
     _BY_SECTION.setdefault(_key.section, []).append(_key)
@@ -309,10 +333,8 @@ def _quiet_to_level(raw: str) -> str:
 # 值转换表：旧变量 → 新键时连取值也要转换的项（普通项直接复制字符串）。
 _LEGACY_VALUE_TRANSFORM = {
     "RKLLM_QUIET": _quiet_to_level,
-    # 旧 conffile 的模型搜索目录用 `:` 分隔（default/rkllm-server-example、
-    # cli_engine._search_dirs 均按 `:` 解析），而 list 类型的 TOML/env 值按
-    # 逗号切分——不转换的话 `/var/a:/var/b` 会成为单个非法路径元素，
-    # /admin/models 静默列空（2026-11-20 审计）。
+    # 旧 conffile 的模型搜索目录用 `:` 分隔；list 值现在原生同时接受 `:` 与
+    # `,`（见 `_split_list_value`），这里保留显式转换只为兼容历史调用路径。
     "RKLLM_MODEL_DIR": lambda raw: raw.replace(":", ","),
 }
 
@@ -371,6 +393,28 @@ class _SectionView:
             return self._values[key]
         except KeyError:
             raise AttributeError(key) from None
+
+
+def _split_list_value(raw: str) -> tuple[str, ...]:
+    """切分 list 类型的 TOML/env 值：逗号为主，POSIX 路径列表额外接受冒号。
+
+    旧 conffile 用 `:` 分隔模型搜索目录（`RKLLM_MODEL_DIR=/a:/b`，example 与
+    `cli_engine._search_dirs` 都是这个约定），而 list 键过去只按逗号切分，
+    于是 `RKLLM_MODEL_SEARCH_DIRS=/a:/b` 会变成单个非法元素。这里同时接受两
+    种分隔符，但只把"每一段都以 `/` 开头"的冒号串当作分隔：URL
+    （http://host:8080）与 Windows 盘符路径（C:\\models）不会被误切。
+    """
+    out: list[str] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        parts = [part.strip() for part in token.split(":")]
+        if len(parts) > 1 and all(part.startswith("/") for part in parts):
+            out.extend(parts)
+        else:
+            out.append(token)
+    return tuple(out)
 
 
 def _overrides(key: Key, raw: Any, *, empty_clears: bool = True) -> bool:
@@ -432,7 +476,7 @@ def _coerce(key: Key, raw: Any, origin: str, errors: list[str]) -> Any:
             return val
         if key.type is list:
             if isinstance(raw, str):
-                items = tuple(s.strip() for s in raw.split(",") if s.strip())
+                items = _split_list_value(raw)
             elif isinstance(raw, (list, tuple)):
                 # 元素统一字符串化并丢空项：`cors_origins = [1, 2]` 原样进 tuple
                 # 会让下游 join/比较抛 TypeError（2026-11-20 审计）
@@ -511,7 +555,9 @@ def _normalize_legacy(values: dict[str, str]) -> dict[str, str]:
 
 def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
                 env: dict[str, str] | None = None,
-                require_model_path: bool = False) -> Config:
+                require_model_path: bool = False,
+                system: bool = True,
+                use_dropins: bool | None = None) -> Config:
     """按 优先级 default < file(TOML) < .d < env < cli 装配配置并整体校验。
 
     `.d` 与 env 的非空值覆盖 TOML；`.d` 的空串视为"未配置"（P1-C1），env 的空串
@@ -520,6 +566,15 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
     require_model_path：serve 子命令置 True；同时启用 P1-S1 安全 fail-closed
     校验（api_key_file 必须可用；非回环地址必须有 key）。config 命令与客户端
     连接器置 False（model.path 仅板端推理需要，也允许先排障再修 safe 配置）。
+
+    system=False：不读系统部署层（`DEFAULT_TOML_PATH` 与 `.d`），只装配显式
+    file/env/cli——selftest 用，避免板端 `/etc/rkllm/rkllm.toml` 或损坏的
+    `.d` 让安装自检失败。
+
+    use_dropins：是否读 `.d` 目录。None（默认）= 仅在未显式 file= 时读；这是
+    测试/客户端"显式 file= 即隔离输入"的既有契约。`rkllm serve` 显式传 True：
+    部署优先级文档写明 `.d` 覆盖 TOML，因此即使 `RKLLM_TOML` 换掉了 TOML 文件，
+    部署级 `.d` 仍然生效。
     """
     env = dict(os.environ if env is None else env)
     errors: list[str] = []
@@ -527,16 +582,23 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
     sources: dict[str, str] = {}
 
     env = _normalize_legacy(env)
-    # 显式 file= 时不再读系统 .d：调用方（测试 / 客户端 / 排障）要的是隔离配置，
-    # 不能被板端 /etc/default/rkllm-server.d 悄悄覆盖（2026-11-20 审计）。
-    dropin = {} if file else _normalize_legacy(_load_dropins(DEFAULT_DROPIN_DIR))
+    # `.d` 是 TOML 之上的部署层（文档优先级：TOML < .d），所以 serve 即使显式
+    # 指定 RKLLM_TOML 也照读；程序化 file= 默认不读系统 .d，保持隔离契约。
+    # system=False 时连默认 TOML 与 .d 都不读（selftest / 离线装配）。
+    if use_dropins is None:
+        use_dropins = file is None
+    if not system:
+        use_dropins = False
+    dropin = (_normalize_legacy(_load_dropins(DEFAULT_DROPIN_DIR))
+              if use_dropins else {})
 
     file_data: dict[str, Any] = {}
     # 未显式指定时，板端的默认 TOML 存在就用它（键表的落点；此前只有
     # RKLLM_TOML 环境变量一条路，deb 也没打模板，等于运维看不见这张表）。
     # 文件不存在是正常状态，不算错误。
-    path = file or DEFAULT_TOML_PATH
-    if path and (file or os.path.isfile(path)):
+    explicit_file = bool(file)
+    path = file if explicit_file else (DEFAULT_TOML_PATH if system else "")
+    if path and (explicit_file or os.path.isfile(path)):
         try:
             with open(path, "rb") as fh:
                 file_data = tomllib.load(fh)
@@ -675,6 +737,12 @@ def config_docs() -> str:
         mark = "" if key.implemented else "（未接线）"
         lines.append(f"| `{key.full}` | `{key.default!r}` | {rng} "
                      f"| {key.desc}{mark} |")
+    # 运行时环境变量不在 84 键表里（不参与优先级链），但同样影响行为；
+    # 与上表一起输出，避免"只有读源码才知道还有这些开关"。
+    lines += ["", "### 运行时环境变量（不经配置表 / not in the 84-key table）",
+              "", "| 变量 | 说明 |", "|---|---|"]
+    for name, desc in RUNTIME_ENV_VARS.items():
+        lines.append(f"| `{name}` | {desc} |")
     return "\n".join(lines)
 
 

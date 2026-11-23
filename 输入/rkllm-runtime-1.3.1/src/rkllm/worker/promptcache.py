@@ -60,6 +60,57 @@ PROMPT_SIMILARITY = 0.5
 _DEFAULT_TMPFS_DIR = "/dev/shm/rkllm/prefix"
 _FALLBACK_TMP_DIR = "/tmp/rkllm/prefix"
 
+# P2-4：缓存目录里存着 prompt 明文（prefix.meta）与统计文件。多用户板上
+# /dev/shm 与 /tmp 是全局可读的，如果沿用进程 umask（常见 0644）同机其他用户
+# 能直接读走用户的 prompt。目录一律 0700、文件 0600，且**写时即设 mode**，
+# 不依赖调用方的 umask；已有文件/目录也顺手收紧。
+_DIR_MODE = 0o700
+_FILE_MODE = 0o600
+
+
+def _chmod_private(path: str) -> None:
+    """尽量把 path 收紧为 0600（Windows 权限语义不同，失败不影响功能）。"""
+    try:
+        os.chmod(path, _FILE_MODE)
+    except OSError:
+        pass
+
+
+def _secure_dir(path: str) -> bool:
+    """创建/收紧缓存目录为 0700；不可用返回 False。"""
+    try:
+        os.makedirs(path, mode=_DIR_MODE, exist_ok=True)
+    except OSError:
+        return False
+    try:
+        os.chmod(path, _DIR_MODE)
+    except OSError:
+        pass
+    return True
+
+
+def _write_private(path: str, text: str) -> None:
+    """原子写文件并强制 0600：用 os.open 的 mode，不受进程 umask 影响。"""
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _FILE_MODE)
+    try:
+        fchmod = getattr(os, "fchmod", None)
+        if fchmod is not None:          # POSIX：已有 .tmp 时 open 的 mode 不生效
+            try:
+                fchmod(fd, _FILE_MODE)
+            except OSError:
+                pass
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.replace(tmp, path)
+    _chmod_private(path)
+
 
 def common_prefix_len(left: str, right: str) -> int:
     """字节级最长公共前缀长度（UTF-8 边界安全）。
@@ -91,8 +142,9 @@ def _pick_cache_dir(requested: str | None) -> str:
     if requested:
         return requested
     for path in (_DEFAULT_TMPFS_DIR, _FALLBACK_TMP_DIR):
+        if not _secure_dir(path):
+            continue
         try:
-            os.makedirs(path, exist_ok=True)
             # 试探写：某些挂载点允许创建目录但禁止写（如只读 rootfs）
             probe = os.path.join(path, ".probe")
             with open(probe, "w") as fh:
@@ -178,11 +230,11 @@ class PromptCache:
         if not self._usable():
             return
         try:
-            os.makedirs(self.dir, exist_ok=True)
-            tmp = self.meta_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.write(prompt)
-            os.replace(tmp, self.meta_path)
+            _secure_dir(self.dir)
+            _write_private(self.meta_path, prompt)
+            # runtime 写出的 KV 缓存文件也收紧（内容含 prompt 的 KV，虽非明文，
+            # 但同样只应属主可读；文件可能尚不存在，忽略错误）。
+            _chmod_private(self.cache_path)
         except OSError as exc:
             self._warn("写入缓存元数据失败：%s" % exc)
 
@@ -248,10 +300,8 @@ class PromptCache:
         """目录不可写时不报错，只告警并退化为"不用缓存"。"""
         if self._disabled:
             return False
-        try:
-            os.makedirs(self.dir, exist_ok=True)
-        except OSError as exc:
-            self._warn("缓存目录不可用（%s），本次不使用前缀缓存" % exc)
+        if not _secure_dir(self.dir):
+            self._warn("缓存目录不可用（%s），本次不使用前缀缓存" % self.dir)
             return False
         return True
 
@@ -279,13 +329,11 @@ class PromptCache:
                 "skipped_saves": self.skipped_saves}
 
     def _write_stats(self) -> None:
-        """原子写 stats.json：worker 是唯一写者，server 只读。"""
+        """原子写 stats.json（0600）：worker 是唯一写者，server 只读。"""
         import json
         try:
-            tmp = self.stats_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(self._stats_dict(), fh)
-            os.replace(tmp, self.stats_path)
+            _write_private(self.stats_path,
+                           json.dumps(self._stats_dict()))
         except OSError:
             pass
 

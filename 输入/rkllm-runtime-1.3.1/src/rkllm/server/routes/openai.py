@@ -16,18 +16,24 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ...agent.pipeline import Pipeline
+from ..errors import JSON_OBJECT_SCHEMA as _JSON_OBJECT_SCHEMA
 from ..errors import http_error as _http_error
+from ..errors import validate_response_format as _validate_response_format
 from ..pipeline_runner import (BUSY_MESSAGE,
+                               DISCONNECTED as _DISCONNECTED,
                                SchemaError as _SchemaError,
                                build_pipeline as _pipeline,
+                               client_disconnected_response as _client_disconnected,
                                run_blocking as _run_blocking,
                                run_blocking_checked as _run_blocking_checked,
+                               run_blocking_disconnect as _run_blocking_disconnect,
                                service_of as _svc)
 from ..schemas import ChatCompletionRequest, CompletionRequest
 from ..sse import SseSession, sse_response_headers
@@ -42,28 +48,34 @@ router = APIRouter()
 
 log = logging.getLogger("rkllm.server.openai")
 
+# /v1/models 的 `created` 是模型时间戳：优先取模型文件 mtime（稳定可复现），
+# 文件不可读时退回进程启动时间（同一进程内 /v1/models 与 /models 必须一致）。
+_STARTED_AT = int(time.time())
+
+
+def _model_object(svc) -> dict:
+    try:
+        created = int(os.stat(svc.model_path).st_mtime)
+    except (OSError, TypeError, ValueError):
+        created = _STARTED_AT
+    return {"id": svc.model_name, "object": "model", "created": created,
+            "owned_by": "rkllm-runtime", "context_len": svc.context_len,
+            "model_class": svc.model_class}
 
 
 @router.get("/models")
 def list_models(request: Request):
-    svc = _svc(request)
-    obj = {"id": svc.model_name, "object": "model",
-           "owned_by": "rkllm-runtime", "context_len": svc.context_len,
-           "model_class": svc.model_class}
-    return {"object": "list", "data": [obj]}
+    return {"object": "list", "data": [_model_object(_svc(request))]}
 
 
 @router.get("/models/{model_id}")
 def get_model(model_id: str, request: Request):
     """单模型：任意 id 返回同一对象（设计 §4.1）。"""
-    svc = _svc(request)
-    return {"id": svc.model_name, "object": "model",
-            "owned_by": "rkllm-runtime", "context_len": svc.context_len,
-            "model_class": svc.model_class}
+    return _model_object(_svc(request))
 
 
 @router.post("/chat/completions")
-def chat_completions(body: ChatCompletionRequest, request: Request):
+async def chat_completions(body: ChatCompletionRequest, request: Request):
     svc = _svc(request)
     raw = body.model_dump()
     streaming = bool(raw.get("stream"))
@@ -72,9 +84,15 @@ def chat_completions(body: ChatCompletionRequest, request: Request):
                                             stream=streaming)
     if reject:
         return _http_error(400, "invalid_request_error",
-                           "unsupported parameter(s): %s" % ", ".join(reject),
+                           caps.reject_message(reject, raw),
                            code="unsupported_parameter",
                            param=reject[0])
+    # P2-1：非法 response_format（缺 schema / schema 不是对象 / 类型拼错）
+    # 必须显式 400，不能静默当成"没有 response_format"。
+    json_mode, schema, format_error = _validate_response_format(
+        raw.get("response_format"))
+    if format_error is not None:
+        return format_error
     if raw.get("tool_choice") == "none":
         # tool_choice=none 的契约是“禁止调用工具”。runtime 没有请求级工具开关，
         # 这里做等效实现：不向 Pipeline 注入工具（也就不会装解析器），模型即使
@@ -83,12 +101,6 @@ def chat_completions(body: ChatCompletionRequest, request: Request):
     max_tokens = raw.get("max_tokens") or raw.get("max_completion_tokens") \
         or svc.default_max_tokens
     headers = {"X-RKLLM-Unsupported": ",".join(warn)} if warn else {}
-
-    rf = raw.get("response_format") or {}
-    schema = None
-    if isinstance(rf, dict) and rf.get("type") == "json_schema":
-        spec = rf.get("json_schema") or {}
-        schema = spec.get("schema") if isinstance(spec, dict) else None
 
     if streaming:
         # 效率：仅流式路径构造 Pipeline；非流式交给 _run_blocking_checked 自行
@@ -105,11 +117,30 @@ def chat_completions(body: ChatCompletionRequest, request: Request):
             media_type="text/event-stream",
             headers={**sse_response_headers(), **headers})
 
+    checked_schema = (schema if json_mode == "json_schema"
+                      else (_JSON_OBJECT_SCHEMA
+                            if json_mode == "json_object" else None))
     try:
-        result, pipe = _run_blocking_checked(svc, raw, max_tokens, schema)
+        # P2.2：非流式也监听 http.disconnect——客户端在 200 前断开即取消排队/
+        # abort worker，不再把请求算完（或干等 queue.request_timeout_s）。
+        outcome = await _run_blocking_disconnect(
+            request,
+            lambda **kw: _run_blocking_checked(svc, raw, max_tokens,
+                                               checked_schema, **kw),
+            supervisor=svc.supervisor)
+        if outcome is _DISCONNECTED:
+            return _client_disconnected()
+        result, pipe = outcome
     except ValueError as exc:
         return _http_error(400, "invalid_request_error", str(exc))
     except _SchemaError as exc:
+        if json_mode == "json_object":
+            # P2-1：json_object 也必须保证 content 是合法 JSON 对象；重试耗尽
+            # 后明确失败，不能把非 JSON 文本当成功返回（客户端 json.loads 崩）。
+            return _http_error(
+                422, "invalid_request_error",
+                "model output was not a valid JSON object after retries: %s"
+                % exc, code="json_object_invalid")
         return _http_error(422, "invalid_request_error",
                            "response did not match response_format.json_schema "
                            "after retries: %s" % exc, code="schema_mismatch")
@@ -174,7 +205,7 @@ def _completion_payload(svc, pipe: Pipeline, result: dict,
 
 
 @router.post("/completions")
-def completions(body: CompletionRequest, request: Request):
+async def completions(body: CompletionRequest, request: Request):
     """legacy completions：prompt 直喂 runtime（设计 §4.1 native）。
 
     流式与非流式同 chat 语义；流式用 legacy text + cmpl- id（P1-O1）。
@@ -187,7 +218,7 @@ def completions(body: CompletionRequest, request: Request):
                                             stream=streaming)
     if reject:
         return _http_error(400, "invalid_request_error",
-                           "unsupported parameter(s): %s" % ", ".join(reject),
+                           caps.reject_message(reject, raw),
                            code="unsupported_parameter",
                            param=reject[0])
     headers = {"X-RKLLM-Unsupported": ",".join(warn)} if warn else {}
@@ -212,7 +243,13 @@ def completions(body: CompletionRequest, request: Request):
     except ValueError as exc:
         return _http_error(400, "invalid_request_error", str(exc))
     try:
-        result = _run_blocking(svc, pipe)
+        # P2.2：同上，非流式断连取消。
+        result = await _run_blocking_disconnect(
+            request,
+            lambda **kw: _run_blocking(svc, pipe, **kw),
+            supervisor=svc.supervisor)
+        if result is _DISCONNECTED:
+            return _client_disconnected()
     except QueueBusy as exc:
         return _http_error(503, "server_error", BUSY_MESSAGE,
                            code="queue_full",

@@ -9,7 +9,8 @@
 #
 # 其余模型/运行参数见 /etc/default/rkllm-server-example 与
 # /etc/rkllm/rkllm.toml（优先级：内置默认 < TOML < rkllm-server.d < 本文件
-# 环境变量 < 命令行）。
+# 环境变量 < 命令行）。RKLLM_TOML 可把 TOML 换成别的文件；`.d` 部署层仍在其上
+# 生效，与优先级文档一致。
 RKLLM_MODEL=
 RKLLM_HOST=127.0.0.1
 RKLLM_PORT=8080

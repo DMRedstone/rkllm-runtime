@@ -16,13 +16,17 @@ from prometheus_client import (CollectorRegistry, Counter, Gauge, Histogram,
                                generate_latest)
 
 __all__ = ["TTFT_BUCKETS", "QUEUE_WAIT_BUCKETS", "DECODE_BUCKETS",
-           "TOK_S_BUCKETS", "new_registry", "new_histogram",
+           "INFERENCE_BUCKETS", "TOK_S_BUCKETS", "new_registry", "new_histogram",
            "new_labelled_histogram", "render_text", "scalar_registry"]
 
 TTFT_BUCKETS = (0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0)
 QUEUE_WAIT_BUCKETS = (0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
 # 解码阶段（首 token 之后到结束）：板端 4b 实测 ~5 tok/s，512 token 约 100 s
 DECODE_BUCKETS = (0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 320.0)
+# P2-4：推理阶段总时长（拿到执行槽 → 结束，**不含排队等待**）。口径与
+# queue_wait 分离：两个直方图相加 ≈ 请求总耗时，但各自可独立告警。
+INFERENCE_BUCKETS = (0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0, 80.0, 160.0,
+                     320.0, 640.0)
 # 生成速率（tok/s）：8G 板 4b 约 5、7b 约 3.5，低于 1 说明严重退化
 TOK_S_BUCKETS = (1.0, 2.0, 3.0, 4.0, 5.0, 8.0, 12.0, 20.0)
 

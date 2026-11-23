@@ -139,16 +139,24 @@ class WorkerClient:
         finally:
             self.active = False
 
-    def abort(self) -> None:
-        """给 worker 发 abort；帧里带最近一次 run 的 id（F-3，向后兼容）。"""
+    def abort(self, run_id: str | None = None) -> bool:
+        """给 worker 发 abort；`run_id` 给定时只作用于该请求。
+
+        P2.2：worker 侧已按 id 匹配；本侧对**非当前 run** 的迟到 abort 直接
+        不发帧（返回 False），不把旧请求的取消打到下一条在飞请求上。
+        """
+        if run_id is not None and run_id != self._run_id:
+            return False
+        target = run_id if run_id is not None else self._run_id
         frame: dict = {"op": OP_ABORT}
-        if self._run_id:
-            frame["id"] = self._run_id
+        if target:
+            frame["id"] = target
         with self._write_lock:
             try:
                 write_frame(self._wfile, frame)
             except OSError:
-                pass
+                return False
+        return True
 
     def close(self) -> None:
         try:
@@ -186,6 +194,12 @@ class Supervisor:
         self._client: WorkerClient | None = None
         self._lock = threading.Lock()
         self._current_backoff = self.backoff_s
+        # P2.2 自愈：健康线程不再只是把 state 置 error 等下一个请求，而是主动
+        # 拉起后台重启线程；`_recovering` 让请求路径知道「已有恢复在跑」，
+        # 等它而不是再 spawn 一次；`_restart_guard` 串行化所有重启入口。
+        self._recovering = threading.Event()
+        self._restart_guard = threading.Lock()
+        self._recover_thread: threading.Thread | None = None
         # D10：worker 在 ready 帧里报回真正 dlopen 的库指纹（server 不重复加载）
         self.lib_fingerprint: dict | None = None
 
@@ -208,6 +222,19 @@ class Supervisor:
         return addr, True
 
     def _spawn(self) -> None:
+        """启动 worker 子进程；失败路径统一回收，不留占 NPU 的孤儿（P2-2）。
+
+        此前加载超时/ready 帧失败直接 raise，`_proc` 仍存活：`serve` 退出后
+        systemd 重试会一轮轮累积正在加载/已占 NPU 的 worker。
+        """
+        try:
+            self._spawn_worker()
+        except WorkerDown:
+            self._kill_proc()
+            self._client = None
+            raise
+
+    def _spawn_worker(self) -> None:
         address, tcp = self._make_address()
         cmd = [sys.executable, "-m", "rkllm.worker.main",
                "--address", address, "--engine"] + self.worker_args
@@ -312,6 +339,28 @@ class Supervisor:
         """WorkerDown 时替代原来的 stderr.read()（那个会再次死锁）。"""
         return "".join(getattr(self, "_stderr_tail_buf", []))[-limit:]
 
+    def _kill_proc(self, *, grace_s: float = 10) -> None:
+        """terminate → wait → kill → wait 回收子进程（幂等；restart/shutdown/
+        加载失败共用）。P1-8：terminate 后必须 wait，否则旧 worker 在 C 调用里
+        会与新 worker 并存争抢 NPU，且进程变僵尸。"""
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        try:
+            if proc.poll() is not None:
+                return
+            proc.terminate()
+            try:
+                proc.wait(timeout=grace_s)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        except OSError:
+            pass
+
     def _heartbeat_expired(self, now: float | None = None) -> bool:
         """推理中超过 heartbeat_timeout_s 没有心跳 → 认为 NPU 卡死。"""
         client = self._client
@@ -338,7 +387,14 @@ class Supervisor:
                     proc = self._proc
                     if (self.state == "ready" and proc is not None
                             and proc.poll() is not None):
+                        # P2.2：进程已死不再只是置 error 等请求——主动后台重启，
+                        # 让下一个请求通常直接命中已恢复的 worker，而不是自己
+                        # 同步等一次完整模型加载（最长 load_timeout）。
                         self.state = "error"
+                        self._start_background_recovery()
+                        continue
+                    if self.state == "error" and not self._recovering.is_set():
+                        self._start_background_recovery()
                         continue
                     if self._heartbeat_expired():
                         self.metrics["worker_heartbeat_timeouts_total"] += 1
@@ -354,6 +410,8 @@ class Supervisor:
                                 pass
                         if self._client is not None:
                             self._client.close()
+                            self._client = None
+                        self._start_background_recovery()
                 except Exception as exc:
                     # M-6：心跳循环内的次级失败不能静默——留日志并计数，
                     # 让「NPU 卡死但杀进程失败」与「一切正常」可区分。
@@ -375,48 +433,135 @@ class Supervisor:
             self._start_health()
 
     def restart(self) -> None:
-        """指数退避重启；超过每小时上限停止自愈（DoD：120 s 内恢复）。"""
+        """指数退避重启；所有重启入口（请求路径/健康线程/显式调用）串行化。"""
+        with self._restart_guard:
+            self._recovering.set()
+            try:
+                self._restart_locked()
+            finally:
+                self._recovering.clear()
+
+    def _start_background_recovery(self) -> None:
+        """健康线程用：非阻塞拉起后台重启线程（已有恢复在跑则跳过）。
+
+        P2.2：崩溃恢复从「等下一个请求同步重载」改成「健康线程主动后台重启」，
+        下一个请求通常直接命中已恢复的 worker，而不是自己等一次完整
+        `load_timeout`；若请求恰好撞上恢复，`_client_for_request` 等它完成。
+        """
+        if self._recovering.is_set():
+            return
+        now = time.monotonic()
+        # 配额用尽时保持 error，避免每个 health tick 都拉一个注定失败的线程；
+        # 过了一小时窗口后自然恢复重试。
+        if len([t for t in self.restarts if now - t < 3600]) >= \
+                self.restart_max_per_hour:
+            return
+        if not self._restart_guard.acquire(blocking=False):
+            return
+
+        def _run() -> None:
+            self._recovering.set()
+            try:
+                self._restart_locked()
+            except WorkerDown as exc:
+                log.error("后台 worker 恢复失败：%s", exc)
+                self.state = "error"
+            finally:
+                self._recovering.clear()
+                self._restart_guard.release()
+
+        self._recover_thread = threading.Thread(
+            target=_run, daemon=True, name="rkllm-recover")
+        self._recover_thread.start()
+
+    def _restart_locked(self) -> None:
+        """真正重启（调用方须持有 `_restart_guard` 且已置 `_recovering`）。"""
+        if self._health_stop.is_set():      # 已 shutdown：后台恢复不得再拉起 worker
+            self.state = "stopped"
+            raise WorkerDown("supervisor is shutting down")
         now = time.monotonic()
         self.restarts = [t for t in self.restarts if now - t < 3600]
+        # 另一个入口刚恢复成功：不要重复 spawn（会白杀健康 worker 再等一次加载）。
+        if (self.state == "ready" and self._proc is not None
+                and self._proc.poll() is None and self._client is not None):
+            return
         if len(self.restarts) >= self.restart_max_per_hour:
             self.state = "error"
             raise WorkerDown("restart limit reached (%d/h)" % self.restart_max_per_hour)
         self.metrics["worker_restarts_total"] += 1
+        self.state = "loading"
         if self._client:
             self._client.close()
-        if self._proc and self._proc.poll() is None:
-            # P1-8：terminate 后必须 wait，否则旧 worker 卡在 C 调用时会与新 worker
-            # 并存并争抢同一 NPU，且已 terminate 的进程成僵尸；超时则 kill 再 wait。
-            try:
-                self._proc.terminate()
-                self._proc.wait(timeout=10)
-            except (OSError, subprocess.TimeoutExpired):
-                try:
-                    self._proc.kill()
-                    self._proc.wait(timeout=5)
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
+            self._client = None
+        self._kill_proc()
         delay = self._current_backoff
         self._current_backoff = min(self._current_backoff * 2, self.backoff_max_s)
         time.sleep(delay)
-        with self._lock:
-            self._spawn()
+        if self._health_stop.is_set():      # 退避期间被 shutdown：不得再 spawn
+            self.state = "stopped"
+            raise WorkerDown("supervisor is shutting down")
+        try:
+            with self._lock:
+                self._spawn()
+        except WorkerDown:
+            self.state = "error"
+            raise
+        if self._health_stop.is_set():      # spawn 期间被 shutdown：回收新 worker
+            self._kill_proc()
+            self._client = None
+            self.state = "stopped"
+            raise WorkerDown("supervisor is shutting down")
         self.restarts.append(time.monotonic())
+        # 恢复成功后退避复位（审计：此前成功恢复不退避，短时间再崩首次等待会
+        # 继承已翻倍的值）。
+        self._current_backoff = self.backoff_s
 
-    def execute(self, prompt: str, **kwargs) -> Iterator[str]:
+    def _wait_recovery(self) -> None:
+        """等后台恢复结束（有上限）；超时则视为恢复失败。"""
+        deadline = (time.monotonic() + self.load_timeout_s
+                    + self.backoff_max_s + 30)
+        while self._recovering.is_set() and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+    def _client_for_request(self):
+        """请求路径取可用 client：健康线程正在恢复时等它，避免重复加载。"""
+        if self._recovering.is_set():
+            self._wait_recovery()
+            client = self._client
+            if client is not None and self.state == "ready":
+                return client
+            raise WorkerDown("worker recovery failed or timed out")
+        self.restart()
+        client = self._client
+        if client is None or self.state != "ready":
+            raise WorkerDown("worker not ready after restart")
+        return client
+
+    def execute(self, prompt: str, *, request_timeout_s: int | None = None,
+                **kwargs) -> Iterator[str]:
         """带自愈的执行入口：连接失效时重启一次再抛（由路由转 503）。
 
         kwargs 原样透传（role / enable_thinking / max_new_tokens / sampling /
-        request_timeout_s）——采样参数由 Pipeline 合成后经这里下发到 worker。
+        lora）——采样参数由 Pipeline 合成后经这里下发到 worker。
+
+        P2.2：`request_timeout_s`（= `queue.request_timeout_s`）此前只进了
+        `WorkerClient.run` 的逐帧 deadline，socket 读超时仍是构造时的默认
+        900s——配置更小值时「卡死请求」仍要等 900s 才被 WorkerDown。这里把
+        每请求超时同步落到 supervisor 与连接读超时上。
         """
         client = self._client
         if client is None or self.state != "ready":
-            self._current_backoff = self.backoff_s
+            client = self._client_for_request()
+        timeout = int(request_timeout_s or self.request_timeout_s or 900)
+        if timeout != self.request_timeout_s:
+            self.request_timeout_s = timeout
+        conn = getattr(client, "conn", None)
+        if conn is not None:
             try:
-                self.restart()
-            except WorkerDown:
-                raise
-            client = self._client
+                conn.settimeout(timeout)
+            except OSError:
+                pass
+        kwargs["request_timeout_s"] = timeout
         try:
             yield from client.run(prompt, **kwargs)
         except (RequestFailed, RequestAborted):
@@ -424,28 +569,32 @@ class Supervisor:
             # （RequestAborted 继承 WorkerDown，必须在这里先拦下）。
             raise
         except WorkerDown:
+            if self._health_stop.is_set():      # 已 shutdown：不要重启/覆盖 stopped
+                raise
             self.state = "loading"
             try:
-                self.restart()
+                if self._recovering.is_set():
+                    # 健康线程已在后台重载：等它，不重复 spawn
+                    self._wait_recovery()
+                    if self.state != "ready":
+                        raise WorkerDown("worker recovery failed")
+                else:
+                    self.restart()
             except WorkerDown:
                 self.state = "error"
             raise
 
-    def abort(self) -> None:
+    def abort(self, run_id: str | None = None) -> None:
         if self._client:
-            self._client.abort()
+            self._client.abort(run_id)
 
     def shutdown(self) -> None:
         self._health_stop.set()
         self.state = "stopped"
         if self._client:
             self._client.close()
-        if self._proc and self._proc.poll() is None:
-            try:
-                self._proc.terminate()
-                self._proc.wait(timeout=10)
-            except (OSError, subprocess.TimeoutExpired):
-                self._proc.kill()
+            self._client = None
+        self._kill_proc()
 
 
 class LocalSupervisor:

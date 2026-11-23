@@ -122,10 +122,12 @@ class TokenStream:
     `STREAM_DONE` 收尾。`cancel()` 供断连或异常收尾调用。
     """
 
-    def __init__(self, svc, pipe, *, name: str = "sse-pump"):
+    def __init__(self, svc, pipe, *, name: str = "sse-pump",
+                 on_slot_acquired=None):
         self.svc = svc
         self.pipe = pipe
         self.name = name
+        self.on_slot_acquired = on_slot_acquired
         self.token = CancelToken(getattr(svc, "supervisor", None))
         self.settled = False           # 调用方已完成收尾（错误帧路径）
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -154,6 +156,12 @@ class TokenStream:
     def _on_slot_acquired(self) -> None:
         """queue.run 拿到执行槽：从这一刻起才允许 abort worker。"""
         self.token.hold_slot()
+        if self.on_slot_acquired is not None:
+            try:
+                self.on_slot_acquired()
+            except Exception:
+                # 计时回调失败不能影响推理/取消主路径
+                pass
 
     def _on_slot_releasing(self) -> None:
         """queue.run 即将归还执行槽（此刻槽仍归本请求）：补一次 abort 尝试。

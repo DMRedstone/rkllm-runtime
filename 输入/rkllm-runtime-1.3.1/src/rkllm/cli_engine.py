@@ -10,7 +10,13 @@ import os
 import sys
 
 __all__ = ["_resolve_model_path", "_apply_memory_budget", "_build_supervisor",
-           "_make_engine", "_search_dirs"]
+           "_make_engine", "_search_dirs", "_heartbeat_grace_s"]
+
+# P2.2：prefill 心跳宽限期不新增 SCHEMA 键（保持 84/85 口径），来源：
+# 运行时环境变量 > 由现有 heartbeat_timeout_s 派生（默认 20s → 120s）。
+HEARTBEAT_GRACE_ENV = "RKLLM_HEARTBEAT_GRACE_S"
+_HEARTBEAT_GRACE_FACTOR = 2.0
+_HEARTBEAT_GRACE_MIN_S = 120.0
 
 
 def _resolve_model_path(path: str, search_dirs) -> str:
@@ -45,6 +51,35 @@ def _apply_memory_budget(cfg) -> None:
         sys.stderr.write("[rkllm] 警告：内存不足，context 已从 %d 降到 %d\n"
                          % (cfg.model.context, plan.context))
         cfg.values["model.context"] = plan.context
+def _heartbeat_grace_s(cfg) -> float:
+    """worker prefill 心跳宽限期（秒）。
+
+    P2.2：此前 supervisor 从不传 `--heartbeat-grace-s`，worker 用硬编码 120s
+    ——27B/长上下文 prefill 超过 120s 就会被心跳看门狗按"卡死"误杀。为保持
+    84/85 键口径**不新增 SCHEMA 键**，使用两层来源：
+
+    1. 运行时环境变量 `RKLLM_HEARTBEAT_GRACE_S`（显式覆盖，改环境即可，无需
+       改配置键/文档键表）；
+    2. 否则由现有 `engine.heartbeat_timeout_s` 派生：`max(120, 2×timeout)`。
+       默认 timeout=20s → 120s（出厂行为不变）；调大 timeout 的运维通常也在
+       容忍更长的无声 prefill，宽限期按 2 倍跟随。
+    """
+    raw = os.environ.get(HEARTBEAT_GRACE_ENV)
+    if raw is not None and raw.strip():
+        try:
+            value = float(raw)
+        except ValueError:
+            sys.stderr.write("[rkllm] 忽略非法 %s=%r（需秒数，回退派生值）\n"
+                             % (HEARTBEAT_GRACE_ENV, raw))
+        else:
+            if value >= 0:
+                return value
+            sys.stderr.write("[rkllm] 忽略非法 %s=%r（不能为负，回退派生值）\n"
+                             % (HEARTBEAT_GRACE_ENV, raw))
+    return max(_HEARTBEAT_GRACE_MIN_S,
+               _HEARTBEAT_GRACE_FACTOR * float(cfg.engine.heartbeat_timeout_s))
+
+
 def _build_supervisor(cfg, *, use_fake: bool):
     from .platform import derive_class, resolve_platform
     # P1-C2：无内置档位（8b/14b/27b/未知）不能把 0 传给 worker 的 argparse，
@@ -84,7 +119,7 @@ def _build_supervisor(cfg, *, use_fake: bool):
                 lora_paths=list(getattr(cfg.model, "lora_paths", ()) or ()))
         supervisor = LocalSupervisor(engine,
                                      load_timeout_s=cfg.engine.load_timeout_s)
-        supervisor.start()
+        _start_supervisor(supervisor)
         return supervisor
 
     from .server.supervisor import Supervisor
@@ -104,12 +139,18 @@ def _build_supervisor(cfg, *, use_fake: bool):
         if cfg.cache.enabled:
             worker_args += ["--cache-dir", cfg.cache.dir,
                             "--cache-max-mb", str(cfg.cache.max_mb),
-                            "--cache-ttl-s", str(cfg.cache.ttl_s)]
+                            "--cache-ttl-s", str(cfg.cache.ttl_s),
+                            "--cache-similarity", str(cfg.cache.similarity)]
         # LoRA：adapter 在 worker 里 init 之后加载（handle 级）
         for lora in getattr(cfg.model, "lora_paths", ()) or ():
             worker_args += ["--lora-path", lora]
     worker_args += ["--heartbeat-interval",
-                    str(cfg.engine.heartbeat_interval_s)]
+                    str(cfg.engine.heartbeat_interval_s),
+                    # P2.2：prefill 宽限期由 server 显式下发（env 覆盖或按
+                    # heartbeat_timeout_s 派生），worker 不再依赖 argparse
+                    # 里的硬编码默认值。
+                    "--heartbeat-grace-s",
+                    str(_heartbeat_grace_s(cfg))]
     supervisor = Supervisor(
         worker_args,
         load_timeout_s=cfg.engine.load_timeout_s,
@@ -118,7 +159,7 @@ def _build_supervisor(cfg, *, use_fake: bool):
         restart_max_per_hour=cfg.engine.restart_max_per_hour,
         health_interval_s=cfg.engine.health_interval_s,
         heartbeat_timeout_s=cfg.engine.heartbeat_timeout_s)
-    supervisor.start()
+    _start_supervisor(supervisor)
     return supervisor
 def _make_engine(args):
     from .platform import resolve_platform
@@ -141,3 +182,18 @@ def _search_dirs(extra) -> list[str]:
         if os.path.isdir(item) and item not in dirs:
             dirs.append(item)
     return dirs
+
+
+def _start_supervisor(supervisor) -> None:
+    """启动 supervisor；失败时先 shutdown 再抛出（P2.3 启动失败清理）。
+
+    `start()` 可能已经 spawn 了 worker 子进程，然后在"等待就绪"阶段超时/报错：
+    直接向上抛会把子进程留给 init 收养，它仍抱着 NPU 句柄与显存，下一次启动
+    直接失败（且没有任何地方能看到这个孤儿）。shutdown() 是 supervisor 的既有
+    清理路径，这里只保证异常路径也走到它。
+    """
+    try:
+        supervisor.start()
+    except BaseException:
+        supervisor.shutdown()
+        raise

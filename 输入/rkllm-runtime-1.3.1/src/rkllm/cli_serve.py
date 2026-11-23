@@ -56,7 +56,10 @@ def _cmd_serve(args) -> int:
     try:
         cfg = load_config(file=os.environ.get("RKLLM_TOML") or None,
                           cli=_legacy_cli_overrides(args),
-                          require_model_path=True)
+                          require_model_path=True,
+                          # `.d` 是 TOML 之上的部署层：即使 RKLLM_TOML 显式换了
+                          # TOML 文件也照读（与文档里的优先级链一致）。
+                          use_dropins=True)
     except ConfigError as exc:
         sys.stderr.write(str(exc) + "\n")
         return 2
@@ -104,23 +107,30 @@ def _cmd_serve(args) -> int:
         return 2
     _apply_memory_budget(cfg)
 
-    supervisor = _build_supervisor(cfg, use_fake=use_fake)
-    # 锁频：默认开（板端供电场景），非 root 或 sysfs 不支持时只告警
-    freq_lock = apply_freq_lock(bool(cfg.model.freq_lock), cfg.model.freq_helper)
-
-    app = create_app(cfg, supervisor=supervisor)
-    if getattr(args, "system", None):
-        app.state.svc.system_prompt = args.system
-    app.state.svc.default_sampling = _sampling_from_args(args)
-
-    # 横幅里的 api key 状态来自 auth.auth_status()（解析后的真实状态）；
-    # 非回环 + 无 key 的部署已在 load_config 的 fail-closed 校验里拒绝启动，
-    # 不再"warning 后照常监听 0.0.0.0"（P1-S1）。
-    sys.stderr.write(_startup_banner(cfg, app.state.svc.model_name,
-                                     app.state.svc.model_class))
-
-    tls = bool(cfg.server.tls_cert and cfg.server.tls_key)
+    # 启动链从 spawn worker / 锁频开始就持有系统资源；之后的任何一步（create_app
+    # 构造、横幅、uvicorn 起来前的配置错误、按键）失败都必须收尾。旧实现把
+    # try/finally 只包在 uvicorn.run 外层，create_app/apply_freq_lock 抛错时
+    # worker 会变成孤儿并抱着 NPU，锁频也不会恢复（P2.3）。
+    supervisor = None
+    freq_lock = None
     try:
+        supervisor = _build_supervisor(cfg, use_fake=use_fake)
+        # 锁频：默认开（板端供电场景），非 root 或 sysfs 不支持时只告警
+        freq_lock = apply_freq_lock(bool(cfg.model.freq_lock),
+                                    cfg.model.freq_helper)
+
+        app = create_app(cfg, supervisor=supervisor)
+        if getattr(args, "system", None):
+            app.state.svc.system_prompt = args.system
+        app.state.svc.default_sampling = _sampling_from_args(args)
+
+        # 横幅里的 api key 状态来自 auth.auth_status()（解析后的真实状态）；
+        # 非回环 + 无 key 的部署已在 load_config 的 fail-closed 校验里拒绝启动，
+        # 不再"warning 后照常监听 0.0.0.0"（P1-S1）。
+        sys.stderr.write(_startup_banner(cfg, app.state.svc.model_name,
+                                         app.state.svc.model_class))
+
+        tls = bool(cfg.server.tls_cert and cfg.server.tls_key)
         uvicorn.run(
             app, host=cfg.server.bind_host, port=cfg.server.port,
             log_level=cfg.logging.level,
@@ -134,6 +144,8 @@ def _cmd_serve(args) -> int:
             ssl_keyfile=cfg.server.tls_key if tls else None,
         )
     finally:
-        freq_lock.restore()          # 退出恢复原 governor 与频率
-        supervisor.shutdown()
+        if freq_lock is not None:
+            freq_lock.restore()          # 退出恢复原 governor 与频率
+        if supervisor is not None:
+            supervisor.shutdown()        # 杀掉 worker，绝不留孤儿持 NPU
     return 0

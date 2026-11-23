@@ -16,15 +16,46 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
+import urllib.parse
 from pathlib import Path
 
 from .backend import BackendError, HttpBackend, LocalBackend
+from .protocol import PROTOCOL_VERSIONS, normalize_supported_versions
 from .stdio import StdioServer
 
-DEFAULT_PROTOCOL_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18",
-                             "2024-11-05")
+DEFAULT_PROTOCOL_VERSIONS = PROTOCOL_VERSIONS
+DEFAULT_ENDPOINT = "http://127.0.0.1:8080/v1"
+
+# 值域校验表（P2.5）：TOML/env 里数值越界或非有限值统一回退默认并告警，
+# 不再让 `inf`/`1e400`/0 之类的值在运行期制造 OverflowError/死循环。
+_CFG_RANGES: dict[str, tuple[float, float]] = {
+    "client_timeout_s": (5, 3600),          # 转 job 阈值的客户端约束
+    "target_timeout_s": (5, 4200),
+    "default_max_tokens": (1, 8192),
+    "max_result_chars": (1000, 200000),
+    "batch_max_segments": (1, 100),
+    "extract_retries": (0, 5),
+    "job_ttl_s": (60, 3600),
+    "job_max": (1, 64),
+    "job_poll_hint_s": (1, 30),
+    "progress_interval_s": (0, 30),
+    "session_max_messages": (0, 1000),
+    "session_max_count": (1, 4096),
+    "session_ttl_s": (0, 86400),
+    "max_concurrent": (1, 32),
+    "default_temperature": (0.0, 2.0),
+}
+# 枚举校验表（与板端 config.py 的 choices 对齐）
+_CFG_ENUMS: dict[str, tuple[str, ...]] = {
+    "task_mode": ("auto", "always", "never"),
+    "backend": ("auto", "http", "local"),
+    "transport": ("stdio", "http"),
+}
+# 连接器实际实现的 6 个工具短名（mcp.tools 只认这些）
+_TOOL_SHORT = ("ask", "chat", "extract", "batch", "status", "job")
 
 
 def default_config_path() -> str:
@@ -126,12 +157,21 @@ def load_cfg() -> dict:
     if "RKLLM_API_KEY" in os.environ:
         cfg["api_key"] = cfg["target_api_key"] = os.environ["RKLLM_API_KEY"]
     # P1-4：TOML/env 值都是字符串，按 schema 类型归一化，避免 "45" 直达比较逻辑
-    _coerce_cfg_types(cfg)
+    # P2.5：再补值域/枚举/端点校验；所有问题一次性写 stderr，不崩启动。
+    problems = _coerce_cfg_types(cfg)
+    problems.extend(_validate_cfg(cfg))
+    for problem in problems:
+        sys.stderr.write("[rkllm-mcp] 配置项不可用，已回退默认：%s\n" % problem)
     return cfg
 
 
-def _coerce_cfg_types(cfg: dict) -> None:
-    """P1-4：按 default_cfg 的类型模板归一化；不合法值回退默认（绝不带坏类型）。"""
+def _coerce_cfg_types(cfg: dict) -> list[str]:
+    """按 default_cfg 的类型模板归一化；不合法值回退默认（绝不带坏类型）。
+
+    P2.5：`int(inf)` 抛的是 OverflowError（不是 ValueError），TOML 合法字面量
+    `inf`/`1e400` 会让旧实现启动直接 traceback。这里统一捕获并记录问题。
+    """
+    problems: list[str] = []
     for key, default in default_cfg("", "").items():
         if key not in cfg:
             continue
@@ -141,16 +181,105 @@ def _coerce_cfg_types(cfg: dict) -> None:
                 if not isinstance(val, bool):
                     cfg[key] = str(val).strip().lower() in ("1", "true", "yes", "on")
             elif isinstance(default, int):
+                if isinstance(val, float) and not math.isfinite(val):
+                    raise OverflowError("非有限数值")
                 cfg[key] = int(val)
             elif isinstance(default, float):
                 cfg[key] = float(val)
+                if not math.isfinite(cfg[key]):
+                    raise ValueError("非有限数值")
             elif isinstance(default, list):
                 if isinstance(val, str):
                     cfg[key] = [s.strip() for s in val.split(",") if s.strip()]
+                elif not isinstance(val, list):
+                    raise ValueError("需为数组")
             else:
                 cfg[key] = str(val)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError) as exc:
+            problems.append("%s=%r 类型非法（%s），回退 %r"
+                            % (key, val, exc, default))
             cfg[key] = default
+    return problems
+
+
+def _valid_endpoint(value: str) -> bool:
+    try:
+        parts = urllib.parse.urlsplit(value or "")
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
+
+
+def _validate_cfg(cfg: dict) -> list[str]:
+    """值域/枚举/端点/版本列表校验；返回问题列表（调用方统一写 stderr）。
+
+    只改"不可用"的值：合法配置原样保留（用户自定值不被悄悄改写）。
+    """
+    problems: list[str] = []
+    defaults = default_cfg(DEFAULT_ENDPOINT, "")
+    for key, (lo, hi) in _CFG_RANGES.items():
+        value = cfg.get(key, defaults[key])
+        valid = (isinstance(value, (int, float)) and not isinstance(value, bool)
+                 and math.isfinite(float(value))
+                 and lo <= float(value) <= hi)
+        if not valid:
+            problems.append("%s=%r 超出允许范围 [%s, %s]，回退 %r"
+                            % (key, value, lo, hi, defaults[key]))
+            cfg[key] = defaults[key]
+        elif isinstance(defaults[key], int) and not isinstance(value, int):
+            # TOML `45.0` 是合法浮点；整型配置项按整数存，避免下游类型漂移
+            cfg[key] = int(value)
+    for key, choices in _CFG_ENUMS.items():
+        value = cfg.get(key)
+        if value not in choices:
+            problems.append("%s=%r 不是合法枚举（%s），回退 %r"
+                            % (key, value, "/".join(choices), defaults[key]))
+            cfg[key] = defaults[key]
+    endpoint = str(cfg.get("endpoint") or "")
+    if not _valid_endpoint(endpoint):
+        problems.append("target_endpoint=%r 不是 http(s) URL，回退 %r"
+                        % (endpoint, DEFAULT_ENDPOINT))
+        endpoint = DEFAULT_ENDPOINT
+    cfg["endpoint"] = cfg["target_endpoint"] = endpoint
+    cfg["api_key"] = str(cfg.get("api_key") or "")
+    cfg["target_api_key"] = cfg["api_key"]
+
+    # protocol_versions：过滤未知版本、去重、保持新→旧顺序；空/非法回默认四版
+    raw_versions = cfg.get("protocol_versions")
+    if isinstance(raw_versions, str):
+        raw_versions = [s.strip() for s in raw_versions.split(",") if s.strip()]
+    if isinstance(raw_versions, (list, tuple)):
+        raw_list = [str(v).strip() for v in raw_versions]
+        normalized = normalize_supported_versions(raw_list)
+        if list(normalized) != raw_list:
+            problems.append("protocol_versions=%r 含未知/重复版本，收敛为 %r"
+                            % (raw_list, list(normalized)))
+        cfg["protocol_versions"] = list(normalized)
+    else:
+        problems.append("protocol_versions 需为数组，回退默认四版")
+        cfg["protocol_versions"] = list(DEFAULT_PROTOCOL_VERSIONS)
+
+    # tools：短名列表；未知工具名告警并丢弃（mcp.tools 只实现了 6 个）
+    tools = cfg.get("tools")
+    if isinstance(tools, str):
+        tools = [s.strip() for s in tools.split(",") if s.strip()]
+    if isinstance(tools, (list, tuple)):
+        cleaned = [str(t).strip() for t in tools if str(t).strip()]
+        unknown = [t for t in cleaned if t not in _TOOL_SHORT]
+        if unknown:
+            problems.append("tools 含未实现的工具 %r，已忽略" % unknown)
+        cfg["tools"] = [t for t in cleaned if t in _TOOL_SHORT]
+    else:
+        problems.append("tools 需为数组，回退空=全部启用")
+        cfg["tools"] = []
+
+    prefix = str(cfg.get("tool_prefix") or "")
+    if not prefix.strip():
+        problems.append("tool_prefix 不能为空，回退 %r" % defaults["tool_prefix"])
+        cfg["tool_prefix"] = defaults["tool_prefix"]
+    else:
+        cfg["tool_prefix"] = prefix
+    return problems
 
 
 def build_server(cfg: dict | None = None) -> StdioServer:

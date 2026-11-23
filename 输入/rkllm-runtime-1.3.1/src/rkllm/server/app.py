@@ -1,7 +1,7 @@
 """FastAPI 组装 + 优雅退出（改造设计 §6.2 / D11）。
 
 中间件实际顺序（**由外到内**）：
-request_id → CORS → 请求体上限 → 鉴权。
+request_id → CORS → 请求体上限 (+ 鉴权前置) → 鉴权。
 
 注意方向：`app.middleware("http")` 内部是 `add_middleware`，而它是
 `insert(0)`——**后注册的在更外层**，所以执行顺序与本文件里注册的顺序相反
@@ -11,17 +11,17 @@ request_id → CORS → 请求体上限 → 鉴权。
 2. CORS：OPTIONS 预检必须在鉴权之前放行——浏览器的预检请求不带
    Authorization，若被鉴权拦下，跨域客户端整体不可用；
 3. 请求体上限（server.max_body_bytes）：含 chunked 的流式计数；
+   **P2-4 鉴权前置**：在读取 body 之前先按同样的 Bearer 规则校验一次，
+   未授权直接 401、不读 body（chunked 请求此前会先被整段缓冲，未授权的
+   慢体/大 body 可无凭据占用内存与连接）；`/ready` 豁免、未启用鉴权时不变；
 4. 鉴权（N4，最内层）：默认拒绝，仅 `/ready` 豁免；api_key 为空时不启用。
-
-取舍：体限在鉴权外层，未授权的超大 body 会先拿到 413 而不是 401。这是既有
-顺序的代价（把体限挪到鉴权内层需要重排中间件，而 CORS 必须留在鉴权之外
-以保证预检放行）。
 
 运维端点 /metrics 的路径与开关来自 metrics.enabled / metrics.path。
 """
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -30,7 +30,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .. import VERSION
-from .auth import auth_status, make_auth_middleware
+from .auth import (EXEMPT_PATHS, auth_status, make_auth_middleware,
+                   resolve_api_key)
 from .errors import install_handlers as install_error_handlers
 from .logsetup import request_id_var
 from .state import ServiceState
@@ -73,28 +74,66 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
         # -- 鉴权（最内层）--------------------------------------------------
         # 即使未启用鉴权也挂中间件：它负责在响应头标注 enabled/disabled；
         # 构造时 strict 解析 key 文件，文件在 load_config 后消失也会拒绝启动。
+        expected_key = resolve_api_key(cfg, strict=True)
         auth = make_auth_middleware(cfg)
         app.state.auth = getattr(auth, "auth_state", None) or auth_status(cfg)
         if auth is not None:
             app.middleware("http")(auth)
 
-        # -- 请求体上限 ------------------------------------------------------
+        # -- 请求体上限（含 P2-4 鉴权前置）------------------------------------
         max_body = int(cfg.server.max_body_bytes)
+        _bearer_prefix = "bearer "
+
+        def _authorized(request: Request) -> bool:
+            """与 auth 中间件同口径的 Bearer 校验（未启用鉴权恒 True）。"""
+            if not expected_key:
+                return True
+            header = request.headers.get("authorization", "")
+            if header[:len(_bearer_prefix)].lower() != _bearer_prefix:
+                return False
+            token = header[len(_bearer_prefix):].strip()
+            return bool(token) and hmac.compare_digest(
+                token.encode("utf-8"), expected_key.encode("utf-8"))
+
+        def _early_unauthorized() -> JSONResponse:
+            state = app.state.auth or {}
+            return JSONResponse(
+                {"error": {"type": "authentication_error",
+                           "message": "missing or invalid API key",
+                           "param": None, "code": "invalid_api_key"}},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer",
+                         "X-RKLLM-Auth": "enabled",
+                         "X-RKLLM-Auth-Source": state.get("source", "none")})
 
         async def body_limit(request: Request, call_next):
+            method = request.method
+            # 先鉴权再读体：chunked 请求没有 Content-Length，旧实现会先
+            # `request.stream()` 整段缓冲，未授权的慢体/大 body 可以无凭据
+            # 占用内存与连接。这里在任何 body 读取之前挡下（/ready 豁免）。
+            if method in ("POST", "PUT", "PATCH") \
+                    and request.url.path not in EXEMPT_PATHS \
+                    and not _authorized(request):
+                return _early_unauthorized()
             declared = request.headers.get("content-length")
             if declared:
                 try:
                     if int(declared) > max_body:
                         return JSONResponse(
-                            {"error": {"type": "invalid_request_error",
-                                       "message": "request body exceeds %d bytes"
-                                                  % max_body}},
+                            {"error": {
+                                "type": "invalid_request_error",
+                                "message": "request body exceeds %d bytes"
+                                           % max_body,
+                                "param": None,
+                                "code": "request_too_large"}},
                             status_code=413)
                 except ValueError:
                     return JSONResponse(
-                        {"error": {"type": "invalid_request_error",
-                                   "message": "invalid Content-Length"}},
+                        {"error": {
+                            "type": "invalid_request_error",
+                            "message": "invalid Content-Length",
+                            "param": None,
+                            "code": "invalid_content_length"}},
                         status_code=400)
             elif request.method in ("POST", "PUT", "PATCH"):
                 # P2：chunked / 无 Content-Length 时旧逻辑直接放行，可绕过上限。
@@ -105,9 +144,12 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
                     body.extend(chunk)
                     if len(body) > max_body:
                         return JSONResponse(
-                            {"error": {"type": "invalid_request_error",
-                                       "message": "request body exceeds %d bytes"
-                                                  % max_body}},
+                            {"error": {
+                                "type": "invalid_request_error",
+                                "message": "request body exceeds %d bytes"
+                                           % max_body,
+                                "param": None,
+                                "code": "request_too_large"}},
                             status_code=413)
                 request._body = bytes(body)
             return await call_next(request)
@@ -205,14 +247,32 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
 
     @app.exception_handler(_StarletteHTTPException)
     async def http_error(request: Request, exc: _StarletteHTTPException):
-        # M-9：未知路径/HTTP 错误不再落框架 {"detail": ...}，统一成 OpenAI 形状。
-        # 仅 404 改为 error 对象（其余状态码保持 {"detail": ...} 以免影响既有契约）。
-        if exc.status_code == 404:
-            return JSONResponse({"error": {"type": "invalid_request_error",
-                                           "message": "未知端点：%s" % request.url.path}},
-                                status_code=404)
-        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code,
-                            headers=getattr(exc, "headers", None))
+        # P2-1：框架层 HTTP 错误（404/405/其它）一律 OpenAI 形状。
+        # 此前只有 404 转换，405 仍是 Starlette `{"detail": "Method Not Allowed"}`
+        # ——OpenAI 客户端读不到 error.type/message，重试/降级逻辑无从判断。
+        status = int(getattr(exc, "status_code", 500) or 500)
+        detail = getattr(exc, "detail", None)
+        message = detail if isinstance(detail, str) and detail else ""
+        if status == 404:
+            err_type, code = "invalid_request_error", "unknown_endpoint"
+            message = "未知端点：%s" % request.url.path
+        elif status == 405:
+            err_type, code = "invalid_request_error", "method_not_allowed"
+            message = "method not allowed: %s %s" % (request.method,
+                                                     request.url.path)
+        elif status == 401:
+            err_type, code = "authentication_error", "invalid_api_key"
+            message = message or "missing or invalid API key"
+        elif 400 <= status < 500:
+            err_type, code = "invalid_request_error", None
+            message = message or "invalid request"
+        else:
+            err_type, code = "server_error", "http_error"
+            message = message or "internal server error"
+        return JSONResponse(
+            {"error": {"type": err_type, "message": message,
+                       "param": None, "code": code}},
+            status_code=status, headers=getattr(exc, "headers", None))
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception):
@@ -220,7 +280,9 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
         import logging
         logging.getLogger("rkllm.server").exception("unhandled: %s", exc)
         return JSONResponse({"error": {"type": "server_error",
-                                       "message": str(exc)[:300]}}, status_code=500)
+                                       "message": str(exc)[:300],
+                                       "param": None,
+                                       "code": "internal_error"}}, status_code=500)
 
     # 参数校验失败：FastAPI 默认 422 {"detail": ...}；改注册为 OpenAI 400 形状。
     install_error_handlers(app)

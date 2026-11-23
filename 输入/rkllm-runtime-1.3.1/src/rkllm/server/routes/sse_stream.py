@@ -24,11 +24,12 @@ __all__ = ["stream_events"]
 def stream_events(request: Request, svc, pipe, session: SseSession, raw: dict, *,
                   first_role: str | None = "assistant", trailing: bool = True):
     """返回 SSE 异步生成器：首帧 → 增量(含心跳) → finish → usage → [DONE]。"""
-    stream = TokenStream(svc, pipe, name="sse-pump")
+    timer = StreamTimer()
+    stream = TokenStream(svc, pipe, name="sse-pump",
+                         on_slot_acquired=timer.slot_acquired)
     heartbeat_s = max(1, int(svc.stream_heartbeat_s))
 
     async def generate():
-        timer = StreamTimer()
         yield session.first_frame(role=first_role)
         truncated = False
         async for kind, item in iterate_stream(request, stream, heartbeat_s):
@@ -54,6 +55,11 @@ def stream_events(request: Request, svc, pipe, session: SseSession, raw: dict, *
             if isinstance(item, dict):
                 if item.get("truncated"):
                     truncated = True
+                # P2-1：思考阶段的增量在生成时就下发（reasoning_content /
+                # reasoning delta），不再等 trailing_frames 在正文后一次性回填。
+                delta_reasoning = item.get("reasoning_delta")
+                if delta_reasoning and session.reasoning_field != "none":
+                    yield session.delta_frame(reasoning=delta_reasoning)
                 continue                        # 管线元数据（tool_calls 等）
             timer.first_token()
             yield session.delta_frame(content=item)

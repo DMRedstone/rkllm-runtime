@@ -150,7 +150,7 @@ def _selftest_http() -> list[tuple[str, bool, str]]:
     port = probe.getsockname()[1]
     probe.close()
 
-    cfg = load_config(env={"RKLLM_API_KEY": key})
+    cfg = load_config(env={"RKLLM_API_KEY": key}, system=False)  # 隔离板端 TOML/.d
     app = create_app(cfg, supervisor=LocalSupervisor(FakeEngine()))
     server = uvicorn.Server(uvicorn.Config(
         app, host="127.0.0.1", port=port, log_level="warning",
@@ -269,7 +269,12 @@ def _cmd_config(args) -> int:
             fh.write(config_init(target))
         print("已写入 %s（%s 模板）" % (path, target))
         return 0
-    cfg = load_config(file=args.config, require_model_path=False)
+    # 与 `rkllm serve` 同源的装配：--config 或 RKLLM_TOML 决定 TOML 层，`.d`
+    # 仍是其上的部署覆盖层（文档优先级：TOML < .d）。这样 `config show` 打印
+    # 的就是 serve 真正会用的生效值与来源，而不是另一套语义。
+    cfg = load_config(file=args.config or os.environ.get("RKLLM_TOML") or None,
+                      require_model_path=False,
+                      use_dropins=True)
     if args.action == "show":
         print(config_show(cfg, as_json=args.json))
         return 0

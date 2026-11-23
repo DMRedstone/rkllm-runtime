@@ -1,8 +1,17 @@
 name: ci
 
 # 服务器的回归门禁：不依赖板端/NPU（测试用 FakeEngine 与桩 supervisor），
-# 因此可以在 GitHub 的普通 runner 上跑。打包校验（make_deb/verify_deb）需要
-# 上游 tarball 与 dpkg，属发布流程，不在这里做。
+# 因此可以在 GitHub 的普通 runner 上跑。
+#
+# 两类作业：
+#   test          —— 真实路径 pytest（服务端 + 测试工具链）+ golden 基线 +
+#                    MCP 四版本协议一致性；
+#   release-check —— 不跑 pytest，只跑发布门禁：caps 文档一致性、纯 Python
+#                    打包（--packer ar，不需要 dpkg-deb）、verify_deb 结构
+#                    自检、release_check（版本/changelog 全条目/键数/deb）。
+#
+# P1-R1/P1-R2 的教训：只跑 pytest 拦不住"changelog 两条同版本"、"tag 指向
+# 旧版本"这类发布问题，所以发布门禁必须进 CI。
 
 on:
   push:
@@ -10,19 +19,18 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.13"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.13"
 
       - name: Install runtime + test dependencies
         run: |
@@ -39,3 +47,40 @@ jobs:
       - name: Test-toolchain suite
         working-directory: 工具/大模型测试工具链
         run: python -m pytest tests -q
+
+      # 新栈 golden 基线对比：golden_diff 会用 sys.executable 自行拉起
+      # `rkllm serve --fake-engine`（PYTHONPATH=src），依赖装在同一个
+      # interpreter 的 site-packages 里，因此这里必须先装上面的依赖。
+      - name: golden_diff（新栈 golden 基线）
+        run: python 工具/编译工具链/golden_diff.py
+
+      - name: mcp_conformance（四版本协议一致性）
+        run: python 工具/脚本/mcp_conformance.py --verbose
+
+  release-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # caps.py 是能力矩阵的单一事实源；对话接口用法.md 的矩阵由
+      # render_caps_doc.py 生成。落到文档而不是源码里，PR 阶段就能拦住漂移。
+      - name: caps 文档一致性（render_caps_doc --check）
+        run: python 工具/编译工具链/render_caps_doc.py --check 文档/对话接口用法.md
+
+      # --packer ar 是纯 Python 的 ar+tar 组装，不需要 dpkg-deb；产物落在
+      # 工具/dist/（.gitignore 已覆盖）。--no-sums 避免在 CI 里生成发布校验和。
+      - name: Build deb（--packer ar，无 dpkg 依赖）
+        run: python 工具/编译工具链/make_deb.py --packer ar --no-sums
+
+      - name: verify_deb（包结构/策略/卸载面）
+        run: python 工具/编译工具链/verify_deb.py
+
+      # release_check 会复核：DEFAULT_VERSION 单源、changelog 全条目
+      # （单调/无重复/maintainer+date）、84 键、caps 文档、deb 版本一致性，
+      # 并在有本地 tag 时校验 tag/version 一致（CI 浅 checkout 无 tag 时 SKIP）。
+      - name: release_check（含 deb）
+        run: python 工具/编译工具链/release_check.py --deb 工具/dist/rkllm-runtime_1.3.1-21_arm64.deb

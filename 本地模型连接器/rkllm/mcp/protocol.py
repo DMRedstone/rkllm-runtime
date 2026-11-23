@@ -18,7 +18,8 @@ from typing import Any, Callable
 
 __all__ = ["JsonRpcError", "PROTOCOL_VERSIONS", "DEFAULT_PROTOCOL_VERSION",
            "Dispatcher", "result_payload", "PROTOCOL_2026",
-           "TOOLS_LIST_CACHE_META_2026"]
+           "TOOLS_LIST_CACHE_META_2026", "normalize_supported_versions",
+           "default_protocol_version"]
 
 # 协议常量
 PARSE_ERROR = -32700
@@ -79,25 +80,55 @@ def result_payload(protocol_version: str, result: dict) -> dict:
     return result
 
 
+def normalize_supported_versions(supported: tuple[str, ...]
+                                 | list[str] | None) -> tuple[str, ...]:
+    """把 mcp.protocol_versions 收敛为「已知版本 + 非空」的元组。
+
+    收缩支持范围时最容易踩的坑（P2.5）：配置里写了未知版本、空列表、
+    或漏掉默认回退版本。这里统一过滤并按 PROTOCOL_MATRIX 的顺序重排，
+    供 detect_protocol / Dispatcher / server/discover 共用同一份 supported，
+    避免"回退值不在 supported 里"的不一致。
+    """
+    if not supported:
+        return PROTOCOL_VERSIONS
+    known = {str(v) for v in supported if str(v) in PROTOCOL_VERSIONS}
+    ordered = tuple(v for v in PROTOCOL_VERSIONS if v in known)
+    return ordered or PROTOCOL_VERSIONS
+
+
+def default_protocol_version(supported: tuple[str, ...]
+                             | list[str] | None = None) -> str:
+    """回退版本必须落在 supported 内（否则 initialize 会返回不支持的值）。
+
+    默认表里的 `2024-11-05` 是最老稳定版；收缩到不含它的范围时，回退到
+    该 supported 列表的首个版本（列表已按新→旧排序）。
+    """
+    versions = normalize_supported_versions(supported)
+    if DEFAULT_PROTOCOL_VERSION in versions:
+        return DEFAULT_PROTOCOL_VERSION
+    return versions[0]
+
+
 def detect_protocol(first_frame: dict,
                     supported: tuple[str, ...] | list[str] | None = None) -> str:
     """按首包判定协议版本（MCP 设计 §8：首包 _meta 或 initialize）。
 
     `supported` 来自 mcp.protocol_versions —— 收缩支持范围时，未列出的版本
-    一律回落到默认版本（客户端会按 initialize 返回的版本继续）。
+    一律回落到 **supported 内的**版本（客户端会按 initialize 返回的版本继续）。
     """
-    versions = tuple(supported) if supported else PROTOCOL_VERSIONS
+    versions = normalize_supported_versions(supported)
+    fallback = default_protocol_version(versions)
     params = first_frame.get("params") or {}
     meta = params.get("_meta") or {}
     version = meta.get("protocolVersion")
     if version:
-        return version if version in versions else DEFAULT_PROTOCOL_VERSION
+        return version if version in versions else fallback
     if first_frame.get("method") == "initialize":
         requested = params.get("protocolVersion")
         if requested in versions:
             return requested
-        return DEFAULT_PROTOCOL_VERSION
-    return DEFAULT_PROTOCOL_VERSION
+        return fallback
+    return fallback
 
 
 class Dispatcher:
@@ -105,9 +136,14 @@ class Dispatcher:
 
     def __init__(self, protocol_version: str,
                  supported: tuple[str, ...] | list[str] | None = None):
+        # mcp.protocol_versions：本连接器声明支持的版本（默认全部四版）。
+        # 先归一化，避免调用方传入未知/空列表；protocol_version 不在 supported
+        # 内时（例如配置收缩后被持久化的旧会话）回退到 supported 内的版本，
+        # 与 detect_protocol 的契约一致（P2.5）。
+        self.supported = normalize_supported_versions(supported)
+        if protocol_version not in self.supported:
+            protocol_version = default_protocol_version(self.supported)
         self.protocol_version = protocol_version
-        # mcp.protocol_versions：本连接器声明支持的版本（默认全部四版）
-        self.supported = tuple(supported) if supported else PROTOCOL_VERSIONS
         self._handlers: dict[str, Callable[[dict], dict]] = {}
         # 当前正在处理的请求 id（线程本地）：stdio 用它把
         # notifications/cancelled 的 requestId 对上号
@@ -150,13 +186,23 @@ class Dispatcher:
                 except Exception:
                     pass                       # 通知失败不影响服务
             return None                        # 通知永不回包
+        # P2.5：非通知请求没有 id 时不能当通知静默执行（tools/call 会阻塞
+        # reader 16 s 并以 id=null 回包，客户端无法匹配）。JSON-RPC 语义里
+        # 无 id 的消息是通知，不应触发有副作用的执行；统一拒绝为 -32600。
+        if msg_id is None:
+            return self._error(
+                None, INVALID_REQUEST,
+                "request id required: notifications cannot invoke %r" % method)
         handler = self._handlers.get(method)
         if handler is None:
             return self._error(msg_id, METHOD_NOT_FOUND, f"unknown method: {method}")
         if method in PROTOCOL_MATRIX and \
                 self.protocol_version not in PROTOCOL_MATRIX[method]:
-            return self._error(msg_id, METHOD_NOT_FOUND,
-                               f"{method} requires {'/'.join(PROTOCOL_MATRIX[method])}")
+            return self._error(
+                msg_id, METHOD_NOT_FOUND,
+                f"{method} requires {'/'.join(PROTOCOL_MATRIX[method])}",
+                data={"method": method,
+                      "supportedVersions": list(self.supported)})
         params = msg.get("params") or {}
         if not isinstance(params, dict):
             return self._error(msg_id, INVALID_PARAMS, "params must be an object")

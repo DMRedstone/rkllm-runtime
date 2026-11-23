@@ -18,17 +18,19 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
-from .backend import BackendError
-from .jobs import (JobTable, estimate_seconds, job_timeout_s,
-                   sync_token_cap)
-from .protocol import (Dispatcher, JsonRpcError, INVALID_PARAMS, PARSE_ERROR,
-                       PROTOCOL_2026, SERVER_INFO,
-                       TOOLS_LIST_CACHE_META_2026, detect_protocol)
+from .backend import BackendError, SEMANTIC_KINDS
+from .jobs import (JobTable, DEFAULT_BYTES_PER_TOKEN, estimate_seconds,
+                   estimate_tokens, job_timeout_s, sync_token_cap)
+from .protocol import (Dispatcher, JsonRpcError, INVALID_PARAMS, INVALID_REQUEST,
+                       PARSE_ERROR, PROTOCOL_2026, SERVER_INFO,
+                       TOOLS_LIST_CACHE_META_2026, default_protocol_version,
+                       detect_protocol)
 from . import tools as tools_mod
 
 MAX_MESSAGE_BYTES = 8 * 1024 * 1024
@@ -47,6 +49,14 @@ CLIENT_TIMEOUT_MARGIN_S = 15
 # 因此不做成配置项；上限与板端 job_timeout_max_s 默认对齐。
 JOB_TIMEOUT_FACTOR = 1.5
 JOB_TIMEOUT_MAX_S = 4200.0
+
+
+def _finite(value: float) -> bool:
+    """JSON/TOML 可带 Infinity/NaN，落进快照前统一判有限（P2.5 配置/性能路径）。"""
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 class CancelFlag:
@@ -153,7 +163,24 @@ class StdioServer:
                 tok_s = perf.get("decode_tok_s")
                 if isinstance(tok_s, (int, float)) and tok_s > 0:
                     board["decode_tok_s"] = float(tok_s)
+                # P2.5：prefill 用板端实测 ttft_s（首 token 延迟），不再依赖
+                # 连接器里写死的 44 tok/s 常量。冷启动（无 ttft）时由 jobs.py
+                # 用 COLD_PREFILL_TOK_S 兜底。
+                ttft = perf.get("ttft_s")
+                if isinstance(ttft, (int, float)) and ttft > 0 \
+                        and _finite(float(ttft)):
+                    board["ttft_s"] = float(ttft)
                 board["perf_source"] = perf.get("source") or "cold"
+
+            # P2.5：token 预算与板端 tokenizer 对齐。/health.tokens 带
+            # bytes_per_token（板端 agent/tokens.py 的自校准值），连接器的
+            # 输入裁剪/prompt 预算/prefill 估算统一按它折算。
+            tokens_info = info.get("tokens")
+            if isinstance(tokens_info, dict):
+                bpt = tokens_info.get("bytes_per_token")
+                if isinstance(bpt, (int, float)) and 1.0 <= float(bpt) <= 16.0 \
+                        and _finite(float(bpt)):
+                    board["bytes_per_token"] = float(bpt)
 
             limits = info.get("limits")
             if isinstance(limits, dict):
@@ -212,9 +239,12 @@ class StdioServer:
     # -- 方法注册 ------------------------------------------------------------
 
     def _build_dispatcher(self) -> Dispatcher:
-        version = self._protocol_version or "2024-11-05"
         supported = self.cfg.get("protocol_versions") or None
+        # P2.5：未显式判定版本时，回退版本必须落在 mcp.protocol_versions 内，
+        # 否则收缩支持范围后 initialize 会返回一个"不支持"的版本。
+        version = self._protocol_version or default_protocol_version(supported)
         disp = Dispatcher(version, supported=supported)
+        version = disp.protocol_version          # 归一化后的生效版本
         prefix = self.cfg["tool_prefix"]
 
         def initialize(params: dict) -> dict:
@@ -293,6 +323,11 @@ class StdioServer:
         handler = self._handlers.get(short)
         if handler is None:
             raise JsonRpcError(INVALID_PARAMS, f"unknown tool: {name}")
+        # P2.5：extract 的 schema 在"转 job"之前先做结构校验。否则畸形
+        # schema 会先被转成 job（extract 默认估算必然超阈值），-32602 要等到
+        # 轮询终帧才出现，客户端拿不到即时的参数错误。
+        if short == "extract":
+            tools_mod.validate_schema_definition(arguments.get("schema"))
 
         # status 只读不推理，恒同步秒回（实测发现：job 化判定按 max_tokens
         # 估算会把 status 也转后台，违反设计 §4.1「秒回」语义）
@@ -342,22 +377,44 @@ class StdioServer:
                     "isError": True, "_meta": {"cancelled": True}}
         except BackendError as exc:
             # P2-B：板端忙/加载中是"可重试"的临时状态，不是内部错误。
-            # 兜在统一入口转成 isError 结果 + _meta.retryAfter，让客户端能
-            # 据此退避；其余 BackendError 重抛，仍由 dispatcher 报 -32603。
-            if getattr(exc, "kind", "") in ("busy", "loading"):
-                retry = getattr(exc, "retry_after_s", None)
-                meta: dict = {"busy": True, "kind": exc.kind}
-                if isinstance(retry, (int, float)) and retry >= 0:
-                    meta["retryAfter"] = retry
-                detail = str(exc)[:300]
-                return {"content": [{"type": "text",
-                                     "text": "板端繁忙，请稍后重试：" + detail}],
-                        "isError": True, "_meta": meta}
+            # P2.5：400/401/流中错误也归一为有语义的 isError 结果（_meta.kind/
+            # httpStatus/retryAfter），不再统一 -32603；非语义的通用错误仍
+            # 原样抛出（dispatcher 兜成 -32603，保留旧行为与既有回归）。
+            if getattr(exc, "kind", "") in SEMANTIC_KINDS:
+                return self._backend_error_result(exc)
             raise
         finally:
             if key is not None:
                 with self._lock:
                     self._inflight.pop(key, None)
+
+    @staticmethod
+    def _backend_error_result(exc: BackendError) -> dict:
+        """把有语义的 BackendError 转成 MCP tool result（isError + _meta）。"""
+        kind = getattr(exc, "kind", "backend")
+        meta = exc.meta()
+        retry = getattr(exc, "retry_after_s", None)
+        if kind in ("busy", "loading", "rate_limited"):
+            meta["busy"] = True
+            hint = ("建议 %s 秒后重试" % retry
+                    if isinstance(retry, (int, float)) else "请稍后重试")
+            text = "板端繁忙，%s：%s" % (hint, str(exc)[:300])
+        elif kind == "auth":
+            text = ("板端鉴权失败：请检查连接器 mcp.toml 的 target_api_key / "
+                    "RKLLM_API_KEY 是否与板端 server.api_key 一致。%s"
+                    % str(exc)[:240])
+        elif kind == "bad_request":
+            text = ("板端拒绝了本次请求（参数或输入超出上下文预算），"
+                    "请缩短输入/降低 max_tokens 后重试。%s" % str(exc)[:240])
+        elif kind == "not_found":
+            text = "板端端点不存在：请检查 target_endpoint 是否指向板端 /v1。%s" \
+                   % str(exc)[:240]
+        elif kind == "stream":
+            text = "板端推理流中断：%s" % str(exc)[:300]
+        else:                                   # upstream / http
+            text = "板端服务错误：%s" % str(exc)[:300]
+        return {"content": [{"type": "text", "text": text}],
+                "isError": True, "_meta": meta}
 
     def _estimate_decode_tokens(self, arguments: dict,
                                 short: str | None) -> int:
@@ -409,6 +466,28 @@ class StdioServer:
         value = board.get(key, default)
         return default if value is None else value
 
+    def _bytes_per_token(self) -> float:
+        """板端 tokenizer 口径（`/health.tokens.bytes_per_token`）。"""
+        try:
+            value = float(self._board_val("bytes_per_token",
+                                          DEFAULT_BYTES_PER_TOKEN))
+        except (TypeError, ValueError, OverflowError):
+            return DEFAULT_BYTES_PER_TOKEN
+        return value if value > 0 and _finite(value) \
+            else DEFAULT_BYTES_PER_TOKEN
+
+    def _prefill_tokens(self, arguments: dict) -> int:
+        """按板端 tokenizer 估算 prompt token（与输入裁剪/预算同口径）。"""
+        text = json.dumps(arguments, ensure_ascii=False)
+        return estimate_tokens(text, self._bytes_per_token())
+
+    def _board_ttft(self) -> float | None:
+        """板端实测首 token 延迟；无样本返回 None（走冷启动兜底）。"""
+        value = self._board_val("ttft_s")
+        if isinstance(value, (int, float)) and value > 0 and _finite(value):
+            return float(value)
+        return None
+
     def _task_threshold(self) -> float:
         """转 job 的耗时阈值 = 客户端硬超时 − 安全余量。
 
@@ -422,19 +501,18 @@ class StdioServer:
         return max(5.0, client - CLIENT_TIMEOUT_MARGIN_S)
 
     def _default_estimate(self, arguments: dict, short: str | None = None) -> float:
-        text = json.dumps(arguments, ensure_ascii=False)
-        prefill = max(1, len(text) // 2)   # 中文约 2 字符/token
-        return estimate_seconds(self.model_class, prefill,
+        return estimate_seconds(self.model_class,
+                                self._prefill_tokens(arguments),
                                 self._estimate_decode_tokens(arguments, short),
-                                decode_tok_s=self._board_val("decode_tok_s"))
+                                decode_tok_s=self._board_val("decode_tok_s"),
+                                ttft_s=self._board_ttft())
 
     def _sync_token_cap(self, arguments: dict, short: str | None) -> int:
         """同步路径的安全生成上限（见 jobs.sync_token_cap）。"""
-        text = json.dumps(arguments, ensure_ascii=False)
-        prefill = max(1, len(text) // 2)
-        cap = sync_token_cap(self.model_class, prefill,
+        cap = sync_token_cap(self.model_class, self._prefill_tokens(arguments),
                              self._task_threshold(),
-                             decode_tok_s=self._board_val("decode_tok_s"))
+                             decode_tok_s=self._board_val("decode_tok_s"),
+                             ttft_s=self._board_ttft())
         if short == "batch":
             segments = arguments.get("segments")
             count = len(segments) if isinstance(segments, list) else 1
@@ -482,9 +560,10 @@ class StdioServer:
                 # OverflowError 同 _estimate_decode_tokens：Infinity 转 int 抛出
                 tokens = default
         text = json.dumps(arguments, ensure_ascii=False)
-        prefill = max(1, len(text) // 2)
+        prefill = estimate_tokens(text, self._bytes_per_token())
         return estimate_seconds(self.model_class, prefill, tokens,
-                                decode_tok_s=self._board_val("decode_tok_s"))
+                                decode_tok_s=self._board_val("decode_tok_s"),
+                                ttft_s=self._board_ttft())
 
     def _job_timeout(self, estimate: float) -> float:
         """job 读超时 = max(板端请求超时, 估算×factor+30)，上限为传输层常量。
@@ -560,15 +639,18 @@ class StdioServer:
                 job.cancel()
             except BackendError as exc:
                 # P2-B 的 isError+retryAfter 只覆盖同步路径（2026-11-19 审计 P2）。
-                # job 路径把 busy/loading 的「可重试」语义带进 error 文本，
-                # 否则客户端轮询只看到 failed、不知道该等多久。
+                # P2.5：job 路径把同类语义（busy/auth/bad_request/stream）带进
+                # error 文本与 error_meta，客户端轮询时能区分"可重试/需改配置/
+                # 内部错误"，而不是只有一段字符串。
                 if job.cancel_requested:
                     return
-                if getattr(exc, "kind", "") in ("busy", "loading"):
+                kind = getattr(exc, "kind", "backend")
+                if kind in SEMANTIC_KINDS:
                     retry = getattr(exc, "retry_after_s", None)
                     hint = ("建议 %s 秒后重试" % retry
-                            if isinstance(retry, (int, float)) else "稍后重试")
-                    job.fail("%s（%s）" % (str(exc)[:260], hint))
+                            if isinstance(retry, (int, float)) else "请检查配置或稍后重试")
+                    job.fail("%s（%s）" % (str(exc)[:260], hint),
+                             meta=exc.meta())
                 else:
                     job.fail(str(exc)[:300])
             except Exception as exc:
@@ -641,6 +723,10 @@ class StdioServer:
                      "isError": True,
                      "job_id": job.id,
                      "status": job.state}
+            # P2.5：失败终帧带上与同步路径同源的语义（kind/httpStatus/
+            # retryAfter），客户端据 meta 决定退避或改配置，无需解析文案。
+            if getattr(job, "error_meta", None):
+                reply["_meta"] = dict(job.error_meta)
             if job.short == "extract":
                 # extract 声明了 outputSchema：轮询结果也带宽松 object，避免
                 # 客户端对失败终帧做 schema 校验时报 -32600。
@@ -707,7 +793,32 @@ class StdioServer:
         self._pool.shutdown(wait=False, cancel_futures=True)
 
     def _read_loop(self) -> None:
-        for line in sys.stdin:
+        """按行读 stdin；超长行只读前 `MAX_MESSAGE_BYTES` 字节就处理（P2.5）。
+
+        旧实现 `for line in sys.stdin` 会把整行（可能数百 MB）先读进内存再检查
+        8 MiB 上限，恶意/误配客户端可直接 OOM。这里用 `readline(limit)` 把单次
+        读入量钳在 8 MiB 附近：一旦超限立即回 -32700，再分块丢弃该行剩余内容，
+        不保存、不解析。
+        """
+        stream = sys.stdin
+        limit = MAX_MESSAGE_BYTES + 2
+        while True:
+            try:
+                line = stream.readline(limit)
+            except (OSError, ValueError, AttributeError):
+                break                           # 流关闭/伪 stdin：正常退出
+            if not line:
+                break
+            if not line.endswith("\n") and len(line) >= limit:
+                # 整行未读完（无换行且已读满上限）：8 MiB 限制在整行读入前生效
+                try:
+                    self._send({"jsonrpc": "2.0", "id": None,
+                                "error": {"code": PARSE_ERROR,
+                                          "message": "message too large"}})
+                except Exception:
+                    break
+                self._drain_oversize(stream)
+                continue
             try:
                 self._read_line(line)
             except Exception as exc:          # P0-1：单条畸形消息不得杀死 reader 线程
@@ -719,6 +830,17 @@ class StdioServer:
                 except Exception:
                     pass
 
+    @staticmethod
+    def _drain_oversize(stream) -> None:
+        """丢弃超长行的剩余部分（分块读，不整行入内存）。"""
+        while True:
+            try:
+                chunk = stream.readline(MAX_MESSAGE_BYTES + 1)
+            except (OSError, ValueError, AttributeError):
+                return
+            if not chunk or chunk.endswith("\n"):
+                return
+
     def _read_line(self, line: str) -> None:
         line = line.strip()
         if not line:
@@ -728,11 +850,23 @@ class StdioServer:
                         "error": {"code": PARSE_ERROR,
                                   "message": "message too large"}})
             return
+        # P2.5：无 id 的非通知请求（典型：tools/call 漏 id）不能静默执行——
+        # 旧实现会在 reader 线程同步跑完（最长 16 s）再以 id=null 回包，既阻塞
+        # 后续请求又让客户端无法匹配。JSON-RPC 里无 id 即通知，不应触发有
+        # 副作用的执行；统一 -32600 拒绝（扫描器/客户端立即得到可诊断错误）。
+        first_msg = self._parse_json(line)
+        if isinstance(first_msg, dict):
+            method = first_msg.get("method")
+            if isinstance(method, str) and not method.startswith("notifications/") \
+                    and first_msg.get("id") is None:
+                self._send({"jsonrpc": "2.0", "id": None,
+                            "error": {"code": INVALID_REQUEST,
+                                      "message": "request id required: "
+                                                 "%s needs an id (not a notification)"
+                                                 % method}})
+                return
         if self._protocol_version is None:
-            try:
-                first = json.loads(line)
-            except json.JSONDecodeError:
-                first = None
+            first = first_msg
             # 首包必须是 JSON 对象；数组/null/数字是合法 JSON 但不是对象（P0-1）
             if isinstance(first, dict):
                 try:
@@ -764,6 +898,14 @@ class StdioServer:
         response = self.dispatcher.handle_message(line)
         if response is not None:
             self._send(response)
+
+    @staticmethod
+    def _parse_json(line: str):
+        """解析一行 JSON；失败返回 None（错误码由 dispatcher 统一回 -32700）。"""
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            return None
 
     def _tool_route(self, line: str) -> tuple[str | None, str | None]:
         """tools/call 分流：status/job → control，其余推理工具 → work。

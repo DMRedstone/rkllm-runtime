@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -77,12 +78,16 @@ def wait_up(port: int, deadline_s: float = 60) -> None:
 
 def start_new(port: int) -> subprocess.Popen:
     # 假引擎开关沿用旧名 --fake-engine；`--engine fake` 是早期草案。
+    # 保留调用方 PYTHONPATH（本机 .pydeps2 / CI 解释器 site-packages），
+    # 否则子进程只带 SRC 时会缺 fastapi/uvicorn（本地开发环境）。
+    pythonpath = os.pathsep.join(
+        p for p in (str(SRC), os.environ.get("PYTHONPATH", "")) if p)
     return subprocess.Popen(
         [sys.executable, "-m", "rkllm.cli", "serve", "fake", "--fake-engine",
          "--host", "127.0.0.1", "--port", str(port)],
         cwd=str(SRC), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        env={"SYSTEMROOT": __import__("os").environ.get("SYSTEMROOT", ""),
-             "PYTHONPATH": str(SRC), "PYTHONIOENCODING": "utf-8"})
+        env={"SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+             "PYTHONPATH": pythonpath, "PYTHONIOENCODING": "utf-8"})
 
 
 def request(port: int, method: str, path: str, body: dict | None):
@@ -110,6 +115,14 @@ def _normalize_json(raw: str):
     obj.pop("created", None)
     obj.pop("system_fingerprint", None)
     obj.pop("service_tier", None)
+    # /v1/models 的 data[*].created 是"模型时间戳"：模型文件可读时取 mtime，
+    # 否则退回进程启动时间。golden_diff 用 `serve fake --fake-engine`，模型路径
+    # 不存在 → created = 进程启动 epoch，每次运行都不同；不剥掉会让基线永远
+    # 差 1 处（P2.1 给 /v1/models 补 created 后实测）。基线只比稳定字段。
+    if isinstance(obj, dict):
+        for item in obj.get("data") or ():
+            if isinstance(item, dict):
+                item.pop("created", None)
     return obj
 
 

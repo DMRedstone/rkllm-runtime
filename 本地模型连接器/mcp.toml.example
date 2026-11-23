@@ -8,16 +8,27 @@
 # 未刷新（老版本 runtime / 板端暂时不可达）时才生效。
 #
 # 板端提供、无需在此配置（写在 TOML 里也不会被读取）：
-#   decode_tok_s / context_len / default_max_tokens / max_tokens_limit /
-#   context_margin_tokens / request_timeout_s
-# 这些来自板端 /health.perf 与 /health.limits，换模型/换板子自动跟随。
+#   decode_tok_s / ttft_s / context_len / default_max_tokens / max_tokens_limit /
+#   context_margin_tokens / bytes_per_token / request_timeout_s
+# 这些来自板端 /health.perf、/health.tokens 与 /health.limits，换模型/换板子
+# 自动跟随。连接器的输入裁剪、prompt 预算与 prefill 估算与板端 tokenizer 同口径。
+#
+# 校验：本文件里的值会做类型/范围/枚举校验。非法值（含 TOML 合法字面量
+# `inf` / `1e400`、越界、未知枚举、未知工具名、非 http(s) endpoint）不会让
+# 连接器崩溃，而是回退默认值并在 stderr 打印"[rkllm-mcp] 配置项不可用"告警。
 
 [mcp]
 # ---- 目标（必配） --------------------------------------------------------
-# 板端 OpenAI 兼容端点（也可用 RKLLM_ENDPOINT 环境变量）
+# 板端 OpenAI 兼容端点（也可用 RKLLM_ENDPOINT 环境变量）。
+# 必须是 http(s) URL；本机默认 127.0.0.1:8080，远程板端改成实际 IP:端口/v1。
 target_endpoint = "http://127.0.0.1:8080/v1"
 # 板端 server.api_key（留空表示板端未启用鉴权；也可用 RKLLM_API_KEY）
 target_api_key = ""
+
+# ---- 协议版本（可选） ----------------------------------------------------
+# 默认四版全支持；收缩时必须保留至少一个已知版本，回退版本会自动落在
+# 本列表内（不会返回一个"不支持"的协议版本）。一般不需要改。
+#protocol_versions = ["2026-07-28", "2025-11-25", "2025-06-18", "2024-11-05"]
 
 # ---- 客户端约束（保留，因为板端无从得知调用方会等多久） ------------------
 # MCP 调用方的硬超时（秒）。转 job 的阈值 = client_timeout_s − 15。
@@ -41,7 +52,7 @@ extract_retries = 2
 # ---- 会话（带 session 的 chat 使用） --------------------------------------
 # 单会话最大消息数；0 = 不限制
 session_max_messages = 0
-# 同时保留的会话数上限（LRU 淘汰）
+# 同时保留的会话数上限；超限按 LRU（最近最少使用）淘汰，常用会话不会先被挤掉
 session_max_count = 256
 # 会话空闲过期（秒）；0 = 不过期
 session_ttl_s = 1800

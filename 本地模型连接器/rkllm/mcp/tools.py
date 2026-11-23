@@ -19,14 +19,124 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from typing import Any, Callable
 
 from ..agent.json_schema import validate as validate_schema
+from .jobs import DEFAULT_BYTES_PER_TOKEN, estimate_tokens
 from .protocol import INVALID_PARAMS, JsonRpcError
 
 __all__ = ["build_handlers", "tool_definitions", "Cancelled"]
+
+# JSON Schema 定义的合法 type 取值（畸形 schema 必须在进校验器前拒绝，
+# 否则会以 AttributeError/TypeError 逃成 -32603；P2.5）。
+_SCHEMA_TYPES = frozenset({"object", "array", "string", "number", "integer",
+                           "boolean", "null"})
+# schema 嵌套深度上限：防止客户端用深层嵌套拖垮递归校验（DoS 边界）。
+_SCHEMA_MAX_DEPTH = 32
+# 数值型 schema 关键字（出现时必须是非 bool 的有限数值）。
+_SCHEMA_NUMERIC = ("minimum", "maximum", "minLength", "maxLength",
+                   "minItems", "maxItems")
+
+
+def _safe_int(value: Any, default: int, *, lo: int | None = None,
+              hi: int | None = None) -> int:
+    """数值配置安全转换：inf/NaN/超大整数/非法字符串一律回落（P2.5）。"""
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError):
+        result = int(default)
+    if lo is not None:
+        result = max(lo, result)
+    if hi is not None:
+        result = min(hi, result)
+    return result
+
+
+def validate_schema_definition(schema: Any, path: str = "$",
+                               depth: int = 0) -> None:
+    """畸形 JSON Schema 显式拒绝（-32602，不是 -32603）。
+
+    `json_schema.validate` 假定 schema 结构合法（`properties.items()`、
+    `required` 可迭代…）；客户端传 `{"properties": []}` / `{"required": "x"}`
+    会让它抛 AttributeError/TypeError，被 dispatcher 兜成 -32603。这里做
+    结构/类型/深度校验，把"参数错误"和"服务端内部错误"分开（P2.5）。
+
+    放在模块级是为了让 stdio 在"转 job"之前就能拒绝畸形参数（否则 extract
+    默认估算会先转 job，参数错误被延迟到 job 终帧，客户端拿不到 -32602）。
+    """
+    if depth > _SCHEMA_MAX_DEPTH:
+        raise JsonRpcError(INVALID_PARAMS,
+                           "%s：schema 嵌套过深（>%d）"
+                           % (path, _SCHEMA_MAX_DEPTH))
+    if not isinstance(schema, dict):
+        raise JsonRpcError(INVALID_PARAMS, "%s：必须是 JSON Schema 对象" % path)
+    stype = schema.get("type")
+    if isinstance(stype, str):
+        if stype not in _SCHEMA_TYPES:
+            raise JsonRpcError(INVALID_PARAMS,
+                               "%s.type 非法：%r（允许 %s）"
+                               % (path, stype, "/".join(sorted(_SCHEMA_TYPES))))
+    elif isinstance(stype, list):
+        if not stype or any(not isinstance(t, str) or t not in _SCHEMA_TYPES
+                            for t in stype):
+            raise JsonRpcError(INVALID_PARAMS,
+                               "%s.type 必须是合法类型名或其非空数组" % path)
+    elif stype is not None:
+        raise JsonRpcError(INVALID_PARAMS,
+                           "%s.type 必须是字符串或字符串数组" % path)
+
+    if "enum" in schema and not isinstance(schema["enum"], list):
+        raise JsonRpcError(INVALID_PARAMS, "%s.enum 必须是数组" % path)
+    for keyword in _SCHEMA_NUMERIC:
+        if keyword in schema:
+            value = schema[keyword]
+            if isinstance(value, bool) \
+                    or not isinstance(value, (int, float)) \
+                    or not math.isfinite(float(value)):
+                raise JsonRpcError(INVALID_PARAMS,
+                                   "%s.%s 必须是有限数值" % (path, keyword))
+    required = schema.get("required")
+    if required is not None:
+        if not isinstance(required, list) \
+                or any(not isinstance(name, str) for name in required):
+            raise JsonRpcError(INVALID_PARAMS,
+                               "%s.required 必须是字符串数组" % path)
+    props = schema.get("properties")
+    if props is not None:
+        if not isinstance(props, dict):
+            raise JsonRpcError(INVALID_PARAMS,
+                               "%s.properties 必须是对象" % path)
+        for name, sub in props.items():
+            if not isinstance(name, str):
+                raise JsonRpcError(INVALID_PARAMS,
+                                   "%s.properties 的键必须是字符串" % path)
+            validate_schema_definition(sub, "%s.%s" % (path, name), depth + 1)
+    items = schema.get("items")
+    if items is not None:
+        if isinstance(items, dict):
+            validate_schema_definition(items, path + "[]", depth + 1)
+        elif isinstance(items, list):
+            for index, sub in enumerate(items):
+                validate_schema_definition(sub, "%s[%d]" % (path, index),
+                                           depth + 1)
+        else:
+            raise JsonRpcError(INVALID_PARAMS,
+                               "%s.items 必须是对象或对象数组" % path)
+    additional = schema.get("additionalProperties")
+    if additional is not None and not isinstance(additional, bool):
+        raise JsonRpcError(INVALID_PARAMS,
+                           "%s.additionalProperties 必须是布尔值" % path)
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if math.isfinite(result) else None
 
 # 冷启动兜底常量：仅当板端 `/health` 不可达（cfg["_board"] 为空）时使用。
 # 正常运行时 stdio 会把板端 context_len / limits 写进快照，_bval 优先读快照。
@@ -177,20 +287,27 @@ def build_handlers(backend, cfg: dict, jobs, *,
         """参数非法 → JSON-RPC -32602（MCP InvalidParams），不再是 -32603。"""
         raise JsonRpcError(INVALID_PARAMS, message)
 
+    def _check_schema_definition(schema: Any) -> None:
+        """模块级校验的薄封装（保留内层调用点；逻辑只有一份）。"""
+        validate_schema_definition(schema)
+
     def _as_check(value):
         if value is None or callable(value):
             return value
         snapshot = bool(value)
         return lambda: snapshot
 
-    result_limit = int(cfg.get("max_result_chars", 20000) or 20000)
+    result_limit = _safe_int(cfg.get("max_result_chars", 20000), 20000,
+                             lo=1000, hi=200000)
     session_store = sessions if sessions is not None else {}
     session_lock = sessions_lock or threading.Lock()
-    max_session_messages = int(cfg.get("session_max_messages", 20))
+    max_session_messages = _safe_int(cfg.get("session_max_messages", 0), 0,
+                                     lo=0, hi=1000)
     session_locks: dict[str, threading.Lock] = {}
-    max_sessions = int(cfg.get("session_max_count", 256) or 256)
+    max_sessions = _safe_int(cfg.get("session_max_count", 256), 256,
+                             lo=1, hi=4096)
     # P2：会话空闲 TTL（秒），0=不过期。陈旧会话不回收会持续占用内存/上下文。
-    session_ttl_s = float(cfg.get("session_ttl_s", 0) or 0)
+    session_ttl_s = _finite_float(cfg.get("session_ttl_s", 0)) or 0.0
     session_seen: dict[str, float] = {}
 
     def _bval(key: str, default):
@@ -199,11 +316,24 @@ def build_handlers(backend, cfg: dict, jobs, *,
         value = board.get(key, default)
         return default if value is None else value
 
+    def _bytes_per_token() -> float:
+        """板端 tokenizer 口径（`/health.tokens.bytes_per_token`），取不到用 3。
+
+        P2.5：输入裁剪、上下文预算、prefill 估算必须与板端 tokenizer 同口径，
+        不再用写死的"UTF-8 字节/3"（4B/27B 的 bytes_per_token 实测并不相同）。
+        """
+        raw = _bval("bytes_per_token", DEFAULT_BYTES_PER_TOKEN)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError, OverflowError):
+            return DEFAULT_BYTES_PER_TOKEN
+        if 1.0 <= value <= 16.0 and math.isfinite(value):
+            return value
+        return DEFAULT_BYTES_PER_TOKEN
+
     def _tokens(text: str) -> int:
-        """与板端同口径的粗估：UTF-8 字节数 / 3（agent/tokens.py）。"""
-        if not text:
-            return 0
-        return max(1, len(text.encode("utf-8")) // 3)
+        """与板端同口径的 token 估算（UTF-8 字节 / bytes_per_token）。"""
+        return estimate_tokens(text, _bytes_per_token())
 
     def _ctx_tokens() -> int:
         """可用输入预算 = 板端上下文 − 板端保留余量。
@@ -247,7 +377,8 @@ def build_handlers(backend, cfg: dict, jobs, *,
 
     def _fit_text(text: str, budget_tokens: int, note: str = "输入") -> str:
         budget = max(16, int(budget_tokens))
-        limit_bytes = budget * 3
+        # 板端 tokenizer 口径：budget token ≈ budget × bytes_per_token 字节
+        limit_bytes = max(16, int(budget * _bytes_per_token()))
         raw = text.encode("utf-8")
         if len(raw) <= limit_bytes:
             return text
@@ -303,12 +434,30 @@ def build_handlers(backend, cfg: dict, jobs, *,
                 session_locks[name] = lk
             return lk
 
+    def _evict_one_locked(current: str | None = None) -> bool:
+        """按 LRU 逐出最久未使用的会话（调用方须已持有 session_lock）。
+
+        P2.5：旧实现用 `next(iter(session_store))`（插入序 = FIFO），与
+        mcp.toml.example 里写的"LRU 淘汰"不符——常用会话可能比冷会话先被
+        淘汰。现在以 `session_seen` 的最近访问时间为准，并排除即将写入的
+        当前会话。
+        """
+        candidates = [name for name in session_store if name != current]
+        if not candidates:
+            return False
+        victim = min(candidates, key=lambda name: session_seen.get(name, 0.0))
+        session_store.pop(victim, None)
+        session_seen.pop(victim, None)
+        return True
+
     def _chat_once(system: str, user: str, max_tokens: int,
                    temperature: float, should_cancel=None,
                    timeout_s: float | None = None) -> dict:
         messages = ([{"role": "system", "content": system}] if system else [])
         messages.append({"role": "user", "content": user})
         try:
+            # include_usage 由 HttpBackend 默认 True（P2.5），这里不显式传：
+            # 保持对旧式 fake backend（测试替身）的调用兼容。
             out = backend.chat(messages, max_tokens=max_tokens,
                                temperature=temperature,
                                cancel_check=_as_check(should_cancel),
@@ -397,11 +546,16 @@ def build_handlers(backend, cfg: dict, jobs, *,
     def _temperature(params: dict) -> float:
         value = params.get("temperature")
         try:
-            return float(value) if value is not None \
+            raw = float(value) if value is not None \
                 else float(cfg.get("default_temperature", 0.3))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             _invalid("temperature 必须是数字")
             return 0.0                       # pragma: no cover（_invalid 必抛）
+        # P2.5：NaN/Inf（TOML `inf`/JSON `Infinity` 都能进来）不得进 runtime 请求；
+        # 0~2 与板端 schema 的范围一致。
+        if not math.isfinite(raw) or not 0.0 <= raw <= 2.0:
+            _invalid("temperature 必须是 0~2 的有限数值")
+        return raw
 
     def ask(params: dict, should_cancel=None, max_tokens_cap=None,
             timeout_s=None) -> dict:
@@ -418,11 +572,11 @@ def build_handlers(backend, cfg: dict, jobs, *,
             _invalid("format 仅支持 text / json_object")
         try:
             requested = int(params.get("max_tokens")
-                            or cfg["default_max_tokens"])
+                            or cfg.get("default_max_tokens", DEFAULT_MAX_TOKENS))
         except (TypeError, ValueError, OverflowError):
             # OverflowError：客户端传 JSON Infinity 时 int() 会抛，按非法参数报
             _invalid("max_tokens 必须是整数")
-            requested = int(cfg["default_max_tokens"])
+            requested = int(DEFAULT_MAX_TOKENS)   # pragma: no cover（_invalid 必抛）
         used = _out_tokens(requested, max_tokens_cap)
         system = str(params.get("system") or "")
         prefix = _MODE_PROMPTS.get(mode, "") if mode else ""
@@ -456,7 +610,8 @@ def build_handlers(backend, cfg: dict, jobs, *,
         session = str(params.get("session") or "").strip()
         if session and len(session) > 128:
             _invalid("session 过长（最多 128 字符）")
-        used = _out_tokens(cfg["default_max_tokens"], max_tokens_cap)
+        used = _out_tokens(cfg.get("default_max_tokens", DEFAULT_MAX_TOKENS),
+                           max_tokens_cap)
         budget = _ctx_tokens() - used - _tokens(system)
         temperature = _temperature(params)
 
@@ -483,25 +638,24 @@ def build_handlers(backend, cfg: dict, jobs, *,
         with _session_lock(session):
             with session_lock:
                 _purge_expired_locked()
+                # 访问即刷新 recency：LRU 淘汰依赖最近使用时间（P2.5）
+                session_seen[session] = time.monotonic()
                 history = list(session_store.get(session, []))
             base, truncated = _fit_messages(history + clean, max(64, budget))
             out = _ask(base)
             with session_lock:
-                # 会话数上限：超限时逐出最早插入的（dict 保序），防无界增长
+                # 会话数上限：按 LRU 逐出最久未用的会话，防无界增长
                 if (session not in session_store
                         and len(session_store) >= max_sessions):
-                    try:
-                        evicted = next(iter(session_store))
-                        session_store.pop(evicted)
-                        session_seen.pop(evicted, None)
-                    except (StopIteration, KeyError):
-                        pass
+                    _evict_one_locked(session)
                 stored = base + [{"role": "assistant",
                                   "content": str(out.get("text") or "")}]
                 # 会话累计预算：存入前再按当前预算裁一次，避免下次请求才丢上下文
                 stored, _ = _fit_messages(stored, max(64, budget))
                 if max_session_messages > 0:
                     stored = stored[-max_session_messages:]
+                # dict 重新插入 = 移到末尾，保持 LRU 顺序可观测
+                session_store.pop(session, None)
                 session_store[session] = stored
                 session_seen[session] = time.monotonic()
         extra = {"input_truncated": True} if truncated else None
@@ -519,10 +673,10 @@ def build_handlers(backend, cfg: dict, jobs, *,
         schema = params.get("schema")
         if not isinstance(schema, dict):
             _invalid("schema 必须是 JSON Schema 对象")
-        try:
-            requested = int(cfg["default_max_tokens"]) * 2
-        except (TypeError, ValueError, OverflowError):
-            requested = int(cfg.get("default_max_tokens", 512)) * 2
+        # P2.5：畸形 schema → -32602（而非校验器内部异常逃成 -32603）
+        _check_schema_definition(schema)
+        requested = _safe_int(cfg.get("default_max_tokens", DEFAULT_MAX_TOKENS),
+                              DEFAULT_MAX_TOKENS, lo=1, hi=8192) * 2
         used = _out_tokens(requested, max_tokens_cap)
         schema_json = json.dumps(schema, ensure_ascii=False)
         instructions = str(params.get("instructions") or "")
@@ -578,7 +732,8 @@ def build_handlers(backend, cfg: dict, jobs, *,
             _invalid("segments 不能为空")
         # P2：段数超限不再 raise（上游未必捕获，可能破坏 JSON-RPC 帧），
         # 改为只处理前 batch_max_segments 段，并按合法 JSON 标记 truncated。
-        max_segments = int(cfg["batch_max_segments"])
+        max_segments = _safe_int(cfg.get("batch_max_segments", 20), 20,
+                                 lo=1, hi=100)
         total_segments = len(segments)
         truncated = total_segments > max_segments
         work = segments[:max_segments] if truncated else segments

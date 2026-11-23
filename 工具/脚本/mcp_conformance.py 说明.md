@@ -18,16 +18,20 @@ N6 协议一致性脚本：对 MCP 连接器跑四个协议版本 × 六类断�
 5. 参数错误（`params` 不是对象）→ `-32602`；
 6. 8 MiB 边界：超长帧被拒（`PARSE_ERROR`），进程仍存活。
 
-另有独立的取消断言：长调用进行中发 `notifications/cancelled`，要求 5 s 内生效。
+另有独立的取消断言：长调用进行中发 `notifications/cancelled`，要求 3 s 内返回
+**isError(cancelled)**，并复核板端 `/reset` 真的收到（连接仍可用）。
 
 ## 用法
 
 ```bash
-python mcp_conformance.py              # 自足：内置假 OpenAI 后端，不需要板端/客户端配置
-python mcp_conformance.py --verbose    # 打印每版本每断言明细
+python 工具/脚本/mcp_conformance.py              # 自足：内置假 OpenAI 后端，不需要板端/客户端配置
+python 工具/脚本/mcp_conformance.py --verbose    # 打印每版本每断言明细
 ```
 
 ## 注意
 
 脚本自带 stdlib 假后端并通过子进程拉起连接器，**不需要** `mcp.json` 或板端
 服务。当前基线：**45/45 通过**（2026 无状态改造后）。
+
+CI（`.github/workflows/ci.yml` 的 `test` 作业）每次 PR 都以 `--verbose` 跑本脚本，
+因此协议形状/取消语义回归会在合并前被拦住。
