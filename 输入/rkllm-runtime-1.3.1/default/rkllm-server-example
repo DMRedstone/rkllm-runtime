@@ -58,15 +58,15 @@
 RKLLM_MODEL=
 
 
-# -- --host <address>                                default 0.0.0.0
+# -- --host <address>                                default 127.0.0.1
 # EN: Address the API listens on. 127.0.0.1 keeps it reachable from this board
 #     only; 0.0.0.0 exposes it to the network, which is why a key is
-#     recommended in that case (see RKLLM_API_KEY below).
-# 中文: API 监听地址。127.0.0.1 只允许本机访问；0.0.0.0 会暴露到网络，因此这种
-#     情况下建议配置密钥（见下面的 RKLLM_API_KEY）。
+#     required for non-loopback binds (serve refuses to start without one).
+# 中文: API 监听地址。127.0.0.1 只允许本机访问；0.0.0.0 会暴露到网络，因此
+#     非回环地址必须配置密钥（否则 serve 拒绝启动）。
 # 可选写法 / optional form:
 #RKLLM_HOST=0.0.0.0
-RKLLM_HOST=0.0.0.0
+RKLLM_HOST=127.0.0.1
 
 
 # -- --host legacy alias (1.3.1-15)                    default 127.0.0.1

@@ -14,7 +14,36 @@ from .cli_engine import (_apply_memory_budget, _build_supervisor,
                          _resolve_model_path)
 from .cli_env import _legacy_cli_overrides, _sampling_from_args
 
-__all__ = ["_cmd_serve"]
+__all__ = ["_cmd_serve", "_startup_banner", "_auth_banner"]
+
+
+def _auth_banner(cfg) -> str:
+    """启动横幅里的鉴权状态：必须显示**解析后**的真实状态（P1-S1）。
+
+    旧实现按 `api_key or api_key_file` 判断"是否配置"，key 文件缺失时会打印
+    "set" 而实际鉴权未启用。现在用 auth.auth_status()（与响应头/`/health` 同源）。
+    """
+    from .server.auth import auth_status
+    state = auth_status(cfg)
+    if not state["enabled"]:
+        return "disabled（未鉴权，仅允许回环监听）"
+    return "enabled（来源 %s）" % state["source"]
+
+
+def _startup_banner(cfg, model_name: str, model_class: str) -> str:
+    """构造启动横幅（抽成函数便于用真实 config 断言鉴权/绑定状态）。"""
+    return (
+        "rkllm %s 服务模型 '%s'，监听 http://%s:%d\n"
+        "  endpoints : GET /health /ready /v1/capabilities /metrics, "
+        "GET /v1/models, POST /v1/chat/completions /v1/completions /v1/reset\n"
+        "  history   : %s   api key : %s   推理进程 : %s\n"
+        "  freq lock : %s   档位 : %s   context : %d\n"
+        % (VERSION, model_name, cfg.server.bind_host, cfg.server.port,
+           "on" if cfg.model.keep_history else "off",
+           _auth_banner(cfg),
+           "in_process" if cfg.engine.mode == "in_process" else "subprocess",
+           "on" if cfg.model.freq_lock else "off",
+           model_class, cfg.model.context))
 
 
 def _cmd_serve(args) -> int:
@@ -34,28 +63,40 @@ def _cmd_serve(args) -> int:
 
     setup_logging(cfg)
     from .platform import (apply_freq_lock, cache_max_mb_for, derive_class,
-                       max_tokens_for, max_tokens_limit_for)
+                       max_tokens_limit_for)
+    from .platform.modelclass import effective_max_tokens_for
     cfg.values["model.path"] = _resolve_model_path(cfg.model.path,
                                                   cfg.model.search_dirs)
     # token 计数：有 tokenizer.json 就用精确实现，否则靠 prefill_tokens 自校准
-    from .agent.tokens import configure as _configure_tokens, stats as _token_stats
+    from .agent.tokens import configure as _configure_tokens
     _tok = _configure_tokens(cfg.model.path)
     if _tok["backend"] == "tokenizers":
         sys.stderr.write("[rkllm] token 计数：精确 tokenizer（%s）\n" % _tok["source"])
     # 档位默认只覆盖 4b/7b；仅当用户未显式配置（source=default）时套用，
-    # 显式配置永远优先。更大档位（14b/27b/未知）不内置，打印告警要求手动配置。
+    # 显式配置永远优先。P1-C2：更大档位（8b/14b/27b/未知）没有内置值，
+    # 用 effective_max_tokens_for() 的保守正数回退——绝不能把 0 传给 worker
+    # （argparse 会 exit 2，表现为"服务起不来"）。
     model_class = derive_class(cfg.model.path,
                                getattr(cfg.model, "class", "auto"))
-    if cfg.sources.get("model.max_tokens") == "default":
-        cfg.values["model.max_tokens"] = max_tokens_for(model_class)
+    # 0（未配置/显式写 0=按档位）都要换成真实正数：worker 的 argparse 不接受 0。
+    if cfg.sources.get("model.max_tokens") == "default" or not cfg.model.max_tokens:
+        cfg.values["model.max_tokens"] = effective_max_tokens_for(model_class)
     if cfg.sources.get("model.max_tokens_limit") == "default":
         cfg.values["model.max_tokens_limit"] = max_tokens_limit_for(model_class)
     if cfg.sources.get("cache.max_mb") == "default":
         cfg.values["cache.max_mb"] = cache_max_mb_for(model_class)
-    if model_class not in ("4b", "7b"):
+    if int(cfg.model.max_tokens or 0) <= 0:
         sys.stderr.write(
-            "[rkllm] 档位 %s 无内置默认（内置仅 4B/7B）；请手动配置 "
-            "model.max_tokens / max_tokens_limit / cache.max_mb\n" % model_class)
+            "[rkllm] 配置错误：model.max_tokens 必须为正整数（当前 %r）；"
+            "请在 /etc/rkllm/rkllm.toml 或 conffile 中显式配置\n"
+            % cfg.model.max_tokens)
+        return 2
+    if model_class not in ("4b", "7b"):
+        src = cfg.sources.get("model.max_tokens", "default")
+        sys.stderr.write(
+            "[rkllm] 档位 %s 无内置默认（内置仅 4B/7B）：max_tokens 生效值 %d"
+            "（来源 %s）；更大档位请按显存/上下文显式配置 model.max_tokens / "
+            "max_tokens_limit\n" % (model_class, cfg.model.max_tokens, src))
 
     use_fake = bool(getattr(args, "fake_engine", False))
     if not use_fake and not os.path.isfile(cfg.model.path):
@@ -72,25 +113,11 @@ def _cmd_serve(args) -> int:
         app.state.svc.system_prompt = args.system
     app.state.svc.default_sampling = _sampling_from_args(args)
 
-    sys.stderr.write(
-        "rkllm %s 服务模型 '%s'，监听 http://%s:%d\n"
-        "  endpoints : GET /health /ready /v1/capabilities /metrics, "
-        "GET /v1/models, POST /v1/chat/completions /v1/completions /v1/reset\n"
-        "  history   : %s   api key : %s   推理进程 : %s\n"
-        "  freq lock : %s   档位 : %s   context : %d\n"
-        % (VERSION, app.state.svc.model_name, cfg.server.bind_host,
-           cfg.server.port,
-           "on" if cfg.model.keep_history else "off",
-           "set" if (cfg.server.api_key or cfg.server.api_key_file) else "none",
-           "in_process" if cfg.engine.mode == "in_process" else "subprocess",
-           "on" if cfg.model.freq_lock else "off",
-           app.state.svc.model_class, cfg.model.context))
-    if not (cfg.server.api_key or cfg.server.api_key_file) and \
-            cfg.server.bind_host not in ("127.0.0.1", "::1", "localhost"):
-        sys.stderr.write(
-            "  WARNING   : 未设 API key 而监听 %s —— 能访问该端口的任何主机都能"
-            "使用模型。请在 /etc/default/rkllm-server 里设 RKLLM_API_KEY 并 "
-            "chmod 600。\n" % cfg.server.bind_host)
+    # 横幅里的 api key 状态来自 auth.auth_status()（解析后的真实状态）；
+    # 非回环 + 无 key 的部署已在 load_config 的 fail-closed 校验里拒绝启动，
+    # 不再"warning 后照常监听 0.0.0.0"（P1-S1）。
+    sys.stderr.write(_startup_banner(cfg, app.state.svc.model_name,
+                                     app.state.svc.model_class))
 
     tls = bool(cfg.server.tls_cert and cfg.server.tls_key)
     try:

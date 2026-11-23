@@ -177,7 +177,7 @@ def _completion_payload(svc, pipe: Pipeline, result: dict,
 def completions(body: CompletionRequest, request: Request):
     """legacy completions：prompt 直喂 runtime（设计 §4.1 native）。
 
-    流式与非流式同 chat 端点语义；信封为 text_completion（delta.text）。
+    流式与非流式同 chat 语义；流式用 legacy text + cmpl- id（P1-O1）。
     """
     svc = _svc(request)
     raw = body.model_dump()
@@ -241,9 +241,13 @@ def completions(body: CompletionRequest, request: Request):
 
 
 def _stream_completions(request: Request, svc, pipe: Pipeline, raw: dict):
-    """text_completion 信封的 SSE 生成器（无 role、无 trailing_frames）。"""
+    """text_completion 信封的 SSE 生成器（无 role、无 trailing_frames）。
+
+    `legacy=True`：帧形状是 OpenAI legacy completions——`choices[0].text`
+    而非 `delta.text`，id 前缀 `cmpl-`（与非流式 completions 一致）。
+    """
     session = SseSession(model=svc.model_name,
                          object_name="text_completion",
-                         delta_field="text")
+                         delta_field="text", legacy=True)
     return stream_events(request, svc, pipe, session, raw,
                          first_role=None, trailing=False)

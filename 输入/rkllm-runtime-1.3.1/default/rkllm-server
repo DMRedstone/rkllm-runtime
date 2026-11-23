@@ -1,5 +1,16 @@
+# /etc/default/rkllm-server - rkllm-server.service 的最小启动集
+# Minimal startup set. Parsed by systemd (EnvironmentFile=), not by a shell:
+# one KEY=value per line, no $(), no `export`.
+#
+# 安全默认（P1-S1）：默认只监听本机回环地址。值为空表示"未配置"。
+# 若要对外提供服务：把 RKLLM_HOST 改成 0.0.0.0 的同时**必须**配置
+# RKLLM_API_KEY（或 TOML 的 server.api_key_file）；"非回环地址 + 无 key"
+# 现在会直接拒绝启动（fail-closed），不再只是 warning。
+#
+# 其余模型/运行参数见 /etc/default/rkllm-server-example 与
+# /etc/rkllm/rkllm.toml（优先级：内置默认 < TOML < rkllm-server.d < 本文件
+# 环境变量 < 命令行）。
 RKLLM_MODEL=
-RKLLM_HOST=0.0.0.0
+RKLLM_HOST=127.0.0.1
 RKLLM_PORT=8080
-RKLLM_CORS_ORIGIN=
 RKLLM_EXTRA_ARGS=

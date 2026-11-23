@@ -14,6 +14,7 @@ from ... import caps
 from ...platform import npu_status
 from ...agent.tokens import stats as _token_stats
 from ...agent.pipeline import CONTEXT_MARGIN_TOKENS
+from ..auth import auth_status
 from ..cacheview import cache_stats as _cache_stats
 
 router = APIRouter()
@@ -23,6 +24,18 @@ v1_router = APIRouter()
 
 def _svc(request: Request):
     return request.app.state.svc
+
+
+def _auth_state(request: Request) -> dict:
+    """`/health` 里的鉴权状态（P1-S1）：与启动横幅/响应头同源，绝不含 key。
+
+    鉴权启用时 /health 本身要求 Bearer；这里再报 enabled/source 供客户端确认
+    "带对了 key"，未启用时也能直接看出"当前无鉴权、只允许回环"。
+    """
+    state = getattr(request.app.state, "auth", None)
+    if isinstance(state, dict):
+        return dict(state)
+    return auth_status(_svc(request).cfg)
 
 
 def _hist_stats(hist, endpoint: str) -> tuple[float | None, int]:
@@ -119,6 +132,8 @@ def health(request: Request):
         "npu": {"available": npu_ok, "detail": npu_detail},
         # 设计 §6.4(4)：缓存命中与占用对运维可见
         "cache": _cache_stats(svc.cfg),
+        # 鉴权真实状态（P1-S1）：enabled/source/bind_host/loopback_only
+        "auth": _auth_state(request),
         # token 计数状态：backend=tokenizers（精确）/estimate（自校准估算）
         "tokens": _token_stats(),
         # 实测性能 + 能力上限：客户端据此判断同步/异步与预算，不再自带档位表

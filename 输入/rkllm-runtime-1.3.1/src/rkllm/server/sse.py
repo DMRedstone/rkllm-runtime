@@ -1,4 +1,10 @@
-"""SSE 帧工具：固定 id/created（修 D4）、心跳、错误帧、[DONE]（D9）。"""
+"""SSE 帧工具：固定 id/created（修 D4）、心跳、错误帧、[DONE]（D9）。
+
+P1-O1（2026-11-23）：`/v1/completions` 走的是 OpenAI **legacy** completions
+契约——流式 choice 用 `text` 字段（chat 才是 `delta`），且 id 用 `cmpl-`
+前缀（与非流式 `/v1/completions` 一致）。`legacy=True` 打开该信封；chat
+的 `chatcmpl-` / `delta` 行为保持不变。
+"""
 
 from __future__ import annotations
 
@@ -12,22 +18,31 @@ __all__ = ["SseSession"]
 class SseSession:
     """一次 completion 的 SSE 状态：id/created 全程一致（D4）。
 
-    `object_name` / `delta_field` 区分两种 OpenAI 信封：chat 是
-    chat.completion.chunk + delta.content；completions 是
-    text_completion + delta.text（无 role 首帧）。
+    两种信封：
+
+    - chat：`object=chat.completion.chunk`，choice 为
+      `{"index", "delta": {...}, "finish_reason"}`，首帧带 `role`；
+    - legacy completions（`legacy=True`）：`object=text_completion`，choice 为
+      `{"text", "index", "logprobs", "finish_reason"}`，**没有 delta**，
+      首帧只有空 `text`（无 role）；usage-only 帧的 `choices` 为空数组
+      （OpenAI `stream_options.include_usage` 的文档形状）。
     """
 
     def __init__(self, completion_id: str | None = None, model: str = "rkllm",
                  reasoning_field: str = "reasoning_content",
                  object_name: str = "chat.completion.chunk",
-                 delta_field: str = "content"):
-        self.id = completion_id or ("chatcmpl-" + id(self).__format__("x"))
+                 delta_field: str = "content", *, legacy: bool = False,
+                 id_prefix: str | None = None):
+        if id_prefix is None:
+            id_prefix = "cmpl-" if legacy else "chatcmpl-"
+        self.id = completion_id or (id_prefix + id(self).__format__("x"))
         self.created = int(time.time())
         self.model = model
         # openai.reasoning_field：reasoning_content（DeepSeek 约定）/reasoning/none
         self.reasoning_field = reasoning_field
         self.object_name = object_name
         self.delta_field = delta_field
+        self.legacy = legacy
         self.index = 0
 
     def first_frame(self, role: str | None = "assistant") -> str:
@@ -66,13 +81,28 @@ class SseSession:
     def done(self) -> str:
         return "data: [DONE]\n\n"
 
+    def _choice(self, delta: dict, finish_reason: str | None) -> dict:
+        if not self.legacy:
+            return {"index": self.index, "delta": delta,
+                    "finish_reason": finish_reason}
+        # legacy completions：文本直接放 choice.text；OpenAI 每个 choice 都带
+        # logprobs（本 runtime 不产出 logprobs，按契约给 null）。
+        return {"text": delta.get(self.delta_field, "") or "",
+                "index": self.index, "logprobs": None,
+                "finish_reason": finish_reason}
+
     def _frame(self, delta: dict, finish_reason: str | None,
                usage: dict | None = None) -> str:
+        if self.legacy and usage is not None:
+            # usage-only 帧：OpenAI 文档 "choices field will always be an
+            # empty array"；客户端（含 openai-python）据此区分 token 帧。
+            choices: list[dict] = []
+        else:
+            choices = [self._choice(delta, finish_reason)]
         chunk: dict[str, Any] = {
             "id": self.id, "object": self.object_name,
             "created": self.created, "model": self.model,
-            "choices": [{"index": self.index, "delta": delta,
-                         "finish_reason": finish_reason}],
+            "choices": choices,
         }
         if usage is not None:
             chunk["usage"] = usage

@@ -30,7 +30,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .. import VERSION
-from .auth import make_auth_middleware
+from .auth import auth_status, make_auth_middleware
 from .errors import install_handlers as install_error_handlers
 from .logsetup import request_id_var
 from .state import ServiceState
@@ -65,10 +65,16 @@ def create_app(cfg=None, *, supervisor=None) -> FastAPI:
                   lifespan=lifespan)
     svc = ServiceState(cfg, supervisor=supervisor) if cfg else None
     app.state.svc = svc
+    # 解析后的鉴权状态（P1-S1）：启动横幅、响应头、/health 共用同一份事实，
+    # 不再用"配置了 key 文件"冒充"已鉴权"。
+    app.state.auth = None
 
     if cfg is not None and svc is not None:
         # -- 鉴权（最内层）--------------------------------------------------
+        # 即使未启用鉴权也挂中间件：它负责在响应头标注 enabled/disabled；
+        # 构造时 strict 解析 key 文件，文件在 load_config 后消失也会拒绝启动。
         auth = make_auth_middleware(cfg)
+        app.state.auth = getattr(auth, "auth_state", None) or auth_status(cfg)
         if auth is not None:
             app.middleware("http")(auth)
 

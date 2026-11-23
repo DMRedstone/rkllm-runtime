@@ -15,6 +15,8 @@ import posixpath
 import re
 import sys
 import tarfile
+from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,6 +55,242 @@ def ok(check: str, message: str = "") -> None:
 
 def warn(check: str, message: str) -> None:
     record("WARN", check, message)
+
+
+# ---------------------------------------------------------------- changelog
+# Debian changelog structure (Policy 4.4):
+#
+#     <package> (<version>) <distribution>; urgency=<level>
+#
+#       * change
+#
+#      -- Maintainer Name <email>  Day, DD Mon YYYY HH:MM:SS +ZZZZ
+#
+# dpkg only compares the *first* entry with control, so a history that renders
+# to two identical versions (the 1.3.1-21 duplicate-@VERSION@ bug) still
+# installs and then misleads every reviewer who reads the packaged changelog.
+# The parser and validator below are shared with release_check.py: the template
+# and the packaged changelog.Debian.gz are both checked with the same rules.
+CHANGELOG_HEADER_RE = re.compile(
+    r"^(?P<package>[a-z0-9][a-z0-9+.-]*) \((?P<version>[^()\s]+)\) "
+    r"(?P<distribution>[^;]+); urgency=(?P<urgency>[a-z]+)$")
+CHANGELOG_TRAILER_RE = re.compile(r"^ -- (?P<who>.+?)  (?P<date>\S.*)$")
+CHANGELOG_EMAIL_RE = re.compile(r"<(?P<email>[^<>@\s]+@[^<>\s]+)>")
+CHANGELOG_VERSION_RE = re.compile(
+    r"^(?P<upstream>\d+(?:\.\d+)*)-(?P<revision>\d+)$")
+
+
+@dataclass
+class ChangelogEntry:
+    """One changelog stanza, with the pieces the validators need."""
+
+    header: str
+    package: str
+    version: str
+    distribution: str
+    urgency: str
+    line_no: int                     # 1-based line of the version header
+    blank_after_header: bool         # Debian wants a blank line after it
+    body: list[str]                  # change lines (header/trailer stripped)
+    trailer: str | None              # " -- Maintainer <email>  <date>"
+    trailer_line_no: int | None
+
+
+def parse_changelog(text: str) -> tuple[list[ChangelogEntry], list[str]]:
+    """Split a Debian changelog into entries and structural problems.
+
+    Tolerant by design: every malformed thing that can be named is returned as
+    a problem string instead of raising, so both callers can report a batch.
+    """
+    entries: list[ChangelogEntry] = []
+    problems: list[str] = []
+    current: dict | None = None
+
+    def finish() -> None:
+        nonlocal current
+        if current is None:
+            return
+        raw = current["lines"]                 # list[(line_no, text)]
+        while raw and not raw[-1][1].strip():
+            raw.pop()
+        trailer = None
+        trailer_line_no = None
+        cut = len(raw)
+        for index, (line_no, line) in enumerate(raw):
+            if CHANGELOG_TRAILER_RE.match(line):
+                if trailer is not None:
+                    problems.append(
+                        "entry %s: more than one maintainer/date trailer "
+                        "(line %d)" % (current["version"], line_no))
+                    break
+                trailer, trailer_line_no, cut = line, line_no, index
+                break
+        if current["version"] == "@VERSION@":
+            version_note = "@VERSION@ (unrendered template)"
+        else:
+            version_note = current["version"]
+        after = [line for _, line in raw[cut + 1:] if line.strip()]
+        if trailer is not None and after:
+            problems.append(
+                "entry %s: content after the maintainer/date trailer "
+                "(line %d)" % (version_note, raw[cut + 1][0]))
+        # A second trailer buried in the body is still a split mistake.
+        for line_no, line in raw[:cut]:
+            if CHANGELOG_TRAILER_RE.match(line):
+                problems.append(
+                    "entry %s: multiple ' -- ...' trailer lines (line %d)"
+                    % (version_note, line_no))
+                break
+        raw = raw[:cut]
+        blank_after_header = bool(raw) and not raw[0][1].strip()
+        body = [line for _, line in (raw[1:] if blank_after_header else raw)]
+        entries.append(ChangelogEntry(
+            header=current["header"],
+            package=current["package"],
+            version=current["version"],
+            distribution=current["distribution"],
+            urgency=current["urgency"],
+            line_no=current["line_no"],
+            blank_after_header=blank_after_header,
+            body=body,
+            trailer=trailer,
+            trailer_line_no=trailer_line_no,
+        ))
+        current = None
+
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        match = CHANGELOG_HEADER_RE.match(line)
+        if match:
+            finish()
+            current = {
+                "header": line,
+                "line_no": line_no,
+                "package": match.group("package"),
+                "version": match.group("version"),
+                "distribution": match.group("distribution").strip(),
+                "urgency": match.group("urgency"),
+                "lines": [],
+            }
+        elif current is not None:
+            current["lines"].append((line_no, line))
+        elif line.strip():
+            problems.append(
+                "text before the first version header (line %d): %r"
+                % (line_no, line[:70]))
+    finish()
+    if not entries:
+        problems.append(
+            "no version header found (expected "
+            "'<package> (<version>) <distribution>; urgency=<level>')")
+    return entries, problems
+
+
+def _changelog_version_key(version: str):
+    """(upstream tuple, revision int) so 1.3.1-9 < 1.3.1-10; None if unknown."""
+    match = CHANGELOG_VERSION_RE.match(version)
+    if not match:
+        return None
+    return (tuple(int(part) for part in match.group("upstream").split(".")),
+            int(match.group("revision")))
+
+
+def _debian_date(value: str):
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed is None or parsed.tzinfo is None:
+        return None
+    return parsed
+
+
+def validate_changelog(entries: list[ChangelogEntry], *,
+                       expected_package: str | None = None,
+                       expected_version: str | None = None) -> list[str]:
+    """Check the parsed entries against the Debian changelog contract.
+
+    Returns a list of human readables problems; empty means valid. This is the
+    one implementation used by release_check.py (rendered template) and by the
+    packaged-deb validation below, so both ends cannot drift apart.
+    """
+    problems: list[str] = []
+    if not entries:
+        return ["no changelog entries to validate"]
+
+    for entry in entries:
+        where = "entry %s (line %d)" % (entry.version, entry.line_no)
+        if expected_package and entry.package != expected_package:
+            problems.append("%s: package is %r, expected %r"
+                            % (where, entry.package, expected_package))
+        if not entry.distribution:
+            problems.append("%s: empty distribution" % where)
+        if not entry.blank_after_header:
+            problems.append(
+                "%s: the version header must be followed by a blank line" % where)
+        if not any(line.strip() for line in entry.body):
+            problems.append("%s: no change lines between header and trailer" % where)
+        for line in entry.body:
+            if not line.strip():
+                continue
+            if "\t" in line:
+                problems.append("%s: tab character in a change line" % where)
+                break
+            if not line.startswith("  "):
+                problems.append(
+                    "%s: change line does not start with two spaces (%r)"
+                    % (where, line[:70]))
+                break
+        if entry.version == "@VERSION@":
+            problems.append(
+                "%s: unrendered @VERSION@ header - the template must be "
+                "substituted before packaging" % where)
+        elif not CHANGELOG_VERSION_RE.match(entry.version):
+            problems.append(
+                "%s: version is not '<upstream>-<revision>' (%r)"
+                % (where, entry.version))
+        if entry.trailer is None:
+            problems.append(
+                "%s: missing the mandatory ' -- Maintainer <email>  <date>' "
+                "trailer" % where)
+            continue
+        match = CHANGELOG_TRAILER_RE.match(entry.trailer)
+        assert match is not None  # parse_changelog only records matching lines
+        who = match.group("who").strip()
+        date = match.group("date").strip()
+        if not CHANGELOG_EMAIL_RE.search(who):
+            problems.append(
+                "%s: trailer maintainer has no '<email>' (%r)"
+                % (where, who[:70]))
+        if _debian_date(date) is None:
+            problems.append(
+                "%s: trailer date is not a Debian date (%r)"
+                % (where, date[:70]))
+
+    # 单调、无重复：版本序列必须严格递减，第一个条目就是当前版本。
+    if expected_version is not None and entries[0].version != expected_version:
+        problems.append(
+            "top changelog version is %r, expected %r"
+            % (entries[0].version, expected_version))
+    seen: set[str] = set()
+    previous_key = None
+    previous_version = None
+    for entry in entries:
+        if entry.version in seen:
+            problems.append(
+                "duplicate changelog version %s (line %d)"
+                % (entry.version, entry.line_no))
+            continue
+        seen.add(entry.version)
+        key = _changelog_version_key(entry.version)
+        if key is not None and previous_key is not None:
+            if key >= previous_key:
+                problems.append(
+                    "version sequence is not strictly decreasing: %s (line %d) "
+                    "appears after %s" % (entry.version, entry.line_no,
+                                          previous_version))
+        if key is not None:
+            previous_key, previous_version = key, entry.version
+    return problems
 
 
 # ---------------------------------------------------------------- ar reading
@@ -758,27 +996,43 @@ def check_data(members: dict[str, bytes], control_info: dict) -> None:
         # --- version single-source consistency -------------------------------
         # control / changelog / packaged DEFAULT_VERSION must agree; otherwise a
         # revision bump leaves a package that reports a different version at
-        # runtime than dpkg thinks it installed.
+        # runtime than dpkg thinks it installed. The changelog is checked in
+        # full: dpkg would accept a duplicated or non-monotonic history, but the
+        # packaged file is what a reviewer reads, so every entry must be a real
+        # Debian stanza with its own maintainer/date trailer.
         package = control_info["fields"].get("Package", "")
         control_version = control_info["fields"].get("Version", "")
         changelog_rel = "usr/share/doc/%s/changelog.Debian.gz" % package
         if changelog_rel in regulars:
             try:
-                text = gzip.decompress(
+                changelog_text = gzip.decompress(
                     tf.extractfile(regulars[changelog_rel]).read()
                 ).decode("utf-8", "replace")
-                first = text.splitlines()[0] if text.splitlines() else ""
             except (OSError, EOFError) as exc:
                 fail("changelog readable", str(exc))
             else:
-                m = re.match(r"%s \(([^)]+)\)" % re.escape(package), first)
-                if not m:
-                    fail("changelog top version", first[:80])
-                elif m.group(1) != control_version:
-                    fail("changelog top version",
-                         f"{m.group(1)} != control {control_version}")
+                entries, problems = parse_changelog(changelog_text)
+                problems += validate_changelog(
+                    entries, expected_package=package,
+                    expected_version=control_version)
+                leftover = sorted(set(
+                    re.findall(r"@[A-Z][A-Z0-9_]*@", changelog_text)))
+                if leftover:
+                    problems.append(
+                        "unsubstituted placeholder(s) in the packaged changelog: "
+                        "%s" % leftover[:5])
+                if problems:
+                    for problem in problems[:6]:
+                        fail("changelog structure", problem)
+                    if len(problems) > 6:
+                        fail("changelog structure",
+                             "%d more problem(s); see release_check.py for the "
+                             "full list" % (len(problems) - 6))
                 else:
-                    ok("changelog top version", m.group(1))
+                    ok("changelog structure",
+                       "%d entries %s .. %s, versions strictly decreasing, "
+                       "every entry has a maintainer/date trailer"
+                       % (len(entries), entries[0].version, entries[-1].version))
         else:
             fail("changelog present", changelog_rel)
 

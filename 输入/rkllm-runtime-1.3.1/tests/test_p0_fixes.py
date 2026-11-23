@@ -118,28 +118,58 @@ def test_completions_nonstream_reports_length(client):
     assert r.json()["usage"]["completion_tokens"] == 7   # exact counts 生效
 
 
+def _sse_frames(body: str) -> list[dict]:
+    """解析 SSE 的 data 帧（不含 [DONE]）。"""
+    return [json.loads(line[6:]) for line in body.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"]
+
+
 def test_completions_stream_uses_text_completion_envelope(client):
+    """P1-O1：legacy completions 流式 choice 是 `text`，不是 chat 的 `delta`。
+
+    旧断言固化的是错误形状（`choices[0].delta == {"text": ""}`），标准
+    OpenAI 客户端（openai-python 的 CompletionChoice.text 必填）会解析失败。
+    """
     r = client.post("/v1/completions",
                     json={"prompt": "你好", "stream": True})
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
-    frames = [json.loads(line[6:]) for line in r.text.splitlines()
-              if line.startswith("data: ") and line != "data: [DONE]"]
+    frames = _sse_frames(r.text)
     assert frames, "SSE 无数据帧"
     assert all(f["object"] == "text_completion" for f in frames)
-    assert frames[0]["choices"][0]["delta"] == {"text": ""}   # 无 role 首帧
-    text = "".join(f["choices"][0]["delta"].get("text", "")
-                   for f in frames)
+    # id：cmpl- 前缀（与非流式 completions 一致）、全流一致
+    assert all(f["id"].startswith("cmpl-") for f in frames)
+    assert len({f["id"] for f in frames}) == 1
+    assert len({f["created"] for f in frames}) == 1
+    # 首帧：空 text、无 role、无 delta；所有帧都必须是 legacy text 形状
+    first = frames[0]["choices"][0]
+    assert first["text"] == "" and first["finish_reason"] is None
+    assert "role" not in first and "delta" not in first
+    assert all("delta" not in choice
+               for f in frames for choice in f["choices"])
+    assert all("text" in choice
+               for f in frames for choice in f["choices"])
+    text = "".join(f["choices"][0]["text"] for f in frames)
     assert text == "你好"
     assert frames[-1]["choices"][0]["finish_reason"] == "stop"
     assert r.text.rstrip().endswith("data: [DONE]")
 
 
 def test_completions_stream_include_usage(client):
+    """include_usage：usage-only 帧在 finish 之后、[DONE] 之前，choices 为空。"""
     r = client.post("/v1/completions",
                     json={"prompt": "你好", "stream": True,
                           "stream_options": {"include_usage": True}})
-    frames = [json.loads(line[6:]) for line in r.text.splitlines()
-              if line.startswith("data: ") and line != "data: [DONE]"]
-    usage_frames = [f for f in frames if f.get("usage")]
-    assert usage_frames and usage_frames[-1]["usage"]["completion_tokens"] == 7
+    frames = _sse_frames(r.text)
+    usage_frames = [f for f in frames if "usage" in f]
+    assert len(usage_frames) == 1
+    usage_frame = usage_frames[0]
+    # OpenAI 文档：额外的 usage 帧 choices 恒为空数组
+    assert usage_frame["choices"] == []
+    assert usage_frame["usage"]["completion_tokens"] == 7
+    assert usage_frame["id"].startswith("cmpl-")
+    finish_at = next(i for i, f in enumerate(frames)
+                     if f["choices"]
+                     and f["choices"][0]["finish_reason"] is not None)
+    assert frames.index(usage_frame) > finish_at
+    assert r.text.rstrip().endswith("data: [DONE]")

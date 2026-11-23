@@ -2,8 +2,14 @@
 
 设计要点：
 - 所有影响行为的参数必须进表；代码中不得出现魔法数（协议常量与安全下限除外）。
-- 优先级：内置默认 < 配置文件 < `.d` 目录 < 环境变量（RKLLM_*）< 命令行。
+- 优先级：内置默认 < 配置文件（TOML）< `.d` 目录 < 环境变量（RKLLM_*）< 命令行。
+  其中 `.d` 与 env 的非空值都会覆盖 TOML；但**空值语义分层**（2026-11-20 审核
+  P1-C1）：`.d` 里的空串对 str/list 视为"未配置"（不覆盖、不清空 TOML），env 里
+  的空串仍是"显式清空"（旧 conffile `RKLLM_SERVER_API_KEY=` 依赖它）。打包的
+  `default/rkllm-server.d/10-model.conf` 因此不再存在任何生效赋值，只留注释示例。
 - 启动校验：类型、范围、互斥项；错误一次性列出并拒绝启动（不再静默回退）。
+  serve 路径（require_model_path=True）额外做 P1-S1 安全 fail-closed 校验：
+  api_key_file 不可用拒绝启动；非回环地址 + 无 key 拒绝启动。
 - 纯 stdlib（tomllib 为 3.13 内置）：客户端连接器零第三方依赖的前提。
 - 键计数由 tests/test_config.py 守住：server 13 + model 13 + engine 10 + queue 5
   + openai 9 + cache 5 + mcp 22 + logging 5 + metrics 2 = 84。
@@ -367,18 +373,20 @@ class _SectionView:
             raise AttributeError(key) from None
 
 
-def _overrides(key: Key, raw: Any) -> bool:
+def _overrides(key: Key, raw: Any, *, empty_clears: bool = True) -> bool:
     """该来源（`.d` / env）的值是否参与覆盖。
 
-    空串对 **str/list** 键是"显式清空上游层"（如 `RKLLM_SERVER_API_KEY=` 关掉
-    TOML 里的 key），对数值/布尔键则是"未设置"——旧 conffile 里 `RKLLM_PORT=`
-    这类空值不能变成校验错误（2026-11-20 审计）。
+    空串对 **str/list** 键：env 来源是"显式清空上游层"（如
+    `RKLLM_SERVER_API_KEY=` 关掉 TOML 里的 key）；**`.d` 来源不是**——drop-in
+    是部署级补充，空值应等同"未配置"（systemd EnvironmentFile 约定），否则打包的
+    `10-model.conf` 里 `RKLLM_LOGGING_FILE=` 会把运维在 TOML 里写的值清空
+    （2026-11-20 审核 P1-C1）。数值/布尔键空值一律"未设置"。
     """
     if raw is None:
         return False
     if raw != "":
         return True
-    return key.type in (str, list)
+    return empty_clears and key.type in (str, list)
 
 
 def _coerce(key: Key, raw: Any, origin: str, errors: list[str]) -> Any:
@@ -453,7 +461,8 @@ def _load_dropins(directory: str) -> dict[str, str]:
     """读取 `/etc/default/rkllm-server.d/*.conf`（KEY=value，与 conffile 同格式）。
 
     按文件名排序，后文件覆盖先文件；目录不存在返回空 dict（旧部署零变化）。
-    只增加一层文件来源，不改变原有环境变量 / TOML 的读取与校验语义。
+    与 env 层的唯一差别：**空值视为"未配置"**（不覆盖也不清空 TOML），见
+    `_overrides()`——drop-in 是部署级"补充覆盖"，不是清空手段（P1-C1）。
     """
     out: dict[str, str] = {}
     try:
@@ -505,8 +514,12 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
                 require_model_path: bool = False) -> Config:
     """按 优先级 default < file(TOML) < .d < env < cli 装配配置并整体校验。
 
-    require_model_path：serve 子命令置 True；config 命令与客户端连接器置 False
-    （model.path 仅板端推理需要）。
+    `.d` 与 env 的非空值覆盖 TOML；`.d` 的空串视为"未配置"（P1-C1），env 的空串
+    对 str/list 仍是显式清空（旧 conffile 兼容）。详见 `_overrides()`。
+
+    require_model_path：serve 子命令置 True；同时启用 P1-S1 安全 fail-closed
+    校验（api_key_file 必须可用；非回环地址必须有 key）。config 命令与客户端
+    连接器置 False（model.path 仅板端推理需要，也允许先排障再修 safe 配置）。
     """
     env = dict(os.environ if env is None else env)
     errors: list[str] = []
@@ -569,11 +582,13 @@ def load_config(*, file: str | None = None, cli: dict[str, Any] | None = None,
         raw = section_data
         if key.name in raw:
             value, source = _coerce(key, raw[key.name], "file", errors), "file"
-        # 空串语义（2026-11-20 审计）：str/list 键用空值 = 显式清空上游层
-        # （如 `RKLLM_SERVER_API_KEY=` 关掉 TOML 里的 key）；数值/布尔键空值
-        # 无意义，仍按"未设置"跳过，保持旧 conffile 的容错。
+        # 空串语义分层（2026-11-20 审核 P1-C1）：
+        # - `.d`：空值 = "未配置"，不得清空 TOML（打包的 10-model.conf 曾用
+        #   `RKLLM_LOGGING_FILE=` 等空串把运维的 TOML 配置清掉）；
+        # - env：空值对 str/list 仍是"显式清空上游层"（旧 conffile 的
+        #   `RKLLM_SERVER_API_KEY=` 依赖它）；数值/布尔键空值一律"未设置"。
         drop_val = dropin.get(key.env)
-        if _overrides(key, drop_val):
+        if _overrides(key, drop_val, empty_clears=False):
             value, source = _coerce(key, drop_val, ".d", errors), ".d"
         env_val = env.get(key.env)
         if _overrides(key, env_val):
@@ -618,6 +633,12 @@ def _cross_validate(values: dict[str, Any], errors: list[str],
             and hb_timeout < 2 * hb_interval:
         errors.append("engine.heartbeat_timeout_s 必须 ≥ 2 × "
                       "engine.heartbeat_interval_s（否则缺一次心跳即误杀 worker）")
+    # P1-S1 安全 fail-closed（仅 serve 路径）：api_key_file 不可用即拒绝启动；
+    # 非回环地址无 key 即拒绝启动（不能只 warning 后把模型暴露到局域网）。
+    # 放在这里而不是 cli_serve：serve / 未来其它起服务入口共用同一道校验。
+    if require_model_path:
+        from .server.auth import security_errors
+        errors.extend(security_errors(Config(values=values)))
 
 
 # ---------------------------------------------------------------------------

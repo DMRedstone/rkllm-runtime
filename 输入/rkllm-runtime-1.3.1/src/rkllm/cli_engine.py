@@ -46,9 +46,16 @@ def _apply_memory_budget(cfg) -> None:
                          % (cfg.model.context, plan.context))
         cfg.values["model.context"] = plan.context
 def _build_supervisor(cfg, *, use_fake: bool):
-    from .platform import derive_class, max_tokens_for, resolve_platform
+    from .platform import derive_class, resolve_platform
+    # P1-C2：无内置档位（8b/14b/27b/未知）不能把 0 传给 worker 的 argparse，
+    # 否则 worker exit 2，表现为"服务起不来"。effective_max_tokens_for 恒 > 0，
+    # 显式配置的 model.max_tokens 仍然优先（0 视为"未配置"）。
+    from .platform.modelclass import effective_max_tokens_for
     model_class = derive_class(cfg.model.path, getattr(cfg.model, "class", "auto"))
-    max_tokens = cfg.model.max_tokens or max_tokens_for(model_class)
+    max_tokens = int(cfg.model.max_tokens or effective_max_tokens_for(model_class))
+    if max_tokens <= 0:                     # 防御：任何路径都不许把 0 下发给 worker
+        raise SystemExit("[rkllm] model.max_tokens 必须为正整数（当前 %r）"
+                         % max_tokens)
     # model.platform=auto 必须解析成实际 SoC：worker 用平台名选 CPU 大小核
     # （engine.py 的 BIG_CORE_PLATFORMS 判断），"auto" 会落到小核、慢 3-4 倍。
     platform = resolve_platform(cfg.model.platform)

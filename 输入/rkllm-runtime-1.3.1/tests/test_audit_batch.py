@@ -55,6 +55,8 @@ def test_auth_required_when_key_set():
     assert c.get("/metrics").status_code == 401
     ok = c.get("/health", headers={"Authorization": "Bearer secret-token"})
     assert ok.status_code == 200
+    assert ok.json()["auth"]["enabled"] is True
+    assert ok.json()["auth"]["source"] == "api_key"
     bad = c.get("/health", headers={"Authorization": "Bearer wrong"})
     assert bad.status_code == 401
 
@@ -65,9 +67,22 @@ def test_auth_ready_is_exempt():
     assert c.get("/health").status_code == 401     # 数据面仍受保护
 
 
-def test_auth_disabled_when_key_empty():
-    c = _client()                                   # 与 1.3.1-15 行为一致
-    assert c.get("/health").status_code == 200
+def test_auth_disabled_when_key_empty_defaults_to_loopback():
+    """2026-11-20 P1-S1 调整：空 key 不再"随便监听"。
+
+    新决策：默认只绑 127.0.0.1（打包 conffile 也已改为回环）；未鉴权状态必须
+    在 /health 与响应头里如实可见。非回环 + 无 key 由 load_config 拒绝启动，
+    见 tests/test_p1_security_config.py。
+    """
+    cfg = load_config(env={})
+    assert cfg.server.bind_host == "127.0.0.1"
+    c = _client()
+    resp = c.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["auth"]["enabled"] is False
+    assert body["auth"]["source"] == "none"
+    assert resp.headers["X-RKLLM-Auth"] == "disabled"
 
 
 def test_auth_key_file_preferred(tmp_path):
